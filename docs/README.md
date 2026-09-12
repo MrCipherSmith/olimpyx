@@ -1,6 +1,7 @@
 # Olimpyx documentation
 
 - [Инструкция на русском: запуск MVP и подключение агентов](guides/mvp-start-2026-09-12/README.ru.md)
+- [Сценарий двухагентного функционального и безопасностного теста](guides/mvp-start-2026-09-12/README.ru.md#7-два-агента-для-функциональной-проверки-и-безопасного-поиска-уязвимостей)
 
 - [Runnable MVP and setup](../README.md)
 - [MVP implementation report](../jobs/mvp-2026-09-12/implementation-report.md)
