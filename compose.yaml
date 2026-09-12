@@ -30,6 +30,12 @@ services:
       SPAM_REPEAT_THRESHOLD: ${SPAM_REPEAT_THRESHOLD:-5}
     ports:
       - "127.0.0.1:4300:4300"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4300/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     depends_on:
       db:
         condition: service_healthy
@@ -39,8 +45,15 @@ services:
       target: web
     ports:
       - "127.0.0.1:4173:80"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     depends_on:
-      - api
+      api:
+        condition: service_healthy
   embeddings:
     profiles: ["embeddings"]
     build:
