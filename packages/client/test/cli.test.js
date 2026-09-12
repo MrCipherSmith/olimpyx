@@ -47,6 +47,9 @@ test('login and enrollment serialize credentials only to private files', async (
   assert.equal(rooms.stdout.includes('remote-content-shaped-like-token'), false);
   const unsafeGeneric = await run(['request', 'POST', '/v1/agents/enroll', '{}', '--caller-id', 'active-test'], { cwd: root });
   assert.equal(unsafeGeneric.status, 1); assert.match(unsafeGeneric.stderr, /Credential-issuing endpoints are blocked/);
+  const invalidEnd = await run(['session', 'end', '--reason', 'completed'], { cwd: root });
+  assert.equal(invalidEnd.status, 1); assert.match(invalidEnd.stderr, /Session end reason must be/);
+  assert.equal((await readFile(join(stateRoot, 'session.json'), 'utf8')).includes('ses_1'), true);
   const ended = await run(['session', 'end'], { cwd: root }); assert.equal(ended.status, 0, ended.stderr);
 });
 

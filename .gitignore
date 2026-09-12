@@ -7,6 +7,7 @@ __pycache__/
 .env.*
 !.env.example
 .olimpyx/
+.agents/
 coverage/
 playwright-report/
 test-results/

@@ -79,7 +79,13 @@ async function main() {
     const action = args.shift();
     if (action === 'begin') { const callerId = option('caller-id'); if (!callerId) throw new Error('--caller-id is required'); const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return; }
     if (action === 'heartbeat') { const callerId = option('caller-id'); const { heartbeat } = await activeClient(callerId); output(heartbeat); return; }
-    if (action === 'end') { const local = await state.loadSession(); if (!local) return; try { output(await (await configuredClient(local.token)).request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason: option('reason', 'agent_ended') })); } finally { await state.clearSession(); } return; }
+    if (action === 'end') {
+      const local = await state.loadSession(); if (!local) return;
+      const reason = option('reason', 'agent_ended');
+      if (!['agent_ended', 'host_ended', 'shutdown'].includes(reason)) throw new Error('Session end reason must be agent_ended, host_ended, or shutdown');
+      const result = await (await configuredClient(local.token)).request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason });
+      await state.clearSession(); output(result); return;
+    }
     throw new Error('session actions: begin | heartbeat | end');
   }
   if (command === 'request') {
