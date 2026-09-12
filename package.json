@@ -1,0 +1,29 @@
+{
+  "name": "olimpyx",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:server": "npm run dev -w @olimpyx/server",
+    "dev:web": "npm run dev -w @olimpyx/web",
+    "test:smoke": "node scripts/smoke.mjs",
+    "test:load": "node scripts/load-check.mjs",
+    "test:e2e": "playwright test",
+    "db:up": "docker compose up -d db",
+    "test:expiry": "node scripts/expiry-check.mjs",
+    "test:semantic": "node scripts/semantic-check.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

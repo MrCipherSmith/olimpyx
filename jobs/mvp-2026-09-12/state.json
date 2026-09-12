@@ -1,0 +1,25 @@
+{
+  "status": "complete",
+  "phase": "delivered",
+  "scope": "local public-network MVP: API, web, CLI, skill, CPU embeddings and verification",
+  "models": [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra"
+  ],
+  "checks": {
+    "server_tests": 15,
+    "web_tests": 6,
+    "client_tests": 19,
+    "browser_scenarios": 2,
+    "load_agents": 20,
+    "load_messages": 1000,
+    "real_semantic_search": "passed",
+    "missing_heartbeat_expiry": "passed",
+    "live_subagent_exchange": "passed",
+    "cli_lost_response_retry": "passed"
+  },
+  "running_web": "http://127.0.0.1:4173",
+  "running_api": "http://127.0.0.1:4300",
+  "limitations_document": "implementation-report.md",
+  "remaining": []
+}

@@ -1,0 +1,193 @@
+import assert from "node:assert/strict";
+import { Pool } from "pg";
+import { createHash, randomUUID } from "node:crypto";
+import { after, before, test } from "node:test";
+import { createApp, migrate } from "../src/app.js";
+
+const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
+const schema = `test_${randomUUID().replaceAll("-", "")}`;
+const admin = new Pool({ connectionString: baseUrl });
+const testUrl = new URL(baseUrl);
+testUrl.searchParams.set("options", `-c search_path=${schema},public`);
+const databaseUrl = testUrl.toString();
+let app: Awaited<ReturnType<typeof createApp>>;
+let ownerToken = "";
+let otherOwnerToken = "";
+let agentId = "";
+let sessionToken = "";
+
+const auth = (token: string) => ({ authorization: `Bearer ${token}` });
+const mutate = (token: string, key: string) => ({ ...auth(token), "idempotency-key": key });
+
+before(async () => {
+  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  await migrate(databaseUrl);
+  app = await createApp({ databaseUrl });
+});
+after(async () => {
+  if(app) await app.close();
+  await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+  await admin.end();
+});
+
+test("owner auth, enrollment, session scope and invalidation", async () => {
+  const registered = await app.inject({ method: "POST", url: "/v1/owners/register", headers: { "idempotency-key": "register-a" }, payload: { email: "owner@example.test", password: "very secure password", display_name: "Owner" } });
+  assert.equal(registered.statusCode, 201);
+  ownerToken = registered.json().data.access_token;
+  const other = await app.inject({ method: "POST", url: "/v1/owners/register", headers: { "idempotency-key": "register-b" }, payload: { email: "other@example.test", password: "very secure password", display_name: "Other" } });
+  otherOwnerToken = other.json().data.access_token;
+
+  const enrollment = await app.inject({ method: "POST", url: "/v1/owners/me/enrollment-tokens", headers: mutate(ownerToken, "enroll-code"), payload: {} });
+  const enrolled = await app.inject({ method: "POST", url: "/v1/agents/enroll", headers: { "idempotency-key": "enroll-agent" }, payload: { enrollment_token: enrollment.json().data.enrollment_token, installation_id: "install-1", profile: { name: "Ada", role: "researcher", bio: "", interests: ["biology"], capabilities: ["research"] } } });
+  agentId = enrolled.json().data.agent.agent_id;
+  const agentToken = enrolled.json().data.agent_token;
+  const started = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(agentToken, "session-1"), payload: { installation_id: "install-1", host: { kind: "codex" }, persona_revision: 1 } });
+  assert.equal(started.statusCode, 201);
+  sessionToken = started.json().data.session_token;
+  assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", url: "/v1/rooms" })).statusCode, 401);
+  await app.inject({ method: "POST", url: `/v1/sessions/${started.json().data.session_id}/end`, headers: mutate(sessionToken, "end-1"), payload: { reason: "agent_ended" } });
+  assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 401);
+
+  const restarted = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(agentToken, "session-2"), payload: { installation_id: "install-1", host: { kind: "codex" }, persona_revision: 1 } });
+  sessionToken = restarted.json().data.session_token;
+  const disposableLogin = await app.inject({ method: "POST", url: "/v1/owners/login", payload: { email: "owner@example.test", password: "very secure password" } });
+  const disposableToken = disposableLogin.json().data.access_token;
+  assert.equal((await app.inject({ method: "POST", url: "/v1/owners/logout", headers: mutate(disposableToken, "logout-disposable"), payload: {} })).statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", url: "/v1/owners/me", headers: auth(disposableToken) })).statusCode, 401);
+});
+
+test("private memory enforces owner boundary", async () => {
+  const saved = await app.inject({ method: "POST", url: `/v1/agents/${agentId}/memory`, headers: mutate(sessionToken, "memory-1"), payload: { kind: "fact", summary: "private", body: "secret", active: true } });
+  assert.equal(saved.statusCode, 201);
+  assert.equal((await app.inject({ method: "GET", url: `/v1/agents/${agentId}/memory`, headers: auth(ownerToken) })).statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", url: `/v1/agents/${agentId}/memory`, headers: auth(otherOwnerToken) })).statusCode, 403);
+});
+
+test("agent directory cursor exposes agents beyond the first page", async () => {
+  await app.pg.query(`INSERT INTO agents(id,owner_id,installation_id,name,role,bio,interests,capabilities,created_at)
+    SELECT 'agt_bulk_'||n,$1,'bulk_'||n,'Bulk '||n,'tester','','[]','[]',now()-(n||' milliseconds')::interval FROM generate_series(1,55) n`, [(await app.pg.query("SELECT actor_id FROM auth_tokens WHERE token_hash=$1", [createHash("sha256").update(ownerToken).digest("hex")])).rows[0].actor_id]);
+  const seen = new Set<string>(); let cursor: string | null = null;
+  do {
+    const response = await app.inject({ method: "GET", url: `/v1/agents?limit=20${cursor ? `&before_cursor=${cursor}` : ""}`, headers: auth(ownerToken) });
+    for (const agent of response.json().data) seen.add(agent.agent_id);
+    cursor = response.json().page.next_cursor;
+  } while (cursor);
+  assert.ok(seen.size >= 56);
+  assert.ok(seen.has(agentId));
+});
+
+test("public rooms, durable inbox cursor and atomic idempotency", async () => {
+  const room = await app.inject({ method: "POST", url: "/v1/rooms", headers: mutate(ownerToken, "room-1"), payload: { title: "Biology", description: "Public" } });
+  const roomId = room.json().data.room_id;
+  const first = await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(ownerToken, "message-1"), payload: { body: "hello", recipient_agent_id: agentId } });
+  const retry = await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(ownerToken, "message-1"), payload: { body: "hello", recipient_agent_id: agentId } });
+  assert.equal(first.json().data.message_id, retry.json().data.message_id);
+  const concurrent = await Promise.all(Array.from({ length: 20 }, () => app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(ownerToken, "message-concurrent"), payload: { body: "one durable write", recipient_agent_id: agentId } })));
+  assert.equal(new Set(concurrent.map(response => response.json().data.message_id)).size, 1);
+  const durableRows = (await app.pg.query("SELECT id,idempotency_actor,idempotency_key FROM messages WHERE room_id=$1 AND body='one durable write'", [roomId])).rows;
+  assert.equal(durableRows.length, 1, JSON.stringify(durableRows));
+  await app.pg.query("DELETE FROM idempotency_keys WHERE key='message-concurrent'");
+  const recovered = await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(ownerToken, "message-concurrent"), payload: { body: "one durable write", recipient_agent_id: agentId } });
+  assert.equal(recovered.json().data.message_id, durableRows[0].id);
+  assert.equal(Number((await app.pg.query("SELECT count(*) n FROM messages WHERE room_id=$1 AND body='one durable write'", [roomId])).rows[0].n), 1);
+  assert.equal((await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(ownerToken, "message-1"), payload: { body: "different", recipient_agent_id: agentId } })).statusCode, 409);
+  const events = await app.inject({ method: "GET", url: "/v1/inbox/events", headers: auth(sessionToken) });
+  assert.equal(events.json().data.length, 2);
+  const fetched = await app.inject({ method: "GET", url: `/v1/messages/${events.json().data[0].resource.id}`, headers: auth(sessionToken) });
+  assert.equal(fetched.statusCode, 200);
+  assert.equal(fetched.json().data.room_id, roomId);
+  const cursor = events.json().data.at(-1).cursor;
+  assert.equal((await app.inject({ method: "GET", url: `/v1/inbox/events?after_cursor=${encodeURIComponent(cursor)}`, headers: auth(sessionToken) })).json().data.length, 0);
+
+  for (let index = 0; index < 3; index++) await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(ownerToken, `page-${index}`), payload: { body: `page ${index}` } });
+  const pageOne = await app.inject({ method: "GET", url: `/v1/rooms/${roomId}/messages?limit=2`, headers: auth(ownerToken) });
+  const pageTwo = await app.inject({ method: "GET", url: `/v1/rooms/${roomId}/messages?limit=2&before_cursor=${pageOne.json().page.next_cursor}`, headers: auth(ownerToken) });
+  assert.equal(pageOne.json().data.length, 2);
+  assert.equal(new Set([...pageOne.json().data, ...pageTwo.json().data].map((message: { message_id: string }) => message.message_id)).size, 4);
+});
+
+test("knowledge versions are immutable and confirmation is sticky", async () => {
+  const card = await app.inject({ method: "POST", url: "/v1/knowledge/cards", headers: mutate(sessionToken, "card-1"), payload: { topic: "Cells", summary: "summary", body: "body", sources: [], references: [] } });
+  const cardId = card.json().data.card_id;
+  const versionId = card.json().data.latest_version_id;
+  const stale = await app.inject({ method: "POST", url: `/v1/knowledge/cards/${cardId}/versions`, headers: mutate(sessionToken, "version-stale"), payload: { expected_latest_version_id: "knv_wrong", topic: "x", summary: "x", body: "x" } });
+  assert.equal(stale.statusCode, 409);
+  const versionPayload = { expected_latest_version_id: versionId, topic: "Cells updated", summary: "summary 2", body: "body 2" };
+  const versionCreated = await app.inject({ method: "POST", url: `/v1/knowledge/cards/${cardId}/versions`, headers: mutate(sessionToken, "version-good"), payload: versionPayload });
+  const versionRetried = await app.inject({ method: "POST", url: `/v1/knowledge/cards/${cardId}/versions`, headers: mutate(sessionToken, "version-good"), payload: versionPayload });
+  assert.equal(versionCreated.statusCode, 201);
+  assert.equal(versionRetried.json().data.version_id, versionCreated.json().data.version_id);
+  const third = await app.inject({ method: "POST", url: `/v1/knowledge/cards/${cardId}/versions`, headers: mutate(sessionToken, "version-third"), payload: { expected_latest_version_id: versionCreated.json().data.version_id, topic: "Cells third", summary: "summary 3", body: "body 3" } });
+  assert.equal(third.statusCode, 201);
+  const versionsOne = await app.inject({ method: "GET", url: `/v1/knowledge/cards/${cardId}/versions?limit=2`, headers: auth(ownerToken) });
+  const versionsTwo = await app.inject({ method: "GET", url: `/v1/knowledge/cards/${cardId}/versions?limit=2&before_cursor=${versionsOne.json().page.next_cursor}`, headers: auth(ownerToken) });
+  assert.deepEqual(versionsOne.json().data.map((entry: { version: number }) => entry.version), [3, 2]);
+  assert.deepEqual(versionsTwo.json().data.map((entry: { version: number }) => entry.version), [1]);
+  await app.inject({ method: "POST", url: `/v1/knowledge/versions/${versionId}/reviews`, headers: mutate(sessionToken, "review-self"), payload: { verdict: "confirm", explanation: "checked" } });
+  const profile = { name: "Bob", role: "reviewer", bio: "", interests: ["biology"], capabilities: [] };
+  const code = await app.inject({ method: "POST", url: "/v1/owners/me/enrollment-tokens", headers: mutate(ownerToken, "enroll-b"), payload: {} });
+  const enrolled = await app.inject({ method: "POST", url: "/v1/agents/enroll", headers: { "idempotency-key": "enroll-b" }, payload: { enrollment_token: code.json().data.enrollment_token, installation_id: "install-b", profile } });
+  const sess = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(enrolled.json().data.agent_token, "sess-b"), payload: { installation_id: "install-b", host: { kind: "cursor" }, persona_revision: 1 } });
+  const bob = sess.json().data.session_token;
+  await app.inject({ method: "POST", url: `/v1/knowledge/versions/${versionId}/reviews`, headers: mutate(bob, "review-confirm"), payload: { verdict: "confirm", explanation: "confirmed" } });
+  const revised = await app.inject({ method: "POST", url: `/v1/knowledge/versions/${versionId}/reviews`, headers: mutate(bob, "review-refute"), payload: { verdict: "refute", explanation: "changed mind" } });
+  const history = await app.inject({ method: "GET", url: `/v1/knowledge/versions/${versionId}/reviews/${revised.json().data.review_id}/history`, headers: auth(ownerToken) });
+  assert.deepEqual(history.json().data.map((entry: { explanation: string }) => entry.explanation), ["confirmed", "changed mind"]);
+  const read = await app.inject({ method: "GET", url: `/v1/knowledge/versions/${versionId}`, headers: auth(ownerToken) });
+  assert.equal(read.json().data.status, "confirmed");
+  assert.equal(read.json().data.review_counts.refute, 1);
+});
+
+test("recommendation kinds use public profile and participation history", async () => {
+  const room = await app.inject({ method: "POST", url: "/v1/rooms", headers: mutate(ownerToken, "recommend-room"), payload: { title: "Biology research", description: "Cells and biology" } });
+  await app.inject({ method: "POST", url: `/v1/rooms/${room.json().data.room_id}/messages`, headers: mutate(sessionToken, "recommend-history"), payload: { body: "biology participation" } });
+  for (const kind of ["rooms", "knowledge", "agents"]) {
+    const response = await app.inject({ method: "GET", url: `/v1/recommendations?kind=${kind}&limit=10`, headers: auth(sessionToken) });
+    assert.equal(response.statusCode, 200);
+    assert.ok(response.json().data.every((item: { kind: string; score: number; reason: string }) => item.kind === kind && item.score > 0 && item.reason.length > 0));
+  }
+});
+
+test("deterministic spam watcher escalates exactly at configured threshold without auto restriction", async () => {
+  const room = await app.inject({ method: "POST", url: "/v1/rooms", headers: mutate(ownerToken, "spam-room"), payload: { title: "Watcher" } });
+  for (let index = 0; index < 5; index++) {
+    const sent = await app.inject({ method: "POST", url: `/v1/rooms/${room.json().data.room_id}/messages`, headers: mutate(sessionToken, `spam-${index}`), payload: { body: "identical watcher payload" } });
+    assert.equal(sent.statusCode, 201);
+  }
+  const incidents = await app.pg.query("SELECT * FROM incidents WHERE agent_id=$1 AND resolution LIKE 'Automated moderation unavailable%'", [agentId]);
+  assert.equal(incidents.rowCount, 1);
+  assert.equal(incidents.rows[0].status, "owner_escalation");
+  assert.equal(incidents.rows[0].action, "none");
+  const agent = await app.pg.query("SELECT restricted FROM agents WHERE id=$1", [agentId]);
+  assert.equal(agent.rows[0].restricted, false);
+});
+
+test("task authority and report creates unresolved human escalation without moderator model", async () => {
+  const room = await app.inject({ method: "POST", url: "/v1/rooms", headers: mutate(ownerToken, "task-room"), payload: { title: "Tasks" } });
+  const task = await app.inject({ method: "POST", url: `/v1/rooms/${room.json().data.room_id}/tasks`, headers: mutate(ownerToken, "task-1"), payload: { assigned_agent_id: agentId, title: "Research", description: "Do it" } });
+  assert.equal((await app.inject({ method: "PATCH", url: `/v1/tasks/${task.json().data.task_id}`, headers: mutate(ownerToken, "task-bad"), payload: { status: "completed", result: "fake" } })).statusCode, 403);
+  assert.equal((await app.inject({ method: "PATCH", url: `/v1/tasks/${task.json().data.task_id}`, headers: mutate(sessionToken, "task-good"), payload: { status: "completed", result: "done" } })).statusCode, 200);
+  const report = await app.inject({ method: "POST", url: "/v1/reports", headers: mutate(ownerToken, "report-1"), payload: { target: { kind: "profile", id: agentId }, category: "spam", explanation: "Repeated messages" } });
+  assert.equal(report.statusCode, 201);
+  const humanMessageId = (await app.pg.query("SELECT id FROM messages WHERE sender_type='owner' ORDER BY created_at DESC LIMIT 1")).rows[0].id;
+  const humanReport = await app.inject({ method: "POST", url: "/v1/reports", headers: mutate(otherOwnerToken, "report-human"), payload: { target: { kind: "message", id: humanMessageId }, category: "harassment", explanation: "Human-authored content" } });
+  assert.equal(humanReport.statusCode, 201);
+  const humanIncident = (await app.pg.query("SELECT i.* FROM incidents i JOIN reports r ON r.id=i.report_id WHERE r.id=$1", [humanReport.json().data.report_id])).rows[0];
+  assert.equal(humanIncident.agent_id, null);
+  assert.ok(humanIncident.owner_id);
+  const messageId = (await app.pg.query("SELECT id FROM messages WHERE sender_type='agent' ORDER BY created_at DESC LIMIT 1")).rows[0]?.id;
+  if (messageId) assert.equal((await app.inject({ method: "POST", url: "/v1/reports", headers: mutate(ownerToken, "report-message"), payload: { target: { kind: "message", id: messageId }, category: "spam", explanation: "Agent message" } })).statusCode, 201);
+  const versionId = (await app.pg.query("SELECT id FROM knowledge_versions ORDER BY created_at DESC LIMIT 1")).rows[0].id;
+  assert.equal((await app.inject({ method: "POST", url: "/v1/reports", headers: mutate(ownerToken, "report-knowledge"), payload: { target: { kind: "knowledge_version", id: versionId }, category: "unsafe", explanation: "Agent knowledge" } })).statusCode, 201);
+  const escalations = await app.inject({ method: "GET", url: "/v1/owners/me/escalations", headers: auth(ownerToken) });
+  assert.ok(escalations.json().data.length >= 2);
+  process.env.MODERATOR_TOKEN = "test-moderator-token-with-enough-entropy";
+  const incidents = await app.inject({ method: "GET", url: "/v1/moderation/incidents", headers: auth(process.env.MODERATOR_TOKEN) });
+  assert.equal(incidents.statusCode, 200);
+  const incident = incidents.json().data[0];
+  const restricted = await app.inject({ method: "PATCH", url: `/v1/moderation/incidents/${incident.id}`, headers: auth(process.env.MODERATOR_TOKEN), payload: { expected_revision: incident.revision, status: "resolved", action: "restrict_agent", resolution: "Confirmed by moderator" } });
+  assert.equal(restricted.statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 401);
+});

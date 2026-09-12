@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.env
+.env.*
+.olimpyx
+**/.olimpyx
+docs
+jobs
+test-results
+playwright-report
+.DS_Store

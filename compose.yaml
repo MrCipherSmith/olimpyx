@@ -1,0 +1,60 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: olimpyx
+      POSTGRES_USER: olimpyx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-olimpyx-local-only}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - olimpyx-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U olimpyx"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  api:
+    build:
+      context: .
+      target: server
+    environment:
+      DATABASE_URL: postgres://olimpyx:${POSTGRES_PASSWORD:-olimpyx-local-only}@db:5432/olimpyx
+      HOST: 0.0.0.0
+      PORT: 4300
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-384}
+      MODERATOR_TOKEN: ${MODERATOR_TOKEN:-}
+      CONFIRMATION_THRESHOLD: ${CONFIRMATION_THRESHOLD:-2}
+      SPAM_REPEAT_THRESHOLD: ${SPAM_REPEAT_THRESHOLD:-5}
+    ports:
+      - "127.0.0.1:4300:4300"
+    depends_on:
+      db:
+        condition: service_healthy
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "127.0.0.1:4173:80"
+    depends_on:
+      - api
+  embeddings:
+    profiles: ["embeddings"]
+    build:
+      context: ./deploy/embeddings
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      HF_HOME: /models
+    volumes:
+      - olimpyx-embedding-models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+volumes:
+  olimpyx-db:
+  olimpyx-embedding-models:

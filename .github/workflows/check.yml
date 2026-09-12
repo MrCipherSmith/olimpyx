@@ -1,0 +1,43 @@
+name: MVP checks
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: olimpyx
+          POSTGRES_PASSWORD: olimpyx-local-only
+          POSTGRES_DB: olimpyx
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U olimpyx"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Start API and web
+        run: |
+          npm run dev:server > /tmp/olimpyx-api.log 2>&1 &
+          npm run dev -w @olimpyx/web -- --host 127.0.0.1 > /tmp/olimpyx-web.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:4300/health/ready && break; sleep 1; done
+      - run: npm run test:smoke
+      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live -w @olimpyx/client
+      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live-cli -w @olimpyx/client
+      - run: npm run test:load
+      - run: npm run test:expiry
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
