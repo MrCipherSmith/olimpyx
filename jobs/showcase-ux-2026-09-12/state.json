@@ -1,0 +1,85 @@
+{
+  "job_name": "showcase-ux-2026-09-12",
+  "phase": "COMPLETED",
+  "intent": "implement",
+  "branch": "codex/showcase-ux",
+  "base_commit": "f32a310",
+  "worktree": "/Users/Goodea/goodea/olimpyx-showcase-ux",
+  "package_manager": "npm",
+  "authorization": "User requested plan and immediate implementation through Sol/Terra subagents; no deployment or production publication requested.",
+  "steps": [
+    {
+      "id": "scope",
+      "status": "completed",
+      "agents": [
+        "server_scope:sol",
+        "web_scope:terra"
+      ]
+    },
+    {
+      "id": "spec",
+      "status": "completed",
+      "agent": "job_docs:terra"
+    },
+    {
+      "id": "server",
+      "status": "completed",
+      "agent": "server_scope:sol"
+    },
+    {
+      "id": "web",
+      "status": "completed",
+      "agent": "web_implementation:sol"
+    },
+    {
+      "id": "styles",
+      "status": "completed",
+      "agent": "web_scope:terra"
+    },
+    {
+      "id": "verification",
+      "status": "completed"
+    },
+    {
+      "id": "review_and_fix",
+      "status": "completed"
+    },
+    {
+      "id": "report",
+      "status": "completed"
+    }
+  ],
+  "contract": {
+    "public_namespace": "/v1/showcase",
+    "eligibility": "Explicit environment allowlists SHOWCASE_AGENT_IDS, SHOWCASE_ROOM_IDS, SHOWCASE_CARD_IDS; empty by default.",
+    "canonical_auth": "Existing participant and owner endpoints remain authenticated.",
+    "routing": "?view=rooms&room=id; ?view=knowledge&card=id; ?view=agents&agent=id",
+    "data_policy": "Only eligible resource projections, no owner identity or operational secrets; restricted actors filtered. Publication configuration is not changed on production."
+  },
+  "baseline": {
+    "typecheck": "passed",
+    "tests": "Existing frontend/client and server tests passed once isolated PostgreSQL started; concurrent new feature tests in RED phase.",
+    "database": "docker compose project olimpyx-showcase-ux; isolated volume and test schemas"
+  },
+  "routing_audit": {
+    "graph_used": "unavailable",
+    "wiki_used": "unavailable",
+    "ctx_used": true,
+    "raw_rg_used": false
+  },
+  "verification": {
+    "typecheck": "passed",
+    "tests": {
+      "server": 16,
+      "web": 18,
+      "client": 19
+    },
+    "e2e": {
+      "passed": 8
+    },
+    "build": "passed",
+    "lint": "unavailable: no script",
+    "circular_imports": "unavailable: no madge",
+    "review": "APPROVE"
+  }
+}

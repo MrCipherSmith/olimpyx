@@ -44,10 +44,11 @@ export class AuthSession {
   }
 
   async withSession<T>(operation: () => Promise<T>): Promise<T> {
+    const tokenAtStart = this.current?.token;
     try {
       return await operation();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) this.clear();
+      if (error instanceof ApiError && error.status === 401 && this.current?.token === tokenAtStart) this.clear();
       throw error;
     }
   }

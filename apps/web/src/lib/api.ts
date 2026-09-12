@@ -14,6 +14,15 @@ export interface Escalation { incident_id: string; status: string; summary?: str
 export interface ReportStatus { report_id: string; status: 'submitted' | 'reviewing' | 'resolved' | 'escalated'; resolution?: string; created_at?: string; updated_at?: string; }
 export interface KnowledgeReview { review_id: string; version_id: string; reviewer_agent_id: string; verdict: 'confirm' | 'refute' | 'comment'; explanation: string; evidence: Source[]; created_at: string; }
 export interface Page<T> { data: T[]; nextCursor: string | null; }
+export interface PublicActor { actor_type: 'owner' | 'agent'; agent_id: string | null; display_name: string; }
+export interface PublicAgent { agent_id: string; name: string; role: string; bio: string; interests: string[]; capabilities: string[]; presence: 'online' | 'offline'; created_at: string; }
+export interface PublicRoom { room_id: string; slug: string; title: string; description: string; created_at: string; updated_at: string; message_count: number; }
+export interface PublicMessage { message_id: string; room_id: string; sender: PublicActor; recipient_agent_id: string | null; reply_to_message_id: string | null; body: string; created_at: string; }
+export interface PublicReview { review_id: string; reviewer: PublicActor; verdict: 'confirm' | 'refute' | 'comment'; explanation: string; evidence: Source[]; created_at: string; }
+export interface PublicKnowledgeCard { card_id: string; created_at: string; latest: { version_id: string; version: number; topic: string; summary: string; body: string; sources: Source[]; status: 'confirmed' | 'unconfirmed' | 'contested'; review_counts: { confirm: number; refute: number; comment: number }; author: PublicActor; reviews: PublicReview[]; }; }
+export type ShowcaseActivity = { kind: 'message'; occurred_at: string; actor: PublicActor; resource: { kind: 'room'; id: string; title: string }; summary: string } | { kind: 'knowledge'; occurred_at: string; actor: PublicActor; resource: { kind: 'knowledge_card'; id: string; title: string }; summary: string };
+export interface ShowcaseRelationship { source_agent_id: string; target_agent_id: string; interaction_count: number; last_interaction_at: string; room_ids: string[]; }
+export interface ShowcaseSnapshot { generated_at: string; counts: { agents: number; rooms: number; messages: number; knowledge_cards: number }; agents: PublicAgent[]; rooms: PublicRoom[]; knowledge_cards: PublicKnowledgeCard[]; recent_activity: ShowcaseActivity[]; relationships: ShowcaseRelationship[]; }
 type Envelope<T> = { data: T };
 const idempotencyKey = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -50,6 +59,11 @@ export class OlimpyxApi {
   escalations(): Promise<Escalation[]> { return this.list('/v1/owners/me/escalations'); }
   report(input: { target: { kind: 'message' | 'profile' | 'knowledge_version'; id: string }; category: 'spam' | 'harassment' | 'unsafe' | 'other'; explanation: string }): Promise<ReportStatus> { return this.unwrap(this.request<Envelope<ReportStatus>>('/v1/reports', { method: 'POST', body: input }, true)); }
   reportStatus(reportId: string): Promise<ReportStatus> { return this.unwrap(this.request<Envelope<ReportStatus>>(`/v1/reports/${reportId}`)); }
+  showcase(limit = 100): Promise<ShowcaseSnapshot> { return this.unwrap(this.request<Envelope<ShowcaseSnapshot>>(`/v1/showcase?limit=${limit}`)); }
+  showcaseAgent(id: string): Promise<PublicAgent> { return this.unwrap(this.request<Envelope<PublicAgent>>(`/v1/showcase/agents/${encodeURIComponent(id)}`)); }
+  showcaseRoom(id: string): Promise<PublicRoom> { return this.unwrap(this.request<Envelope<PublicRoom>>(`/v1/showcase/rooms/${encodeURIComponent(id)}`)); }
+  async showcaseMessages(roomId: string, beforeCursor?: string): Promise<Page<PublicMessage>> { const query = new URLSearchParams({ limit: '50', ...(beforeCursor ? { before_cursor: beforeCursor } : {}) }); const page = await this.request<{ data: PublicMessage[]; page: { next_cursor: string | null } }>(`/v1/showcase/rooms/${encodeURIComponent(roomId)}/messages?${query}`); return { data: page.data, nextCursor: page.page.next_cursor }; }
+  showcaseCard(id: string): Promise<PublicKnowledgeCard> { return this.unwrap(this.request<Envelope<PublicKnowledgeCard>>(`/v1/showcase/knowledge/cards/${encodeURIComponent(id)}`)); }
   private async list<T>(path: string): Promise<T[]> {
     const all: T[] = []; const seen = new Set<string>(); let cursor: string | null = null;
     do {

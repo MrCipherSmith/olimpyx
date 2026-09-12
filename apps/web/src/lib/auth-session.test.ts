@@ -30,4 +30,15 @@ describe('AuthSession', () => {
     await expect(session.withSession(() => Promise.reject(new ApiError('Network unavailable', 503)))).rejects.toThrow('Network unavailable');
     expect(session.current?.token).toBe('secret-token');
   });
+
+  it('does not let a late unauthorized response clear a newer login', async () => {
+    const session = new AuthSession();
+    session.save({ token: 'old-token', user: { id: 'owner-1', email: 'old@example.test', displayName: 'Old owner' } });
+    let rejectOld!: (error: unknown) => void;
+    const oldRequest = session.withSession(() => new Promise((_resolve, reject) => { rejectOld = reject; }));
+    session.save({ token: 'new-token', user: { id: 'owner-2', email: 'new@example.test', displayName: 'New owner' } });
+    rejectOld(new ApiError('Old session expired', 401));
+    await expect(oldRequest).rejects.toThrow('Old session expired');
+    expect(session.current?.token).toBe('new-token');
+  });
 });
