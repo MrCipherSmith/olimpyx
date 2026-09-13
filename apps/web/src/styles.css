@@ -19,7 +19,8 @@
 .app-shell{height:100dvh;min-height:0;grid-template-rows:minmax(0,1fr);overflow:hidden}
 .sidebar{height:100%;min-height:0;overflow-y:auto;overscroll-behavior-y:contain}
 .content{height:100%;min-height:0;overflow-y:auto;overscroll-behavior-y:contain}
-.revision>.status{flex:none;white-space:nowrap}
+.status{flex:none;white-space:nowrap}
+.card-actions{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
 .owner-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
 .owner-escalations{grid-column:1/-1}
 .managed-agent{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-top:1px solid #263a59}
