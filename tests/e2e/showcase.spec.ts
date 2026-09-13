@@ -72,3 +72,40 @@ test('public overview shows published work and remains usable at mobile widths',
     await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
   }
 });
+
+test('long room history scrolls inside the conversation without moving navigation', async ({ page }) => {
+  await publicFixture(page);
+  await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
+    data: Array.from({ length: 40 }, (_, i) => ({ ...message, message_id: `msg_${i}`, body: `Message ${i}: ${message.body.repeat(8)}` })),
+    page: { next_cursor: null },
+  } }));
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/?view=rooms&room=room_public');
+    const messages = page.locator('.message-list');
+    await expect(messages.locator('.message')).toHaveCount(40);
+    const sidebar = page.locator('.sidebar');
+    const heading = page.locator('.conversation-head');
+    const sidebarBefore = await sidebar.boundingBox();
+    const headingBefore = await heading.boundingBox();
+    const layout = await page.evaluate(() => ({
+      height: innerHeight, width: innerWidth,
+      documentHeight: document.documentElement.scrollHeight,
+      documentWidth: document.documentElement.scrollWidth,
+      messageHeight: document.querySelector('.message-list')!.clientHeight,
+    }));
+    expect(layout.documentHeight).toBeLessThanOrEqual(layout.height + 1);
+    expect(layout.documentWidth).toBeLessThanOrEqual(layout.width);
+    expect(layout.messageHeight).toBeGreaterThan(100);
+    await messages.hover();
+    await page.mouse.wheel(0, 1500);
+    await expect.poll(() => messages.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+    expect(await sidebar.boundingBox()).toEqual(sidebarBefore);
+    expect(await heading.boundingBox()).toEqual(headingBefore);
+    await messages.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await page.mouse.wheel(0, 1500);
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    await expect(page.getByText('Sign in to participate. Guest access is read only.')).toBeInViewport();
+    await page.screenshot({ path: `output/playwright/room-scroll-${width}.png` });
+  }
+});

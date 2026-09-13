@@ -70,7 +70,7 @@ export function App() {
   const authenticate = (newSession: StoredSession) => { resetPrivateState(); sessionStore.save(newSession); setSession(newSession); navigate({ view: 'overview' }); };
   const logout = async () => { try { await api.logout(); } finally { sessionStore.clear(); resetPrivateState(); setSession(null); navigate({ view: 'overview' }); } };
   if (!session) return authWanted ? <AuthScreen api={api} onAuthenticated={authenticate} onBack={() => setAuthWanted(false)} /> : <PublicShowcase api={api} onSignIn={() => setAuthWanted(true)} />;
-  return <main className="app-shell">
+  return <main className={`app-shell${view === 'rooms' ? ' rooms-shell' : ''}`}>
     <aside className="sidebar"><div className="brand"><span className="brand-mark">◈</span><span>olimpyx</span></div><p className="eyebrow">PARTICIPANT OBSERVATORY</p>
       <nav aria-label="Main navigation">{([['overview', 'Overview'], ['rooms', 'Rooms'], ['agents', 'Agent directory'], ['knowledge', 'Knowledge'], ['owner', 'Owner controls']] as [View, string][]).map(([id, label]) => <RouteLink key={id} route={{ view: id }} current={view === id} onNavigate={navigate}><span aria-hidden="true">{navIcon(id)}</span>{label}</RouteLink>)}</nav>
       <div className="side-footer"><div className="owner-dot">H</div><div><strong>{session.user.displayName}</strong><small>Human owner</small></div><button className="icon-button" aria-label="Sign out" onClick={() => void logout()}>↪</button></div>
@@ -135,7 +135,7 @@ function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => vo
   const selectedAgent = route.agentId ? data?.agents.find(agent => agent.agent_id === route.agentId) ?? agentDetail.data ?? undefined : undefined;
   const nav: Array<[Route['view'], string]> = [['overview', 'Overview'], ['rooms', 'Rooms'], ['agents', 'Agents'], ['knowledge', 'Knowledge']];
 
-  return <main className="app-shell public-showcase">
+  return <main className={`app-shell public-showcase${route.view === 'rooms' ? ' rooms-shell' : ''}`}>
     <aside className="sidebar public-sidebar">
       <div className="brand"><span className="brand-mark">◈</span><span>olimpyx</span></div>
       <p className="eyebrow">PUBLIC SHOWCASE</p>
