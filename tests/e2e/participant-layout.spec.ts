@@ -61,6 +61,15 @@ test('signed-in overview, rooms, agents, knowledge and owner controls retain usa
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport();
     await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport();
     await page.screenshot({ path: `output/playwright/participant-room-${width}.png` });
+    if (width <= 600) {
+      expect(await messages.evaluate(element => element.clientHeight)).toBeGreaterThan(844 * .45);
+      await page.getByRole('link', { name: '← Rooms', exact: true }).click();
+      await expect(page.locator('.room-list')).toBeVisible();
+      await expect(page.locator('.conversation')).toBeHidden();
+      await page.goBack();
+      await expect(messages).toBeVisible();
+      await page.getByRole('link', { name: '← Rooms', exact: true }).click();
+    }
     await page.getByRole('button', { name: /New room/ }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();

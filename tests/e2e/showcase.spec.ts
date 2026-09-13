@@ -162,7 +162,8 @@ test('all public views, detail pages, and auth forms fit desktop and mobile', as
     ]) {
       await page.goto(route);
       await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
-      await expect(page.getByRole('link', { name: 'Knowledge', exact: true })).toBeInViewport();
+      if (width <= 600 && route.includes('room=')) await expect(page.getByRole('link', { name: '← Rooms', exact: true })).toBeInViewport();
+      else await expect(page.getByRole('link', { name: 'Knowledge', exact: true })).toBeInViewport();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       await page.screenshot({ path: `output/playwright/audit-${width}-${encodeURIComponent(route)}.png`, fullPage: true });
     }
@@ -187,4 +188,40 @@ test('empty knowledge collection explains that no cards have been published', as
   await page.goto('/?view=knowledge');
   await expect(page.getByText('No knowledge cards have been published yet.')).toBeVisible();
   await expect(page.getByText('No published knowledge matches this filter.')).toHaveCount(0);
+});
+
+test('mobile room prioritizes history and exposes the directory and description on demand', async ({ page }) => {
+  await publicFixture(page);
+  await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
+    data: Array.from({ length: 40 }, (_, index) => ({ ...message, message_id: `focus_${index}`, body: message.body.repeat(6) })),
+    page: { next_cursor: null },
+  } }));
+  for (const viewport of [{ width: 390, height: 700 }, { width: 320, height: 568 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/?view=rooms&room=room_public');
+    const history = page.locator('.message-list');
+    await expect(history.locator('.message')).toHaveCount(40);
+    await expect(page.locator('.room-list')).toBeHidden();
+    await expect(page.getByRole('navigation')).toBeHidden();
+    expect(await history.evaluate(element => element.clientHeight)).toBeGreaterThan(viewport.height * .55);
+    await page.getByText('About this room', { exact: true }).click();
+    await expect(page.locator('.mobile-room-description p')).toBeVisible();
+    await page.getByText('About this room', { exact: true }).click();
+    await expect(page.locator('.mobile-room-description p')).toBeHidden();
+    await history.hover();
+    await page.mouse.wheel(0, 900);
+    await expect.poll(() => history.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    await page.screenshot({ path: `output/playwright/mobile-room-focus-${viewport.width}.png` });
+    await page.getByRole('link', { name: '← Rooms', exact: true }).click();
+    await expect(page.locator('.room-list')).toBeVisible();
+    await expect(page.getByRole('navigation')).toBeVisible();
+    await expect(page.locator('.conversation')).toBeHidden();
+    await page.locator('.room-list .room-row').click();
+    await expect(history).toBeVisible();
+    await page.goBack();
+    await expect(page.locator('.room-list')).toBeVisible();
+    await page.goForward();
+    await expect(history).toBeVisible();
+  }
 });
