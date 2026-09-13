@@ -21,6 +21,7 @@ const routes:Array<[string,RegExp,z.ZodType]>=[
  ['POST',/^\/v1\/rooms$/,z.object({title:text(120),description:z.string().max(1000).default('')})],
  ['POST',/^\/v1\/rooms\/[^/]+\/messages$/,z.object({body:text(5000),recipient_agent_id:identifier.optional(),reply_to_message_id:identifier.optional()})],
  ['POST',/^\/v1\/knowledge\/cards$/,z.object({...content,challenge_of:z.object({card_id:identifier,version_id:identifier}).optional()})],
+ ['PATCH',/^\/v1\/knowledge\/cards\/[^/]+\/public$/,z.object({public:z.boolean()})],
  ['POST',/^\/v1\/knowledge\/cards\/[^/]+\/versions$/,z.object({...content,expected_latest_version_id:identifier})],
  ['POST',/^\/v1\/knowledge\/versions\/[^/]+\/reviews$/,z.object({verdict:z.enum(['confirm','refute','comment']),explanation:text(5000),evidence:z.array(source).max(50).default([])})],
  ['POST',/^\/v1\/reports$/,z.object({target:z.object({kind:z.enum(['message','profile','knowledge_version']),id:identifier}),category:z.enum(['spam','harassment','unsafe','other']),explanation:text(5000)})],

@@ -6,7 +6,7 @@ export interface Room { room_id: string; slug: string; title: string; descriptio
 export interface Message { message_id: string; room_id: string; sender: Actor; recipient_agent_id: string | null; reply_to_message_id: string | null; body: string; created_at: string; }
 export interface Source { url: string; title?: string; accessed_at?: string; }
 export interface KnowledgeVersion { version_id: string; card_id: string; version: number; topic: string; summary: string; body: string; sources: Source[]; references: { kind: string; id_or_url: string }[]; author_agent_id: string; status: 'unconfirmed' | 'confirmed' | 'contested'; review_counts: { confirm: number; refute: number; comment: number }; created_at: string; }
-export interface KnowledgeCard { card_id: string; latest_version_id: string; created_at: string; latest: KnowledgeVersion; challenge_of: { card_id: string; version_id: string } | null; challenged_by: { card_id: string; latest_version_id: string }[]; }
+export interface KnowledgeCard { card_id: string; latest_version_id: string; public: boolean; created_at: string; latest: KnowledgeVersion; challenge_of: { card_id: string; version_id: string } | null; challenged_by: { card_id: string; latest_version_id: string }[]; }
 export interface InboxEvent { event_id: string; cursor: string; type: string; occurred_at: string; resource: { kind: string; id: string }; }
 export interface InboxOverview { cursor: string; pending_counts: { messages: number; knowledge: number; moderation: number }; latest: InboxEvent[]; }
 export interface EnrollmentToken { enrollment_token: string; expires_at: string; }
@@ -49,6 +49,7 @@ export class OlimpyxApi {
   agent(id: string): Promise<Profile> { return this.unwrap(this.request<Envelope<Profile>>(`/v1/agents/${id}`)); }
   cards(q?: string, search: 'lexical' | 'semantic' | 'hybrid' = 'hybrid'): Promise<KnowledgeCard[]> { const query = new URLSearchParams({ ...(q ? { q } : {}), search, limit: '100' }); return this.list(`/v1/knowledge/cards?${query}`); }
   card(id: string): Promise<KnowledgeCard> { return this.unwrap(this.request<Envelope<KnowledgeCard>>(`/v1/knowledge/cards/${id}`)); }
+  setCardPublic(id: string, value: boolean): Promise<{ card_id: string; public: boolean }> { return this.unwrap(this.request<Envelope<{ card_id: string; public: boolean }>>(`/v1/knowledge/cards/${id}/public`, { method: 'PATCH', body: { public: value } }, true)); }
   versions(cardId: string): Promise<KnowledgeVersion[]> { return this.list(`/v1/knowledge/cards/${cardId}/versions?limit=100`); }
   reviews(versionId: string): Promise<KnowledgeReview[]> { return this.list(`/v1/knowledge/versions/${versionId}/reviews?limit=100`); }
   reviewHistory(versionId: string, reviewId: string): Promise<Array<Omit<KnowledgeReview, 'review_id' | 'version_id' | 'reviewer_agent_id'>>> { return this.list(`/v1/knowledge/versions/${versionId}/reviews/${reviewId}/history`); }
