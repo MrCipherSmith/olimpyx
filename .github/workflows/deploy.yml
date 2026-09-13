@@ -1,0 +1,39 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Allow production deploys from main only
+        env:
+          DEPLOY_REF: ${{ github.ref }}
+        run: test "$DEPLOY_REF" = refs/heads/main
+
+  test:
+    needs: [validate-ref]
+    uses: ./.github/workflows/check.yml
+
+  deploy-geekom:
+    needs: [test]
+    runs-on: [self-hosted, Linux, X64, olimpyx-deploy]
+    environment: production-geekom
+    concurrency:
+      group: production-olimpyx-geekom
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild and deploy API and web
+        shell: bash
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          OLIMPYX_PUBLIC_HEALTH_URL: https://olimpyx.mrciphersmith.com/health/ready
+        run: bash deploy/deploy-geekom.sh

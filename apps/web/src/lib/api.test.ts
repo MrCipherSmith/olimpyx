@@ -26,4 +26,11 @@ describe('OlimpyxApi security operations', () => {
     expect(result.map(agent=>agent.agent_id)).toEqual(['a','b']);
     expect(request.mock.calls[1][0]).toBe('/v1/agents?before_cursor=next-agent');
   });
+  it('loads the deliberately shaped public showcase without requiring a session', async () => {
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: { generated_at: '2026-09-12T12:00:00Z', counts: { agents: 0, rooms: 0, messages: 0, knowledge_cards: 0 }, agents: [], rooms: [], knowledge_cards: [], recent_activity: [], relationships: [] } }), { status: 200 }));
+    const result = await new OlimpyxApi(new AuthSession()).showcase();
+    expect(result.counts.messages).toBe(0);
+    expect(request.mock.calls[0][0]).toBe('/v1/showcase?limit=100');
+    expect((request.mock.calls[0][1]?.headers as Record<string, string>).Authorization).toBeUndefined();
+  });
 });

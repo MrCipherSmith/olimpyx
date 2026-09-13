@@ -3,13 +3,14 @@ test('human owner registers, creates room, posts and observes persisted message'
  test.setTimeout(60000);
  const id=Date.now().toString();
  await page.goto('/');
+ await page.getByRole('button',{name:'Sign in',exact:true}).click();
  await page.getByRole('button',{name:'Need an owner account? Register'}).click();
  await page.getByLabel('Display name').fill('Browser verifier');
  await page.getByLabel('Email',{exact:true}).fill(`browser-${id}@example.test`);
  await page.getByLabel('Password',{exact:true}).fill(`Browser-check-${id}!`);
  await page.getByRole('button',{name:'Create account',exact:true}).click();
  await expect(page.getByRole('heading',{name:'Network overview'})).toBeVisible();
- await page.getByRole('button',{name:/Rooms$/}).click();
+ await page.getByRole('link',{name:'Rooms',exact:true}).click();
  await page.getByRole('button',{name:'New room'}).click();
  await page.getByLabel('Title',{exact:true}).fill(`Browser room ${id}`);
  await page.getByRole('button',{name:'Create room',exact:true}).click();
@@ -17,7 +18,7 @@ test('human owner registers, creates room, posts and observes persisted message'
  await page.getByRole('button',{name:'Send message',exact:true}).click();
  await expect(page.getByText(`Persistent browser message ${id}`,{exact:true})).toBeVisible();
  await page.reload();
- await page.getByRole('button',{name:/Rooms$/}).click();
+ await page.getByRole('link',{name:'Rooms',exact:true}).click();
  await page.getByRole('button').filter({hasText:`Browser room ${id}`}).click();
  await expect(page.getByText(`Persistent browser message ${id}`,{exact:true})).toBeVisible();
  // Populate enough history to exercise paging and the periodic refresh.
@@ -38,8 +39,9 @@ test('human owner registers, creates room, posts and observes persisted message'
  await page.locator('article').filter({hasText:`Persistent browser message ${id}`}).getByRole('button',{name:'Report',exact:true}).click();
  await expect(page.getByRole('button',{name:'Report escalated',exact:true})).toBeVisible();
  await page.getByRole('button',{name:'Report escalated',exact:true}).click();
- await page.getByRole('button',{name:/Owner controls$/}).click();
+ await page.getByRole('link',{name:'Owner controls',exact:true}).click();
  await expect(page.getByText('owner_escalation',{exact:true}).first()).toBeVisible();
  await page.getByRole('button',{name:'Sign out'}).click();
- await expect(page.getByRole('heading',{name:'Sign in to Olimpyx'})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Sign in',exact:true})).toBeVisible();
+ await expect(page.getByRole('link',{name:'Owner controls',exact:true})).toHaveCount(0);
 });

@@ -191,3 +191,89 @@ test("task authority and report creates unresolved human escalation without mode
   assert.equal(restricted.statusCode, 200);
   assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 401);
 });
+
+test("anonymous showcase exposes only explicitly allowlisted safe read models", async () => {
+  const priorShowcaseEnv = {
+    agents: process.env.SHOWCASE_AGENT_IDS,
+    rooms: process.env.SHOWCASE_ROOM_IDS,
+    cards: process.env.SHOWCASE_CARD_IDS,
+  };
+  process.env.SHOWCASE_AGENT_IDS = "";
+  process.env.SHOWCASE_ROOM_IDS = "";
+  process.env.SHOWCASE_CARD_IDS = "";
+  const empty = await app.inject({ method: "GET", url: "/v1/showcase" });
+  assert.deepEqual(empty.json().data.counts, { agents: 0, rooms: 0, messages: 0, knowledge_cards: 0 });
+  const registered = await app.inject({ method: "POST", url: "/v1/owners/register", headers: { "idempotency-key": "showcase-register" }, payload: { email: "showcase@example.com", password: "very secure password", display_name: "Showcase Owner" } });
+  assert.equal(registered.statusCode, 201);
+  const showcaseOwnerToken = registered.json().data.access_token;
+  const enrollment = await app.inject({ method: "POST", url: "/v1/owners/me/enrollment-tokens", headers: mutate(showcaseOwnerToken, "showcase-enrollment"), payload: {} });
+  assert.equal(enrollment.statusCode, 201);
+  const enrolled = await app.inject({ method: "POST", url: "/v1/agents/enroll", headers: { "idempotency-key": "showcase-agent" }, payload: { enrollment_token: enrollment.json().data.enrollment_token, installation_id: "showcase-installation", profile: { name: "Curator", role: "researcher", bio: "Public profile", interests: ["showcase"], capabilities: ["research"] } } });
+  assert.equal(enrolled.statusCode, 201);
+  const showcaseAgentId = enrolled.json().data.agent.agent_id;
+  const session = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(enrolled.json().data.agent_token, "showcase-session"), payload: { installation_id: "showcase-installation", host: { kind: "codex" }, persona_revision: 1 } });
+  assert.equal(session.statusCode, 201);
+  const showcaseSessionToken = session.json().data.session_token;
+  const room = await app.inject({ method: "POST", url: "/v1/rooms", headers: mutate(showcaseOwnerToken, "showcase-room"), payload: { title: "Public showcase", description: "A curated discussion" } });
+  assert.equal(room.statusCode, 201);
+  const roomId = room.json().data.room_id;
+  assert.equal((await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(showcaseSessionToken, "showcase-message"), payload: { body: "A public observation" } })).statusCode, 201);
+  const hiddenRoom = await app.inject({ method: "POST", url: "/v1/rooms", headers: mutate(showcaseOwnerToken, "hidden-showcase-room"), payload: { title: "Hidden", description: "Not curated" } });
+  assert.equal(hiddenRoom.statusCode, 201);
+  assert.equal((await app.inject({ method: "POST", url: `/v1/rooms/${hiddenRoom.json().data.room_id}/messages`, headers: mutate(showcaseSessionToken, "hidden-agent-message"), payload: { body: "Filtered after restriction" } })).statusCode, 201);
+  const card = await app.inject({ method: "POST", url: "/v1/knowledge/cards", headers: mutate(showcaseSessionToken, "showcase-card"), payload: { topic: "Public finding", summary: "Curated summary", body: "Curated knowledge body", sources: [{ url: "https://example.com/source", title: "Source" }], references: [] } });
+  assert.equal(card.statusCode, 201);
+  const cardId = card.json().data.card_id;
+
+  process.env.SHOWCASE_AGENT_IDS = showcaseAgentId;
+  process.env.SHOWCASE_ROOM_IDS = roomId;
+  process.env.SHOWCASE_CARD_IDS = cardId;
+  try {
+    const response = await app.inject({ method: "GET", url: "/v1/showcase" });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["cache-control"], "no-store");
+    const showcase = response.json().data;
+    assert.deepEqual(showcase.counts, { agents: 1, rooms: 1, messages: 1, knowledge_cards: 1 });
+    assert.equal(showcase.agents[0].agent_id, showcaseAgentId);
+    assert.equal(showcase.rooms[0].room_id, roomId);
+    assert.equal(showcase.knowledge_cards[0].card_id, cardId);
+    assert.ok(showcase.recent_activity.some((item: { kind: string }) => item.kind === "message"));
+    assert.equal("owner_id" in showcase.agents[0], false);
+    assert.equal("last_seen_at" in showcase.agents[0], false);
+    assert.equal("profile_revision" in showcase.agents[0], false);
+    assert.equal(JSON.stringify(showcase).includes("enrollment_token"), false);
+    assert.equal(JSON.stringify(showcase).includes("showcase@example.com"), false);
+
+    const messages = await app.inject({ method: "GET", url: `/v1/showcase/rooms/${roomId}/messages` });
+    assert.equal(messages.statusCode, 200);
+    assert.equal(messages.json().data[0].sender.agent_id, showcaseAgentId);
+    assert.equal(messages.json().data[0].sender.actor_type, "agent");
+    assert.equal((await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(showcaseOwnerToken, "showcase-owner-message-1"), payload: { body: "A public owner observation" } })).statusCode, 201);
+    assert.equal((await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(showcaseOwnerToken, "showcase-owner-message-2"), payload: { body: "Another owner observation" } })).statusCode, 201);
+    const firstPage = await app.inject({ method: "GET", url: `/v1/showcase/rooms/${roomId}/messages?limit=1` });
+    assert.equal(firstPage.json().data[0].sender.actor_type, "owner");
+    assert.equal(firstPage.json().data[0].sender.agent_id, null);
+    assert.ok(firstPage.json().page.next_cursor);
+    const secondPage = await app.inject({ method: "GET", url: `/v1/showcase/rooms/${roomId}/messages?limit=1&before_cursor=${firstPage.json().page.next_cursor}` });
+    assert.equal(secondPage.json().data.length, 1);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/showcase/rooms/${hiddenRoom.json().data.room_id}` })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: "/v1/showcase/agents/agt_not_published" })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/showcase/knowledge/cards/${cardId}` })).statusCode, 200);
+    process.env.SHOWCASE_ROOM_IDS = `${roomId},${hiddenRoom.json().data.room_id}`;
+    const limited = await app.inject({ method: "GET", url: "/v1/showcase?limit=1" });
+    assert.equal(limited.json().data.rooms.length, 1);
+    assert.equal(limited.json().data.counts.rooms, 1);
+    await app.pg.query("UPDATE agents SET restricted=true WHERE id=$1", [showcaseAgentId]);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/showcase/agents/${showcaseAgentId}` })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/showcase/knowledge/cards/${cardId}` })).statusCode, 404);
+    const restrictedAuthorRoom = await app.inject({ method: "GET", url: `/v1/showcase/rooms/${hiddenRoom.json().data.room_id}` });
+    assert.equal(restrictedAuthorRoom.statusCode, 200);
+    assert.equal(restrictedAuthorRoom.json().data.message_count, 0);
+    assert.equal((await app.inject({ method: "GET", url: "/v1/rooms" })).statusCode, 401);
+    assert.equal((await app.inject({ method: "POST", url: "/v1/rooms", payload: { title: "Anonymous mutation" } })).statusCode, 401);
+  } finally {
+    if(priorShowcaseEnv.agents===undefined)delete process.env.SHOWCASE_AGENT_IDS;else process.env.SHOWCASE_AGENT_IDS=priorShowcaseEnv.agents;
+    if(priorShowcaseEnv.rooms===undefined)delete process.env.SHOWCASE_ROOM_IDS;else process.env.SHOWCASE_ROOM_IDS=priorShowcaseEnv.rooms;
+    if(priorShowcaseEnv.cards===undefined)delete process.env.SHOWCASE_CARD_IDS;else process.env.SHOWCASE_CARD_IDS=priorShowcaseEnv.cards;
+  }
+});
