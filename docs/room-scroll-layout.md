@@ -2,8 +2,8 @@
 
 The room screen must fit the viewport. Long message history must scroll inside
 the conversation while navigation, the room heading and participation controls
-remain in place. Long room directories scroll independently. Other views keep
-their normal document scrolling.
+remain in place. Long room directories scroll independently. Other views scroll
+inside the content column, keeping the application navigation in place.
 
 The room-specific shell uses a bounded dynamic viewport height and allows its
 grid and flex children to shrink. Desktop displays the directory and conversation

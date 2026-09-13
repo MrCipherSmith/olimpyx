@@ -109,3 +109,82 @@ test('long room history scrolls inside the conversation without moving navigatio
     await page.screenshot({ path: `output/playwright/room-scroll-${width}.png` });
   }
 });
+
+test('overview metrics navigate and refresh fetches the selected conversation again', async ({ page }) => {
+  await publicFixture(page);
+  let revision = 0;
+  await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
+    data: [{ ...message, body: `History revision ${revision}` }], page: { next_cursor: null },
+  } }));
+  await page.goto('/');
+  for (const [label, view] of [['Published agents', 'agents'], ['Knowledge cards', 'knowledge'], ['Agents online now', 'agents'], ['Published rooms', 'rooms']]) {
+    await page.getByRole('button', { name: new RegExp(label) }).click();
+    await expect(page).toHaveURL(new RegExp(`view=${view}`));
+    await page.goBack();
+    await expect(page.getByRole('heading', { name: 'Network overview', exact: true })).toBeVisible();
+  }
+  await page.getByRole('link', { name: /Read the latest room/ }).click();
+  await expect(page.getByText('History revision 0', { exact: true })).toBeVisible();
+  revision = 1;
+  await page.getByRole('button', { name: /Refresh/ }).click();
+  await expect(page.getByText('History revision 1', { exact: true })).toBeVisible();
+  await expect(page.getByText('History revision 0', { exact: true })).toHaveCount(0);
+});
+
+test('agent collaborations combine both directions into one peer entry', async ({ page }) => {
+  await publicFixture(page);
+  const peer = { ...agent, agent_id: 'agt_peer', name: 'Peer reviewer' };
+  await page.route(url => url.pathname === '/v1/showcase', route => route.fulfill({ json: { data: { ...snapshot,
+    agents: [agent, peer], relationships: [
+      { source_agent_id: agent.agent_id, target_agent_id: peer.agent_id, interaction_count: 4, last_interaction_at: createdAt, room_ids: [room.room_id] },
+      { source_agent_id: peer.agent_id, target_agent_id: agent.agent_id, interaction_count: 3, last_interaction_at: createdAt, room_ids: [room.room_id] },
+    ],
+  } } }));
+  await page.goto(`/?view=agents&agent=${agent.agent_id}`);
+  await expect(page.getByRole('link', { name: peer.name, exact: true })).toHaveCount(1);
+  await expect(page.getByText(/7 interactions/)).toBeVisible();
+  await page.getByRole('link', { name: peer.name, exact: true }).click();
+  await expect(page.getByRole('heading', { name: peer.name, exact: true })).toBeVisible();
+});
+
+test('all public views, detail pages, and auth forms fit desktop and mobile', async ({ page }) => {
+  test.setTimeout(60000);
+  await publicFixture(page);
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const [route, heading] of [
+      ['/', 'Network overview'], ['/?view=rooms', 'Public rooms'],
+      ['/?view=rooms&room=room_public', room.title], ['/?view=agents', 'Agent directory'],
+      ['/?view=agents&agent=agt_public', agent.name], ['/?view=knowledge', 'Knowledge record'],
+      ['/?view=knowledge&card=knw_public', card.latest.topic],
+    ]) {
+      await page.goto(route);
+      await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
+      await expect(page.getByRole('link', { name: 'Knowledge', exact: true })).toBeInViewport();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await page.screenshot({ path: `output/playwright/audit-${width}-${encodeURIComponent(route)}.png`, fullPage: true });
+    }
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Sign in to Olimpyx' })).toBeVisible();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Email', exact: true })).toBeFocused();
+    await page.getByRole('button', { name: 'Need an owner account? Register' }).click();
+    await expect(page.getByRole('textbox', { name: 'Display name' })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    await page.getByRole('button', { name: /Back to showcase/ }).click();
+    await expect(page.getByRole('navigation', { name: 'Showcase navigation' })).toBeVisible();
+  }
+  expect(errors).toEqual([]);
+});
+
+test('empty knowledge collection explains that no cards have been published', async ({ page }) => {
+  await publicFixture(page);
+  await page.route(url => url.pathname === '/v1/showcase', route => route.fulfill({ json: {
+    data: { ...snapshot, knowledge_cards: [], counts: { ...snapshot.counts, knowledge_cards: 0 } },
+  } }));
+  await page.goto('/?view=knowledge');
+  await expect(page.getByText('No knowledge cards have been published yet.')).toBeVisible();
+  await expect(page.getByText('No published knowledge matches this filter.')).toHaveCount(0);
+});
