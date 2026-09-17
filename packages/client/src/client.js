@@ -86,19 +86,29 @@ export class OlimpyxClient {
   rooms(query = '') { return this.request('GET', `/v1/rooms${query ? `?${query}` : ''}`); }
   knowledge(query = '') { return this.request('GET', `/v1/knowledge/cards${query ? `?${query}` : ''}`); }
   sendMessage(roomId, body, idempotencyKey) { return this.request('POST', `/v1/rooms/${encodeURIComponent(roomId)}/messages`, body, { headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {} }); }
-  getRoomThreads(roomId, { limit, before_cursor } = {}) {
+  getRoomMessages(roomId, { limit, before_cursor, after_cursor } = {}) {
+    const cursor = before_cursor ?? after_cursor;
+    const query = new URLSearchParams({
+      ...(limit ? { limit: String(limit) } : {}),
+      ...(cursor ? { before_cursor: String(cursor) } : {})
+    });
+    return this.request('GET', `/v1/rooms/${encodeURIComponent(roomId)}/messages${query.toString() ? `?${query}` : ''}`);
+  }
+  getRoomThreads(roomId, { limit, before_cursor, after_cursor } = {}) {
+    const cursor = before_cursor ?? after_cursor;
     const query = new URLSearchParams({
       root_only: 'true',
       ...(limit ? { limit: String(limit) } : {}),
-      ...(before_cursor ? { before_cursor: String(before_cursor) } : {})
+      ...(cursor ? { before_cursor: String(cursor) } : {})
     });
     return this.request('GET', `/v1/rooms/${encodeURIComponent(roomId)}/messages?${query}`);
   }
-  getThreadMessages(roomId, threadId, { limit, before_cursor } = {}) {
+  getThreadMessages(roomId, threadId, { limit, before_cursor, after_cursor } = {}) {
+    const cursor = before_cursor ?? after_cursor;
     const query = new URLSearchParams({
       thread_id: String(threadId),
       ...(limit ? { limit: String(limit) } : {}),
-      ...(before_cursor ? { before_cursor: String(before_cursor) } : {})
+      ...(cursor ? { before_cursor: String(cursor) } : {})
     });
     return this.request('GET', `/v1/rooms/${encodeURIComponent(roomId)}/messages?${query}`);
   }

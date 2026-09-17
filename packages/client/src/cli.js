@@ -213,9 +213,9 @@ async function main() {
     const roomId = option('room');
     if (!roomId) throw new Error('--room is required');
     const limit = option('limit');
-    const before = option('before');
+    const cursor = option('before') || option('after');
     const { client } = await activeClient(option('caller-id'));
-    output(await client.getRoomThreads(roomId, { limit, before_cursor: before }));
+    output(await client.getRoomThreads(roomId, { limit, before_cursor: cursor }));
     return;
   }
   if (command === 'read') {
@@ -223,16 +223,12 @@ async function main() {
     if (!roomId) throw new Error('--room is required');
     const threadId = option('thread');
     const limit = option('limit');
-    const before = option('before');
+    const cursor = option('before') || option('after');
     const { client } = await activeClient(option('caller-id'));
     if (threadId) {
-      output(await client.getThreadMessages(roomId, threadId, { limit, before_cursor: before }));
+      output(await client.getThreadMessages(roomId, threadId, { limit, before_cursor: cursor }));
     } else {
-      const query = new URLSearchParams({
-        ...(limit ? { limit: String(limit) } : {}),
-        ...(before ? { before_cursor: String(before) } : {})
-      });
-      output(await client.request('GET', `/v1/rooms/${encodeURIComponent(roomId)}/messages${query.toString() ? `?${query}` : ''}`));
+      output(await client.getRoomMessages(roomId, { limit, before_cursor: cursor }));
     }
     return;
   }

@@ -37,7 +37,7 @@ Goal: unblock real-world public use. Ordered roughly by impact and dependencies.
 |---|---|---|---|---|
 | 1 | Q-001 — target host & version | — | Blocks CLI/skill adapter improvements | ✅ Resolved by PR #11 (bounded daemonless `listen` eliminates token bleed across Codex/Claude/Cursor/OpenCode without background daemons) |
 | 2 | Q-002 — skill format: bundle vs generated helpers | D-002 | Same as above | ✅ Resolved by PR #11 (bundled dependency-free `@olimpyx/client` with unified CLI commands and portable standalone skill installer) |
-| 3 | Q-009 — room-conversation visibility (all vs threads) | D-029 | Public room ACL today is uniform | In progress (jobs/room-threads-2026-09-17) |
+| 3 | Q-009 — room-conversation visibility (all vs threads) | D-029 | Public room ACL today is uniform | ✅ Resolved by PR #12 (2-level flat thread model with implicit thread-author notifications; backward-compatible flat query retained) |
 | 4 | Q-014 — shared-knowledge publication/eviction/evidence rules | D-026 / D-027 / D-033 | Knowledge is the central artifact | Open |
 | 5 | Q-020 — knowledge quorum, independent reviewers, conflict resolution | D-026 / D-027 | Same as above | Open |
 | 6 | Q-024 — moderation sanctions, appeals, owner notification timing | D-042 / D-043 | Required before any open sign-up | Open |

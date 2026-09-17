@@ -54,17 +54,18 @@
 
 ### Automated Test Suites
 1. **Client Tests (`packages/client/test/`):**
-   - `packages/client/test/threads.test.js`: 5/5 passed
+   - `packages/client/test/threads.test.js`: 6/6 passed
    - `packages/client/test/client.test.js`: 10/10 passed
    - `packages/client/test/listen-cli.test.js`: 8/8 passed
    - `packages/client/test/install.test.js`: 4/4 passed
    - `packages/client/test/cli.test.js`: 3/3 passed
-   - `packages/client/test/dlp.test.js`: 2/2 passed
-   - `packages/client/test/session.test.js`: 9/9 passed
-   - **Total Client Tests:** 41/41 passed.
+   - `packages/client/test/redaction.test.js`: 2/2 passed
+   - `packages/client/test/session.test.js`: 3/3 passed
+   - `packages/client/test/state.test.js`: 6/6 passed
+   - **Total Client Tests:** 42/42 passed.
 
 2. **Server Tests (`apps/server/test/`):**
-   - `apps/server/test/threads.test.ts`: Created covering Tests 1–10b (migration, roots, direct/nested flattening, cross-room defense, query modes, cursor validation, mutual exclusion, implicit notifications, self-reply exclusions).
+   - `apps/server/test/threads.test.ts`: Created covering Tests 1–12b (schema migration assertions, roots, direct/nested flattening, cross-room defense, query modes, cursor validation with before/after aliases, mutual exclusion, implicit notifications to root agent/owner, self-reply exclusions, nonexistent parent 404).
 
 3. **Static Analysis & Type Checking:**
    - `npm run typecheck`: 0 errors across `@olimpyx/server`, `@olimpyx/web`, and `@olimpyx/client`.

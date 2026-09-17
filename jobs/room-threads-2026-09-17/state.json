@@ -34,6 +34,12 @@
     "verification": {
       "status": "completed",
       "completed_at": "2026-09-18T00:06:30.000Z"
+    },
+    "post_review_fixes": {
+      "status": "completed",
+      "completed_at": "2026-09-18T00:53:00.000Z",
+      "ci_blocker_fixed": true,
+      "review_file": "pr12-review-summary.md"
     }
   },
   "scope": [

@@ -243,23 +243,27 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     const q=req.query as any,limit=boundedLimit(q.limit),roomId=(req.params as any).roomId;
     const isRootOnly = q.root_only === "true" || q.root_only === true;
     const threadId = q.thread_id ? String(q.thread_id) : null;
-    const before = q.before_cursor || q.before ? String(q.before_cursor ?? q.before) : null;
+    const before = q.before_cursor || q.before || q.after_cursor || q.after ? String(q.before_cursor ?? q.before ?? q.after_cursor ?? q.after) : null;
 
     if (isRootOnly && threadId) {
       return fail(reply, 400, "bad_request", "Cannot specify both root_only and thread_id");
     }
 
     if (threadId) {
-      const rootCheck = await app.pg.query(
-        "SELECT id FROM messages WHERE id = $1 AND room_id = $2 AND root_message_id IS NULL",
+      let resolvedThreadId = threadId;
+      const targetCheck = await app.pg.query(
+        "SELECT id, root_message_id FROM messages WHERE id = $1 AND room_id = $2",
         [threadId, roomId]
       );
-      if (!rootCheck.rowCount) return fail(reply, 404, "not_found", "Thread root not found in room");
+      if (!targetCheck.rowCount) return fail(reply, 404, "not_found", "Thread root not found in room");
+      if (targetCheck.rows[0].root_message_id !== null) {
+        resolvedThreadId = targetCheck.rows[0].root_message_id;
+      }
 
       if (before) {
         const cursorCheck = await app.pg.query(
           "SELECT id FROM messages WHERE id = $1 AND room_id = $2 AND (id = $3 OR root_message_id = $3)",
-          [before, roomId, threadId]
+          [before, roomId, resolvedThreadId]
         );
         if (!cursorCheck.rowCount) return fail(reply, 400, "bad_request", "Cursor does not belong to the specified thread");
       }
@@ -270,7 +274,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
            AND ($3::text IS NULL OR (m.created_at, m.id) > (SELECT created_at, id FROM messages WHERE id = $3))
          ORDER BY m.created_at ASC, m.id ASC
          LIMIT $4`,
-        [roomId, threadId, before, limit]
+        [roomId, resolvedThreadId, before, limit]
       );
       const data = r.rows.map(messageFrom);
       return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };
@@ -329,7 +333,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         if(p.type==="agent")await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`spam:${p.id}`]);
 
         let rootMessageId: string | null = null;
-        let rootAuthorAgentId: string | null = null;
+        let rootAuthor: { type: string; id: string } | null = null;
 
         if (b.reply_to_message_id) {
           const parentRes = await client.query(
@@ -348,18 +352,18 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
 
           if (parent.root_message_id === null) {
             rootMessageId = parent.id;
-            if (parent.sender_type === "agent") {
-              rootAuthorAgentId = parent.sender_id;
-            }
+            rootAuthor = { type: parent.sender_type, id: parent.sender_id };
           } else {
             rootMessageId = parent.root_message_id;
             const rootRes = await client.query(
               "SELECT sender_type, sender_id FROM messages WHERE id = $1",
               [rootMessageId]
             );
-            if (rootRes.rowCount && rootRes.rows[0].sender_type === "agent") {
-              rootAuthorAgentId = rootRes.rows[0].sender_id;
+            if (!rootRes.rowCount) {
+              await client.query("ROLLBACK");
+              return fail(reply, 404, "not_found", "Thread root message not found");
             }
+            rootAuthor = { type: rootRes.rows[0].sender_type, id: rootRes.rows[0].sender_id };
           }
         }
 
@@ -369,21 +373,23 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
            ON CONFLICT(idempotency_actor, idempotency_key) WHERE idempotency_key IS NOT NULL
            DO UPDATE SET id=messages.id
            WHERE messages.reply_to_message_id IS NOT DISTINCT FROM EXCLUDED.reply_to_message_id
+             AND messages.recipient_agent_id IS NOT DISTINCT FROM EXCLUDED.recipient_agent_id
              AND messages.body = EXCLUDED.body
            RETURNING *`,
           [mid, rid, p.type, p.id, p.name, b.recipient_agent_id ?? null, b.reply_to_message_id ?? null, rootMessageId, b.body, actorKey, idemKey]
         );
         if (!r.rowCount) {
           await client.query("ROLLBACK");
-          return fail(reply, 409, "idempotency_conflict", "Idempotency key was used with a different message body or reply_to");
+          return fail(reply, 409, "idempotency_conflict", "Idempotency key was used with a different message body, reply_to, or recipient");
         }
 
         const inserted = r.rows[0].id === mid;
         if (inserted) {
           if (b.recipient_agent_id) {
             await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), b.recipient_agent_id, mid]);
-          } else if (rootAuthorAgentId && rootAuthorAgentId !== p.id) {
-            await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), rootAuthorAgentId, mid]);
+          } else if (rootAuthor && rootAuthor.id !== p.id) {
+            const col = rootAuthor.type === "agent" ? "agent_id" : "owner_id";
+            await client.query(`INSERT INTO inbox_events(id,${col},type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)`, [id("evt"), rootAuthor.id, mid]);
           }
         }
 

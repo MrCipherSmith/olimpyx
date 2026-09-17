@@ -24,41 +24,40 @@ const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 const mutate = (token: string, key: string) => ({ ...auth(token), "idempotency-key": key });
 
 before(async () => {
-  try {
-    await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
-    await admin.query(`CREATE SCHEMA ${schema}`);
-    await migrate(databaseUrl);
-    app = await createApp({ databaseUrl });
-  } catch (err: any) {
-    if (err.code === "ECONNREFUSED" || err.message?.includes("connect ECONNREFUSED")) {
-      // Local docker postgres not running; skip db setup
-      return;
-    }
-    throw err;
-  }
+  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  await migrate(databaseUrl);
+  app = await createApp({ databaseUrl });
 });
 
 after(async () => {
   if (app) await app.close();
-  try {
-    await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
-    await admin.end();
-  } catch {}
+  await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  await admin.end();
 });
 
-test("thread hierarchy, flattening, queries, and notification routing", async (t) => {
-  if (!app) {
-    t.skip("PostgreSQL database not available locally");
-    return;
-  }
+test("thread hierarchy, flattening, queries, and notification routing", async () => {
+  // Test 1: Verify schema migration (root_message_id column and idx_messages_root index)
+  const colRes = await admin.query(
+    "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'messages' AND column_name = 'root_message_id'",
+    [schema]
+  );
+  assert.equal(colRes.rowCount, 1, "root_message_id column must exist in messages table");
+
+  const idxRes = await admin.query(
+    "SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'messages' AND indexname = 'idx_messages_root'",
+    [schema]
+  );
+  assert.equal(idxRes.rowCount, 1, "idx_messages_root index must exist on messages table");
 
   // Setup Owner, Agents Alice and Bob
   const reg = await app.inject({
     method: "POST",
     url: "/v1/owners/register",
     headers: { "idempotency-key": "reg-owner" },
-    payload: { email: `owner_${randomUUID()}@example.test`, password: "password123", display_name: "Owner" }
+    payload: { email: `owner_${randomUUID()}@example.test`, password: "very secure password", display_name: "Owner" }
   });
+  assert.equal(reg.statusCode, 201);
   ownerToken = reg.json().data.access_token;
 
   // Enroll Alice
@@ -125,6 +124,16 @@ test("thread hierarchy, flattening, queries, and notification routing", async (t
   assert.equal(root1Data.root_message_id, null);
   const root1Id = root1Data.message_id;
 
+  // Test 12b: Reply to nonexistent parent message returns HTTP 404
+  const orphanReply = await app.inject({
+    method: "POST",
+    url: `/v1/rooms/${roomId}/messages`,
+    headers: mutate(bobToken, "msg-orphan"),
+    payload: { body: "Orphan reply", reply_to_message_id: "msg_nonexistent_999" }
+  });
+  assert.equal(orphanReply.statusCode, 404);
+  assert.match(orphanReply.json().error.message, /Parent message not found/i);
+
   // Test 3: Bob directly replies to Root Message
   const reply1 = await app.inject({
     method: "POST",
@@ -161,7 +170,7 @@ test("thread hierarchy, flattening, queries, and notification routing", async (t
   assert.equal(reply2Data.reply_to_message_id, reply1Id);
   assert.equal(reply2Data.root_message_id, root1Id, "Nested reply should flatten to root1Id");
 
-  // Test 10 & 10b: Self-Reply Exclusion -> Alice should NOT receive notification for her own reply
+  // Test 10: Self-Reply Exclusion -> Alice should NOT receive notification for her own reply
   const aliceEventsAfter = await app.inject({
     method: "GET",
     url: "/v1/inbox/events",
@@ -169,6 +178,33 @@ test("thread hierarchy, flattening, queries, and notification routing", async (t
   });
   const selfEvent = aliceEventsAfter.json().data.find((e: any) => e.resource.id === reply2Data.message_id);
   assert.equal(selfEvent, undefined, "Alice should not receive an inbox event for her own message");
+
+  // Test 10b: Bob replies to Bob's reply in Alice's thread -> Alice (root author) receives notification, Bob excluded
+  const reply3 = await app.inject({
+    method: "POST",
+    url: `/v1/rooms/${roomId}/messages`,
+    headers: mutate(bobToken, "msg-reply-3"),
+    payload: { body: "Bob following up on his own point", reply_to_message_id: reply1Id }
+  });
+  assert.equal(reply3.statusCode, 201);
+  const reply3Data = reply3.json().data;
+  assert.equal(reply3Data.root_message_id, root1Id);
+
+  const aliceEventsAfter3 = await app.inject({
+    method: "GET",
+    url: "/v1/inbox/events",
+    headers: auth(aliceToken)
+  });
+  const reply3Event = aliceEventsAfter3.json().data.find((e: any) => e.resource.id === reply3Data.message_id);
+  assert.ok(reply3Event, "Alice (root author) should receive notification when Bob replies to his own reply in Alice's thread");
+
+  const bobEvents = await app.inject({
+    method: "GET",
+    url: "/v1/inbox/events",
+    headers: auth(bobToken)
+  });
+  const bobSelfEvent = bobEvents.json().data.find((e: any) => e.resource.id === reply3Data.message_id);
+  assert.equal(bobSelfEvent, undefined, "Bob should not receive notification for his own reply");
 
   // Test 5: Cross-Room Rejection -> Reply to root1Id from otherRoomId
   const crossRoom = await app.inject({
@@ -200,7 +236,7 @@ test("thread hierarchy, flattening, queries, and notification routing", async (t
   const roots = rootsQuery.json().data;
   assert.equal(roots.length, 2);
   const fetchedRoot1 = roots.find((r: any) => r.message_id === root1Id);
-  assert.equal(fetchedRoot1.reply_count, 2);
+  assert.equal(fetchedRoot1.reply_count, 3);
   assert.ok(fetchedRoot1.last_reply_at);
 
   const fetchedRoot2 = roots.find((r: any) => r.message_id === root2Id);
@@ -215,10 +251,29 @@ test("thread hierarchy, flattening, queries, and notification routing", async (t
   });
   assert.equal(threadQuery.statusCode, 200);
   const threadMessages = threadQuery.json().data;
-  assert.equal(threadMessages.length, 3);
+  assert.equal(threadMessages.length, 4);
   assert.equal(threadMessages[0].message_id, root1Id);
   assert.equal(threadMessages[1].message_id, reply1Id);
   assert.equal(threadMessages[2].message_id, reply2Data.message_id);
+  assert.equal(threadMessages[3].message_id, reply3Data.message_id);
+
+  // Test 7b: Auto-resolution when passing a reply message ID as thread_id
+  const autoResolveQuery = await app.inject({
+    method: "GET",
+    url: `/v1/rooms/${roomId}/messages?thread_id=${reply1Id}`,
+    headers: auth(aliceToken)
+  });
+  assert.equal(autoResolveQuery.statusCode, 200);
+  assert.equal(autoResolveQuery.json().data[0].message_id, root1Id);
+
+  // Test 7c: Mode C with after_cursor alias
+  const afterCursorQuery = await app.inject({
+    method: "GET",
+    url: `/v1/rooms/${roomId}/messages?thread_id=${root1Id}&after_cursor=${root1Id}`,
+    headers: auth(aliceToken)
+  });
+  assert.equal(afterCursorQuery.statusCode, 200);
+  assert.equal(afterCursorQuery.json().data[0].message_id, reply1Id);
 
   // Test 7 (Cursor Validation): Cross-thread cursor yields 400 Bad Request
   const badCursor = await app.inject({
@@ -245,5 +300,5 @@ test("thread hierarchy, flattening, queries, and notification routing", async (t
     headers: auth(aliceToken)
   });
   assert.equal(flatQuery.statusCode, 200);
-  assert.equal(flatQuery.json().data.length, 4); // root1, reply1, reply2, root2
+  assert.equal(flatQuery.json().data.length, 5); // root1, reply1, reply2, reply3, root2
 });

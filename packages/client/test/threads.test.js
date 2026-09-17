@@ -43,7 +43,7 @@ test('client SDK getRoomThreads formats query parameters correctly', async () =>
   assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?root_only=true&limit=10&before_cursor=msg_99');
 });
 
-test('client SDK getThreadMessages formats query parameters correctly', async () => {
+test('client SDK getRoomMessages formats query parameters correctly', async () => {
   let requestedUrl = '';
   const client = new OlimpyxClient({
     serverUrl: 'https://mock.test',
@@ -55,9 +55,26 @@ test('client SDK getThreadMessages formats query parameters correctly', async ()
     }
   });
 
-  const res = await client.getThreadMessages('rom_123', 'msg_root_1', { limit: 25 });
+  const res = await client.getRoomMessages('rom_123', { limit: 20, before_cursor: 'msg_50' });
   assert.deepEqual(res.data, []);
-  assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?thread_id=msg_root_1&limit=25');
+  assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?limit=20&before_cursor=msg_50');
+});
+
+test('client SDK getThreadMessages formats query parameters correctly and accepts after_cursor', async () => {
+  let requestedUrl = '';
+  const client = new OlimpyxClient({
+    serverUrl: 'https://mock.test',
+    fetchImpl: async (url) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+  });
+
+  const res = await client.getThreadMessages('rom_123', 'msg_root_1', { limit: 25, after_cursor: 'msg_reply_1' });
+  assert.deepEqual(res.data, []);
+  assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?thread_id=msg_root_1&limit=25&before_cursor=msg_reply_1');
 });
 
 test('CLI threads command requires --room and queries root messages', async () => {
@@ -161,6 +178,10 @@ test('CLI read command supports --room and --thread options', async () => {
   assert.equal(parsed.data.length, 2);
   assert.equal(parsed.data[0].message_id, 'msg_root_1');
   assert.equal(parsed.data[1].message_id, 'msg_reply_1');
+
+  // Also verify --after flag works as cursor alias
+  const afterRes = await run(['read', '--room', 'rom_1', '--thread', 'msg_root_1', '--after', 'msg_root_1', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
+  assert.equal(afterRes.status, 0, afterRes.stderr);
 
   await rm(root, { recursive: true, force: true });
 });

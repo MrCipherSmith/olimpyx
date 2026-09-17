@@ -1,0 +1,75 @@
+{
+  "reviewer": "coder-style",
+  "scope_mode": "diff",
+  "pr_number": 12,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/12",
+  "verdict": "PARTIAL",
+  "summary": "The implementation adheres strictly to the repository's dependency-free design constraints (D-001, D-002) and follows the established code style in apps/server/src/app.ts and packages/client. TypeScript types and Fastify routing match the existing codebase. The CLI and SDK expansions cleanly map to the server API. Three main code quality / architecture areas require attention: (1) Asymmetric cursor naming in forward chronological feeds: Mode C reads chronologically forward, yet only recognizes 'before_cursor'/'before'. An agent using 'after' will encounter silent pagination loops. (2) Missing SDK encapsulation: cli.js:235 executes raw HTTP calls for default room messages instead of delegating to an OlimpyxClient.getRoomMessages method, breaking symmetry with getRoomThreads and getThreadMessages. (3) Latent idempotency collision risk on recipient alteration: the SQL conflict target checks reply_to and body, but omits recipient_agent_id. In addition, sorting in Mode B departs from the PRD activity-based sort, which simplifies keyset paging but affects UX.",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "packages/client/src/cli.js:226 + packages/client/src/client.js:98-103",
+      "problem": "Mode C pagination CLI and SDK interface only accepts before/before_cursor, ignoring after/after_cursor in a forward-scrolling chronological context.",
+      "evidence": "cli.js:226 defines 'const before = option('before');' and passes it to getThreadMessages as before_cursor. In chronological threads, callers intuitively supply '--after <cursor>' (as used in /v1/inbox/events and cli.js wait/listen). Supplying --after is silently ignored, leaving before as undefined and fetching page 1 repeatedly.",
+      "suggested_fix": "Support both aliases: in cli.js:226 use 'const cursor = option('before') || option('after');', and in client.js accept '{ limit, before_cursor, after_cursor }' mapping either to the query parameter."
+    },
+    {
+      "severity": "major",
+      "location": "packages/client/src/cli.js:235 + packages/client/src/client.js:89-104",
+      "problem": "cli.js read command directly invokes client.request('GET', `/v1/rooms/...`) for flat history rather than calling an SDK client method.",
+      "evidence": "cli.js:235: 'output(await client.request('GET', `/v1/rooms/${encodeURIComponent(roomId)}/messages${query.toString() ? `?${query}` : ''}`));'. In contrast, lines 218 and 229 call client.getRoomThreads and client.getThreadMessages. This creates an abstraction leak where the CLI directly composes query strings and URLs that should be encapsulated in OlimpyxClient.",
+      "suggested_fix": "Add 'getRoomMessages(roomId, { limit, before_cursor } = {})' to OlimpyxClient in client.js, and call client.getRoomMessages(roomId, { limit, before_cursor: before }) in cli.js:235."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:293",
+      "problem": "Mode B SQL query sorts by m.created_at DESC rather than thread activity COALESCE(rep.last_reply_at, m.created_at) DESC.",
+      "evidence": "In app.ts:293, 'ORDER BY m.created_at DESC, m.id DESC'. While this allows direct keyset cursor comparison on (m.created_at, m.id), it contradicts the Slack/Discord conversational paradigm where threads with new activity bubble to the top.",
+      "suggested_fix": "Align PRD and implementation: either implement activity-based sorting with a composite keyset cursor, or document in the code and PRD why thread root creation order was selected for database pagination stability."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:345",
+      "problem": "SQL conflict clause in message insertion omits recipient_agent_id comparison.",
+      "evidence": "app.ts:345: 'WHERE messages.reply_to_message_id IS NOT DISTINCT FROM EXCLUDED.reply_to_message_id AND messages.body = EXCLUDED.body'. While idem() at the application layer hashes the full body, the database-level secondary constraint does not guard against altered recipient_agent_id in concurrent race conditions.",
+      "suggested_fix": "Include 'AND messages.recipient_agent_id IS NOT DISTINCT FROM EXCLUDED.recipient_agent_id' in the ON CONFLICT WHERE condition."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:327-336",
+      "problem": "Redundant round-trip query for root message author when replying to a nested reply.",
+      "evidence": "When parent.root_message_id is not null, app.ts:331 executes 'SELECT sender_type, sender_id FROM messages WHERE id = $1'. A single initial query joining root message details or caching the root author could avoid this extra database query.",
+      "suggested_fix": "When fetching parent, use: 'SELECT p.id, p.room_id, p.root_message_id, p.sender_type, p.sender_id, r.sender_type as root_sender_type, r.sender_id as root_sender_id FROM messages p LEFT JOIN messages r ON r.id = p.root_message_id WHERE p.id = $1'."
+    },
+    {
+      "severity": "minor",
+      "location": "skills/olimpyx-participant/SKILL.md:39",
+      "problem": "SKILL.md documentation references '--before <cursor>' for forward thread pagination, which can confuse agents expecting chronological cursor progression.",
+      "evidence": "SKILL.md line 39 states: 'For long discussions, paginate using --before <cursor>'. In forward narrative reading, passing '--before' to read newer messages is counter-intuitive.",
+      "suggested_fix": "Once '--after' alias is supported, update SKILL.md to: 'For long discussions, paginate using --after <cursor> (or --before <cursor>)'."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/cli.js:217, 227",
+      "problem": "Duplicate callerId resolution pattern in threads and read CLI subcommands.",
+      "evidence": "Both commands call 'const { client } = await activeClient(option('caller-id'));' independently.",
+      "suggested_fix": "Consistent with rest of cli.js; no immediate action required."
+    },
+    {
+      "severity": "nit",
+      "location": "jobs/room-threads-2026-09-17/report.md:64",
+      "problem": "Report mentions 41/41 client tests passing, but could explicitly differentiate between 5 thread tests and 36 pre-existing tests.",
+      "evidence": "report.md lines 56-64 list the test counts accurately, but summary text can be even more specific.",
+      "suggested_fix": "Minor documentation polish."
+    }
+  ],
+  "checks_performed": [
+    "Analyzed code style conventions across apps/server/src/app.ts and packages/client",
+    "Checked adherence to D-001 (no background daemons) and D-002 (zero external dependencies)",
+    "Audited SQL queries for parameter safety and indexing alignment",
+    "Reviewed error handling and transaction boundaries in POST /v1/rooms/:roomId/messages",
+    "Evaluated SDK method signatures and CLI option parsing consistency",
+    "Reviewed thread pagination semantics across forward and backward reading modes",
+    "Checked TypeScript types and build hygiene"
+  ]
+}
