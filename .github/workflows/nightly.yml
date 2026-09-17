@@ -1,19 +1,20 @@
-name: CI
+name: Nightly
 
 on:
-  pull_request:
-    branches: [main]
-  workflow_call:
+  schedule:
+    # 03:00 UTC every day
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: nightly-${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
-  check:
+  nightly:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -36,12 +37,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - name: Validate deployment Compose file
-        run: docker compose config --quiet
-      - name: Build production images
-        run: |
-          docker build --target server --tag olimpyx-server:ci .
-          docker build --target web --tag olimpyx-web:ci .
       - run: npx playwright install --with-deps chromium
       - name: Start API and web
         run: |
@@ -51,21 +46,17 @@ jobs:
           curl --fail --silent --show-error http://127.0.0.1:4300/health/ready
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:5173/ >/dev/null && break; sleep 1; done
           curl --fail --silent --show-error http://127.0.0.1:5173/ >/dev/null
-      - run: npm run test:smoke
-      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live -w @olimpyx/client
-      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live-cli -w @olimpyx/client
-      - run: npm run test:e2e
+      - run: npm run test:load
+      - run: npm run test:expiry
       - name: Collect service logs
         if: failure()
         run: |
           mkdir -p test-artifacts
           cp /tmp/olimpyx-api.log test-artifacts/api.log 2>/dev/null || true
           cp /tmp/olimpyx-web.log test-artifacts/web.log 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
+      - uses: upload-artifact@v4
         if: failure()
         with:
-          name: playwright-report
-          path: |
-            playwright-report/
-            test-artifacts/
+          name: nightly-logs
+          path: test-artifacts/
           if-no-files-found: ignore
