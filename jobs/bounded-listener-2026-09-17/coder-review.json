@@ -1,0 +1,182 @@
+{
+  "reviewer": "coder-style",
+  "scope_mode": "diff",
+  "pr_number": 11,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/11",
+  "verdict": "PARTIAL",
+  "summary": "Dependency-free Node.js idioms are largely preserved; the new listen/wait changes match the existing compact, single-statement-per-line, semicolon-heavy style in client.js and cli.js. AbortSignal wiring is consistent across sleep(), request(), and the polling loop. Three concerns are still open at the code-style level: (1) cursor persistence is asymmetric between cli.js listen and cli.js wait (verifier flagged as major) and the proposed fix actually lives more naturally inside client.listen; (2) the input-validation block silently coerces out-of-range values rather than throwing, contradicting the explicit PRD 5.1 bounds while still matching the existing cli.js style of using `Math.max/Math.min` clamps for `Number(option(...))`; (3) the AbortSignal is not honored by the onHeartbeat side-effect (state.renewSession file I/O) — the new retry/backoff code carefully threads signal through every awaitable, but the heartbeat callback does not. The retry-and-jitter scaffolding is well-aligned with the existing client.request timeout pattern and is correctly cancellable. PRD/report/ROADMAP discrepancies are accurate per the verifier wave and add documentation debt that should be fixed before merge.",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "packages/client/src/cli.js:151-156",
+      "problem": "Cursor persistence is split between client.listen (which only updates the in-memory cursor) and cli.js (which only persists on data.length > 0), making the data flow inconsistent with the existing wait command and with PRD 5.2 Step C.",
+      "evidence": "client.js:149-151 updates `currentCursor = page.page.next_cursor` after every successful empty poll, but never writes to disk. cli.js:151-156 only calls `state.renewSession(callerId, { inbox_cursor: nextCursor })` when `result.data?.length > 0`, so an `idle_timeout` exit (status: 'idle_timeout') leaves `.olimpyx/session.json.inbox_cursor` unchanged even though the returned `result.page.next_cursor` reflects the advanced server cursor. cli.js:105 (`wait`) persists unconditionally via the same field, so the two CLI commands now diverge on the same data path.",
+      "suggested_fix": "Move persistence into client.listen itself: when `currentCursor` advances, call `await state.renewSession(callerId, { inbox_cursor: currentCursor })` inside the loop (or accept a `onCursor` callback analogous to `onHeartbeat`). That keeps the cli.js command thin and matches the symmetry with `onHeartbeat`."
+    },
+    {
+      "severity": "major",
+      "location": "packages/client/src/cli.js:111-114",
+      "problem": "Numeric option parsing silently coerces out-of-range values rather than rejecting them, contradicting PRD 5.1's explicit `1<=N<=60` / `5<=N<=30` bounds.",
+      "evidence": "cli.js:112 `Math.max(10, Math.min(60*60*1000, Math.round(maxWaitMin*60*1000)))` clamps `maxWaitMin=0` to 10ms instead of rejecting. cli.js:114 `Math.max(10, Math.min(30*1000, Math.round(pollTimeoutSec*1000)))` clamps `pollTimeoutSec=1` to 10ms instead of rejecting; `pollTimeoutSec=120` silently coerces to 30s. This pattern is consistent with the existing `wait` command's `Number(option('timeout-ms', 25_000))` (cli.js:105) which also does not validate, but PRD 5.1 mandates hard rejection.",
+      "suggested_fix": "Throw `new Error('--max-wait-min must be in [1,60]')` / `new Error('--poll-timeout-sec must be in [5,30]')` on out-of-range inputs before the clamp. Keep the clamp as a defensive floor (`Math.max(10, ...)`) only after validation passes, or replace with explicit `Math.max(60_000, Math.min(60*60*1000, ...))`."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/client.js:89-106 + cli.js:144-147",
+      "problem": "AbortSignal is honored by `client.request`, `sleep`, and the inner `wait` retry loop, but the `onHeartbeat` callback in cli.js performs `state.renewSession(callerId)` which does synchronous-style disk I/O and is not signal-aware; a hang on the local FS will prevent signal-driven abort from propagating out of the heartbeat.",
+      "evidence": "client.js:99-106 awaits `onHeartbeat()` without a signal-bound race; cli.js:146 calls `state.renewSession(callerId)` (state.js:50-58) which does `readJson + atomicJson` with no signal plumbing. The retry/backoff/jitter code in client.js:113-134 carefully threads `signal` through `sleep(delay, signal)` but the heartbeat side-effect is exempt from this discipline. This is a real inconsistency given the rest of the PR's cancellation rigor.",
+      "suggested_fix": "Either (a) wrap the heartbeat in `Promise.race([onHeartbeat(), abortAfter(signal, 0)])` inside client.listen so signal aborts heartbeat immediately, or (b) document that heartbeat is best-effort and is allowed to ignore signal because the next iteration will re-attempt."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/client.js:124",
+      "problem": "Jitter uses `Math.floor(Math.random() * 401) - 200`, producing integers in [-200, 200] but with a 1-value-wide asymmetric range (`[-200, 200]` inclusive, not symmetric `[-200, +200]`). PRD 5.4 says \"±200ms\". D-002 forbids new deps so `crypto.randomInt` is allowed (already imported in state.js:3) but not required.",
+      "evidence": "client.js:124 expression. The asymmetry is functionally negligible (1ms bias over the range). `node:crypto` `randomInt` is available without a new dep, and existing client.js already uses `crypto.randomUUID()` (line 55). Switching would be consistent with the rest of the file and produces a perfectly symmetric `[-200, +200]` distribution.",
+      "suggested_fix": "Replace with `const jitter = crypto.randomInt(-200, 201)` (note the exclusive upper bound in `randomInt`); or leave as-is and add a one-line comment noting the 1-value asymmetry is intentional."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/cli.js:122-131",
+      "problem": "Signal teardown swallows all errors silently via bare `try { ... } catch {}` for both the session-end call and the local state cleanup.",
+      "evidence": "cli.js:126 and cli.js:129 both use empty catch. The 2-second `timeoutMs: 2000` cap protects against the worst case (the server hangs), but if `state.clearSession()` fails with an EACCES or ENOSPC, the failure is invisible. This matches the file's \"throw at top-level then top-level catch writes to stderr\" pattern only if main() catches it; here the signal-handler closure runs independently and bypasses the top-level handler.",
+      "suggested_fix": "Inside each empty catch, `process.stderr.write('listen: teardown ' + (sig === 'SIGINT' ? 'end' : 'clearSession') + ' failed: ' + err.message + '\\n')` before continuing."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/cli.js:120-131",
+      "problem": "Signal handler logic is ~12 lines of `teardownPromise` plumbing inlined inside the listen command; this is the kind of code that the cli.js file otherwise keeps terse and would benefit from extraction into a helper analogous to `option()`/`output()`.",
+      "evidence": "cli.js:118-136 defines a closure `handleSignal`, two named handlers `onSigInt`/`onSigTerm`, an idempotency guard `if (teardownPromise) return`, and a IIFE that races an abort + session end + state clear + process.exit. This block is harder to reason about than the rest of the file (which uses 1-line imperative command bodies). The retry/backoff in client.js (also ~30 lines) is similarly self-contained and would benefit from extraction into `withRetry(fn, { delays, signal })`.",
+      "suggested_fix": "Extract `setupSignalHandlers({ controller, onTeardown })` and `withTransientRetry(fn, { delays, signal, jitter })` helpers; the listen command becomes a flat sequence (parse -> install handlers -> listen -> persist -> output)."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/cli.js:144-147",
+      "problem": "Every heartbeat call invokes `state.renewSession(callerId)` with no `updates`, which re-reads and re-writes `.olimpyx/session.json` on every iteration (~144 times per 60-minute listen). Disk wear and contention are negligible at this scale but the pattern conflicts with the file's otherwise-minimal disk-touch policy.",
+      "evidence": "state.js:50-58 performs `await readJson(...)` then `await atomicJson(...)` on every call. cli.js:146 calls this unconditionally inside the per-iteration heartbeat. The wait command only renews on success, and the existing CLI commands are mostly one-shot.",
+      "suggested_fix": "Add a `state.touchSession(callerId)` that skips the atomicJson write if `caller_deadline - now > 30_000`, or only renew when the deadline is within 60s. This is a state.js refactor independent of listen."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/client.js:142-146",
+      "problem": "`page.page` fallback constructs a synthetic pagination object that duplicates server cursor logic on the client, but only on the `data.length > 0` branch. On empty responses the loop's `currentCursor` is updated in-memory (line 149-151) but never surfaced in the idle_timeout payload if the server's `next_cursor` is missing.",
+      "evidence": "client.js:143: `page: page.page ?? { next_cursor: page.data.at(-1)?.cursor ?? currentCursor ?? null }`. client.js:158: `page: { next_cursor: currentCursor ?? null }`. The two branches handle the same field differently: receive returns `page.page` verbatim when present, idle_timeout always synthesises. The asymmetry is fine but worth a comment.",
+      "suggested_fix": "Document why the two branches differ (received payloads have explicit page metadata; idle_timeout relies on loop state) or unify by always constructing `page.page ?? { next_cursor: ... }`."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/test/client.test.js:24-237",
+      "problem": "Test naming convention is inconsistent: pre-existing tests use imperative statements (`'wait uses bounded server long poll and cursor'`); new tests use shorter noun-phrase form (`'listen returns immediately when events are received'`, `'listen executes multiple cycles and returns idle_timeout when deadline elapses'`). The PRD references '8 listen unit tests' but the file actually has 10 tests (only 8 are new).",
+      "evidence": "client.test.js:5,17 are pre-existing; client.test.js:24,57,83,115,148,169,187,215 are the 8 new tests. listen-cli.test.js:28,36,44,96,134,170,232 are 7 new tests. cli.test.js:111 is the 1 new test added to an existing file. Total new tests = 8 + 7 + 1 = 16, not 18 (verifier said 18) and not 21 (report.md).",
+      "suggested_fix": "Either standardise the test name style (e.g., all start with verb) or document the convention in test/client.test.js header comment. Update report.md claim from `10 модульных тестов на метод listen` to `8 unit-тестов на client.listen + 7 интеграционных CLI-тестов`."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/test/listen-cli.test.js:170-230, 232-291",
+      "problem": "Two near-identical SIGINT/SIGTERM tests (~60 lines each) duplicate the entire mock-fetch preload, state-fixture setup, and assertion shape with only the signal name and expected exit code differing.",
+      "evidence": "listen-cli.test.js:170-230 (SIGINT, exit 130) and listen-cli.test.js:232-291 (SIGTERM, exit 143) share ~50 lines of identical code (state fixture + mock fetch + child spawn). The duplication is the kind of code smell that a small `runListenSignal({ signal, exitCode })` helper would eliminate.",
+      "suggested_fix": "Extract a single `runListenSignal({ signal, expectedExit, expectedReason })` helper parameterised over signal name; replace both test bodies with single assertions."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/test/listen-cli.test.js:170-289",
+      "problem": "The SIGINT/SIGTERM tests use `appendFileSync('${logFile}', ...)` with `init.body || ''` to inspect outbound requests, but the test does not assert on the *order* of calls (heartbeat-before-end) — only on presence. A regression where the order swaps would still pass.",
+      "evidence": "listen-cli.test.js:189,251 log into `calls.log`; tests assert `match(logs, /POST .../heartbeat/)` and `match(logs, /POST .../end .../)` independently but not in sequence. The PRD 5.3 wording \"heartbeat-before-wait order\" implies ordering matters but is not enforced here.",
+      "suggested_fix": "Split the log file into per-request lines (already done) and add `assert.ok(logs.indexOf('heartbeat') < logs.indexOf('end'))` to lock the order."
+    },
+    {
+      "severity": "minor",
+      "location": "jobs/bounded-listener-2026-09-17/report.md",
+      "problem": "Report claims `21/21 тестов` and `10 модульных тестов на метод listen`. Actual numbers: 35/35 total client package tests pass (including 4 install.test.js cases), and only 8 new unit tests target `client.listen` directly (10 in client.test.js, of which 2 are pre-existing).",
+      "evidence": "`npm test` in `packages/client` output: `tests 35 / pass 35`. Test counts: client.test.js = 10 (2 pre-existing + 8 new), listen-cli.test.js = 7 (all new), cli.test.js = 3 (2 pre-existing + 1 new). New tests in PR = 16, total in modified suites = 20 (verifier said 20/20).",
+      "suggested_fix": "Replace `21/21` with `20/20` for new tests, and `10 модульных тестов` with `8 модульных тестов на client.listen + 7 интеграционных CLI-тестов на listen-команду + 1 валидационный тест в cli.test.js`."
+    },
+    {
+      "severity": "minor",
+      "location": "jobs/bounded-listener-2026-09-17/state.json",
+      "problem": "`review_and_fixes` is marked `completed` but this review (and the verifier wave) are still finding actionable issues; the status is stale relative to the open cursor-persistence and bounds-validation majors.",
+      "evidence": "state.json:23-27 lists `review_and_fixes` status: `completed`. The verifier review and this coder-style review are still actively flagging fixes. Either the review_and_fixes phase is incorrectly scoped (it was the implementer's self-review) or the state should be `in_progress` until these are closed.",
+      "suggested_fix": "Rename the phase to `implementation_self_review` (history of what was done) and add a new `external_review` phase; keep state machine honest."
+    },
+    {
+      "severity": "minor",
+      "location": "docs/ROADMAP.md:38-39",
+      "problem": "ROADMAP change does not mark Q-001/Q-002 done despite PRD 2.2 citing them as architectural anchors for this PR. The only ROADMAP change is an unrelated Horizon 1 item 6 audit note.",
+      "evidence": "`git diff` against docs/ROADMAP.md shows only one line modified: Horizon 1 item 6. Q-001 (Target Host & Version Validation) and Q-002 (Skill Format: Bundle vs. Maintained Helper) rows under Horizon 2 (ROADMAP.md:38-39) are unchanged.",
+      "suggested_fix": "Either (a) add a closing note to Q-001/Q-002 in ROADMAP.md noting that `listen` is a concrete operationalisation (even if the full host matrix is pending), or (b) update PRD 2.2 to drop the Q-001/Q-002 anchor claim."
+    },
+    {
+      "severity": "minor",
+      "location": "skills/olimpyx-participant/SKILL.md:26,34",
+      "problem": "SKILL.md update mentions signal handling, default 15-minute timeout, and the two status payloads, but does not tell the participant what to do on `status: \"error\"` (specifically `SESSION_EXPIRED`), what the retry behaviour looks like, or that long-poll is client-side.",
+      "evidence": "SKILL.md:26 only mentions `status: \"received\"` and `status: \"idle_timeout\"`. SKILL.md:34 lists the new flag but not the failure modes. PRD §7 has a proposed blockquote that does mention the statuses but not the error path.",
+      "suggested_fix": "Add a one-liner to SKILL.md:26 noting that `status: \"error\"` with `code: \"SESSION_EXPIRED\"` means the caller must re-run `session begin` before any further network command."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/client.js:46-70 (existing request())",
+      "problem": "Existing `request()` method now accepts an optional `signal` parameter but the new signature silently changes behavior: when `signal` is undefined, no listener is added (preserves old behavior), but when `signal` is provided and *already aborted*, the controller is aborted before the timer is set. This is correct, but the addition of `signal` to the public API of `request()` is unannounced.",
+      "evidence": "client.js:46 destructures `{ ..., signal } = {}`. client.js:50-54 wires `onAbort` listener. cli.js:139-149 only passes `signal` from the listen command, but the signature change means any other caller can now accidentally pass a signal and not realise their outer signal will abort the request.",
+      "suggested_fix": "Add a JSDoc-style block comment to `request()` documenting the new `signal` parameter; or guard the new behavior behind an explicit `passSignal` flag to avoid surprising existing call sites."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/client.js:89-162",
+      "problem": "`listen` function is ~75 lines including the retry/backoff inner loop. The body mixes loop state mutation, retry control flow, error enrichment, and payload construction in a single function. While readable, the extraction suggested above would shrink it materially.",
+      "evidence": "client.js:89-162. The structure is: outer deadline while-loop (5 lines) -> abort check -> heartbeat (8 lines) -> slice calc (4 lines) -> retry inner loop (22 lines) -> post-loop payload (10 lines) -> exit payload (8 lines).",
+      "suggested_fix": "Extract `async function fetchWithRetry(fn, { signal, retries, delays })` returning the page or throwing on exhaustion; extract `buildReceivedPayload(page, currentCursor, startTime, pollCycles)` and `buildIdleTimeoutPayload(currentCursor, startTime, pollCycles)`."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/client.js:7-20",
+      "problem": "`sleep` is a non-exported module-level helper; existing code uses inline `await new Promise((resolve) => setTimeout(resolve, ...))` (e.g. the *original* `wait` method on line 81 of the pre-PR file). The new `sleep` is signal-aware but the file still has legacy inline setTimeouts (none after this PR, but worth noting the helper replaced an inline setTimeout in the modified `wait`).",
+      "evidence": "client.js:7-20 defines `sleep`. The PR replaces the pre-existing inline `setTimeout(resolve, remaining)` with `sleep(remaining, signal)` in `wait` (client.js:84), which is a good cleanup. No inconsistency remains.",
+      "suggested_fix": "No fix; flagged for completeness."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/cli.js:131",
+      "problem": "`process.exit()` inside an async closure is invoked from a signal handler; if the main try-block has a pending `await client.listen(...)`, the unhandled rejection from the abort is left dangling until the process exits. This is benign because exit follows, but Node 22 may print an UnhandledPromiseRejection warning depending on `--unhandled-rejections` mode.",
+      "evidence": "cli.js:130 `process.exit(sig === 'SIGINT' ? 130 : 143)` runs while the outer `await client.listen(...)` is still throwing (because controller.abort fired on line 123). The error is caught at cli.js:160 and either swallowed silently (signal.aborted branch, line 161-164) or formatted. No stderr noise observed in test runs.",
+      "suggested_fix": "Set `process.exitCode` first and let the event loop drain, OR add `process.on('unhandledRejection', () => {})` guard at the top of main(). Low priority."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/test/client.test.js:115-185",
+      "problem": "Backoff test depends on `_backoffDelays` being passed by the test; production callers do not pass this option. Tests verify the retry logic in isolation, which is correct, but the listener's behavior with real delays (1s/2s/4s + jitter) is not integration-tested.",
+      "evidence": "client.test.js:140,163,181,230 pass `_backoffDelays: [...]` to compress timing. No test exercises the default `[1000, 2000, 4000]` schedule or the random jitter range.",
+      "suggested_fix": "Add one test with `Math.random = () => 0.5` mock that verifies `delay ≈ base + 0` for known iteration counts. Optional."
+    }
+  ],
+  "checks_performed": [
+    "Read packages/client/src/client.js end-to-end; compared new sleep(), isTransientError(), wait() updates, listen() against existing client.request() and wait() patterns",
+    "Read packages/client/src/cli.js end-to-end; compared new listen command against existing wait/session commands for option() helper use, output() helper use, error-handling style, and code density",
+    "Read packages/client/src/state.js to verify LocalState methods used (loadSession, renewSession, clearSession) and identify disk-write patterns",
+    "Read packages/client/src/redaction.js to confirm the redaction filter is unchanged (cli.js:26 output() helper handles it)",
+    "Read packages/client/test/client.test.js end-to-end; counted 8 new listen-specific tests (24, 57, 83, 115, 148, 169, 187, 215); verified each covers distinct concern (received/idle/heartbeat/retry/non-transient/exhaustion/abort/abort-during-sleep)",
+    "Read packages/client/test/listen-cli.test.js end-to-end; counted 7 tests; identified duplication in SIGINT/SIGTERM cases",
+    "Read packages/client/test/cli.test.js (+12 lines); verified new validation test mirrors listen-cli.test.js:28-42",
+    "Read jobs/bounded-listener-2026-09-17/prd.md sections 5.1-5.7 end-to-end",
+    "Read jobs/bounded-listener-2026-09-17/plan.md and report.md",
+    "Read jobs/bounded-listener-2026-09-17/state.json; verified review_and_fixes marked completed",
+    "Read apps/server/src/app.ts lines 215-246 to confirm /v1/inbox/events handler ignores `prefer` header (no matches) and /v1/sessions/:id/end ignores reason body field",
+    "Read apps/server/src/validation.ts to confirm reason enum is Zod-validated but unused after the SQL UPDATE",
+    "Diffed docs/ROADMAP.md and confirmed only Horizon 1 item 6 was touched",
+    "Diffed skills/olimpyx-participant/SKILL.md and confirmed only 2 lines changed",
+    "Ran `npm test` in packages/client/ - 35/35 pass; 8 new listen unit tests, 7 new listen CLI tests, 1 new CLI validation test",
+    "Verified that crypto.randomInt is available without new deps (state.js:3 already imports node:crypto), so switching Math.random jitter is in-scope for D-002",
+    "Verified that `option()` helper is used consistently in cli.js:111-115; verified that `output()` is used at lines 158 and 167 for the two terminal states",
+    "Verified that the AbortSignal pattern (controller.signal.addEventListener('abort', onAbort, { once: true })) matches across client.request (line 53), sleep (line 18), and the listen outer-loop signal.aborted checks (lines 96, 115)",
+    "Confirmed that report.md test-count claim (21/21) is wrong: actual is 35/35 total or 16 new tests; verifier-review.json already flagged this",
+    "Confirmed that state.json phase review_and_fixes is stale relative to open majors from verifier wave",
+    "Confirmed that ROADMAP.md does not mark Q-001/Q-002 done despite PRD 2.2 citing them"
+  ],
+  "assumptions": [
+    "The verifier wave findings are accurate (cursor persistence gap, bounds validation gap, server contract noise, fake long-poll claim). I did not re-run their empirical cursor bug repro because the diff evidence is sufficient.",
+    "Live integration tests (npm run test:live-cli) are out of scope and unchanged by this PR.",
+    "D-002 forbids new third-party npm dependencies but permits use of built-in node:crypto primitives; existing client.js already uses crypto.randomUUID() and state.js already imports node:crypto.",
+    "The 8 listen unit tests in client.test.js are the minimum sufficient for the test coverage area (immediate receive, idle_timeout, heartbeat order, retry on transient, non-retry on 4xx, retry exhaustion, abort during fetch, abort during sleep); existing wait/outbound tests are not new and not in scope of PR.",
+    "The SIGINT/SIGTERM duplication is a stylistic refactor opportunity, not a defect; both tests pass.",
+    "The retry counter 'reset on success' is correctly handled by loop scoping in client.js:113; this is verifier nit #11 and I concur.",
+    "node:crypto.randomInt is acceptable for jitter symmetry but the asymmetric [-200, 200] range is functionally negligible and the existing Math.random is acceptable per D-002."
+  ]
+}

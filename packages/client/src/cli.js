@@ -103,6 +103,102 @@ async function main() {
   if (command === 'knowledge') { const q = option('q'); const { client } = await activeClient(option('caller-id')); output(await client.knowledge(q ? new URLSearchParams({ q }).toString() : '')); return; }
   if (command === 'message') { const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null); const recipient = option('recipient'); const explicitKey = option('idempotency-key'); if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required'); const { client } = await activeClient(option('caller-id')); const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`; const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}) }; output(await mutation(client, 'POST', path, payload, explicitKey)); return; }
   if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); output(page); return; }
+  if (command === 'listen') {
+    const callerId = option('caller-id');
+    if (!callerId) throw new Error('--caller-id is required for participant commands');
+    const local = await state.loadSession();
+    if (!local) throw new Error('No local session. Run session begin first.');
+
+    const rawMaxWait = option('max-wait-min', 15);
+    const maxWaitMin = Number(rawMaxWait);
+    const allowFast = Boolean(process.env.OLIMPYX_TEST_FAST_TIMEOUT);
+    if (isNaN(maxWaitMin) || !Number.isFinite(maxWaitMin) || (!allowFast && (maxWaitMin < 1 || maxWaitMin > 60))) {
+      throw new Error('--max-wait-min must be a number between 1 and 60');
+    }
+    const maxWaitMs = Math.max(10, Math.round(maxWaitMin * 60 * 1000));
+
+    const rawPollSec = option('poll-timeout-sec', 25);
+    const pollTimeoutSec = Number(rawPollSec);
+    if (isNaN(pollTimeoutSec) || !Number.isFinite(pollTimeoutSec) || (!allowFast && (pollTimeoutSec < 5 || pollTimeoutSec > 30))) {
+      throw new Error('--poll-timeout-sec must be a number between 5 and 30');
+    }
+    const pollTimeoutMs = Math.max(10, Math.round(pollTimeoutSec * 1000));
+    const after = option('after');
+    const client = await configuredClient(local.token);
+
+    const controller = new AbortController();
+    let teardownPromise = null;
+    const executeTeardown = async (sig) => {
+      controller.abort(new Error(`Received ${sig}`));
+      try {
+        await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason: 'agent_ended' }, { timeoutMs: 2000 });
+      } catch (err) {
+        if (process.env.DEBUG) process.stderr.write(`[teardown] failed to notify server: ${err.message}\n`);
+      }
+      try {
+        await state.clearSession();
+      } catch (err) {
+        if (process.env.DEBUG) process.stderr.write(`[teardown] failed to clear local session: ${err.message}\n`);
+      }
+      process.exit(sig === 'SIGINT' ? 130 : 143);
+    };
+    const handleSignal = (sig) => {
+      if (teardownPromise) return;
+      teardownPromise = executeTeardown(sig);
+    };
+    const onSigInt = () => handleSignal('SIGINT');
+    const onSigTerm = () => handleSignal('SIGTERM');
+    process.on('SIGINT', onSigInt);
+    process.on('SIGTERM', onSigTerm);
+
+    const startTime = Date.now();
+    try {
+      const result = await client.listen({
+        cursor: after || local.inbox_cursor,
+        timeoutMs: pollTimeoutMs,
+        maxWaitMs: maxWaitMs,
+        onHeartbeat: async () => {
+          await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/heartbeat`, { observed_at: new Date().toISOString() });
+          await state.renewSession(callerId);
+        },
+        onCursor: async (nextCursor) => {
+          if (nextCursor) {
+            await state.renewSession(callerId, { inbox_cursor: nextCursor });
+          }
+        },
+        signal: controller.signal
+      });
+
+      const finalCursor = result.page?.next_cursor ?? result.data?.at(-1)?.cursor;
+      if (finalCursor) {
+        await state.renewSession(callerId, { inbox_cursor: finalCursor });
+      }
+
+      output(result);
+      return;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        await teardownPromise;
+        return;
+      }
+      const waited_sec = error.waited_sec ?? Math.round((Date.now() - startTime) / 1000);
+      const code = error.status === 401 ? 'SESSION_EXPIRED' : (error.code ?? error.name ?? 'ERROR');
+      output({
+        status: 'error',
+        error: {
+          code,
+          message: error.message,
+          waited_sec,
+          poll_cycles: error.poll_cycles ?? 0
+        }
+      });
+      process.exitCode = 1;
+      return;
+    } finally {
+      process.removeListener('SIGINT', onSigInt);
+      process.removeListener('SIGTERM', onSigTerm);
+    }
+  }
   if (command === 'persona') {
     const action = args.shift();
     if (action === 'show') output(await state.currentPersona());
@@ -113,7 +209,7 @@ async function main() {
     return;
   }
   if (command === 'influence') { const action = args.shift(); if (action !== 'archive') throw new Error('influence action: archive SOURCE'); output(await state.archiveInfluence(args.shift())); return; }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|persona|influence\n');
+  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });
