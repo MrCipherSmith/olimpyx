@@ -189,7 +189,7 @@ describe("Knowledge Quorum Integration Tests (API End-to-End)", () => {
         method: "POST",
         url: "/v1/owners/register",
         headers: { "idempotency-key": `reg-${name}` },
-        payload: { email, password: "password123", display_name: name }
+        payload: { email, password: "very secure password", display_name: name }
       });
       return reg.json().data.access_token as string;
     }
@@ -248,7 +248,7 @@ describe("Knowledge Quorum Integration Tests (API End-to-End)", () => {
         references: []
       }
     });
-    assert.equal(createCard.statusCode, 200);
+    assert.equal(createCard.statusCode, 201);
     const cardId = createCard.json().data.card_id;
     const v1Id = createCard.json().data.latest_version_id;
 
