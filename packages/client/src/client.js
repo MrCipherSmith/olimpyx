@@ -115,6 +115,32 @@ export class OlimpyxClient {
   getKnowledgeCard(cardId) {
     return this.request('GET', `/v1/knowledge/cards/${encodeURIComponent(cardId)}`);
   }
+  async getCardQuorum(cardId) {
+    const res = await this.getKnowledgeCard(cardId);
+    const card = res?.data ?? res;
+    let latest = card?.latest;
+    if (!latest && card?.latest_version_id) {
+      try {
+        const vRes = await this.getKnowledgeVersion(card.latest_version_id);
+        latest = vRes?.data ?? vRes;
+      } catch {
+        // fallback
+      }
+    }
+    return {
+      data: {
+        card_id: card?.card_id,
+        status: card?.status,
+        canonical_version_id: card?.canonical_version_id ?? null,
+        latest_version_id: card?.latest_version_id ?? null,
+        has_pending_proposal: Boolean(card?.has_pending_proposal),
+        has_refuted_proposal: Boolean(card?.has_refuted_proposal),
+        quorum: latest?.quorum ?? null,
+        independent_review_counts: latest?.independent_review_counts ?? null,
+        review_counts: card?.review_counts ?? latest?.review_counts ?? null
+      }
+    };
+  }
   createKnowledgeCard(data, idempotencyKey) {
     return this.request('POST', '/v1/knowledge/cards', data, {
       headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}

@@ -297,3 +297,146 @@ test('CLI knowledge publish and archive handle flags and credentials', async () 
 
   await rm(root, { recursive: true, force: true });
 });
+
+test('client SDK getCardQuorum fetches card and extracts quorum metrics', async () => {
+  const mockCard = {
+    card_id: 'knw_100',
+    status: 'confirmed',
+    canonical_version_id: 'knv_1',
+    latest_version_id: 'knv_2',
+    has_pending_proposal: true,
+    has_refuted_proposal: false,
+    review_counts: { confirm: 3, refute: 0, comment: 1 },
+    latest: {
+      version_id: 'knv_2',
+      topic: 'Photosynthesis v2',
+      status: 'unconfirmed',
+      review_counts: { confirm: 1, refute: 0, comment: 0 },
+      independent_review_counts: { confirm: 1, refute: 0 },
+      quorum: {
+        threshold: 2,
+        independent_confirms: 1,
+        independent_refutes: 0,
+        reached: false,
+        confirms_needed: 1
+      }
+    }
+  };
+
+  const client = new OlimpyxClient({
+    serverUrl: 'https://mock.test',
+    fetchImpl: async (url) => {
+      assert.equal(String(url), 'https://mock.test/v1/knowledge/cards/knw_100');
+      return new Response(JSON.stringify({ data: mockCard }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+  });
+
+  const quorumRes = await client.getCardQuorum('knw_100');
+  assert.equal(quorumRes.data.card_id, 'knw_100');
+  assert.equal(quorumRes.data.status, 'confirmed');
+  assert.equal(quorumRes.data.canonical_version_id, 'knv_1');
+  assert.equal(quorumRes.data.latest_version_id, 'knv_2');
+  assert.equal(quorumRes.data.has_pending_proposal, true);
+  assert.equal(quorumRes.data.has_refuted_proposal, false);
+  assert.equal(quorumRes.data.quorum.threshold, 2);
+  assert.equal(quorumRes.data.quorum.independent_confirms, 1);
+  assert.equal(quorumRes.data.quorum.confirms_needed, 1);
+  assert.equal(quorumRes.data.independent_review_counts.confirm, 1);
+});
+
+test('CLI knowledge inspect displays progress bar, canonical vs proposal version, and redacts credentials', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-inspect-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
+  await writeFile(join(stateDir, 'session-credential'), 'secret_token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+    session_id: 'ses_1',
+    caller_id: 'call_1',
+    caller_deadline: new Date(Date.now() + 60000).toISOString()
+  }));
+
+  const mockCard = {
+    card_id: 'knw_inspect_1',
+    status: 'confirmed',
+    canonical_version_id: 'knv_1',
+    latest_version_id: 'knv_2',
+    has_pending_proposal: true,
+    has_refuted_proposal: false,
+    public: true,
+    archived: false,
+    latest: {
+      version_id: 'knv_2',
+      card_id: 'knw_inspect_1',
+      version: 2,
+      topic: 'Quantum Biology Findings access_token=secret12345',
+      summary: 'Quantum effects in light-harvesting complexes',
+      body: 'Detailed findings...',
+      status: 'unconfirmed',
+      review_counts: { confirm: 2, refute: 0, comment: 1 },
+      independent_review_counts: { confirm: 1, refute: 0 },
+      quorum: {
+        threshold: 2,
+        independent_confirms: 1,
+        independent_refutes: 0,
+        reached: false,
+        confirms_needed: 1
+      }
+    }
+  };
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      if (u.includes('/heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/v1/knowledge/cards/knw_inspect_1')) {
+        return new Response(JSON.stringify({ data: ${JSON.stringify(mockCard)} }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/v1/knowledge/versions/knv_2')) {
+        return new Response(JSON.stringify({ data: ${JSON.stringify(mockCard.latest)} }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ error: { message: 'not found' } }), { status: 404, headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  // Text formatted inspect
+  const inspectRes = await run(['knowledge', 'inspect', 'knw_inspect_1', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
+  assert.equal(inspectRes.status, 0, inspectRes.stderr);
+  assert.match(inspectRes.stdout, /Knowledge Inspection:/);
+  assert.match(inspectRes.stdout, /Card ID:\s+knw_inspect_1/);
+  assert.match(inspectRes.stdout, /Card Status:\s+confirmed/);
+  assert.match(inspectRes.stdout, /Canonical Version:\s+knv_1/);
+  assert.match(inspectRes.stdout, /Latest Version:\s+knv_2 \(unconfirmed\)/);
+  assert.match(inspectRes.stdout, /Pending Proposal:\s+yes/);
+  assert.match(inspectRes.stdout, /Quorum Progress:\s+\[■□\] 1\/2 independent confirmations/);
+  assert.match(inspectRes.stdout, /Independent Votes:\s+1 confirm\(s\), 0 refute\(s\)/);
+  // Credential in topic was redacted
+  assert.doesNotMatch(inspectRes.stdout, /secret12345/);
+  assert.match(inspectRes.stdout, /\[REDACTED\]/);
+
+  // JSON inspect with --json
+  const jsonRes = await run(['knowledge', 'inspect', 'knw_inspect_1', '--caller-id', 'call_1', '--json'], { cwd: root, preload: preloadPath });
+  assert.equal(jsonRes.status, 0, jsonRes.stderr);
+  const parsed = JSON.parse(jsonRes.stdout);
+  assert.equal(parsed.card_id, 'knw_inspect_1');
+  assert.equal(parsed.canonical_version_id, 'knv_1');
+  assert.equal(parsed.has_pending_proposal, true);
+  assert.equal(parsed.progress, '[■□] 1/2 independent confirmations');
+  assert.equal(parsed.quorum.threshold, 2);
+  assert.equal(parsed.quorum.independent_confirms, 1);
+
+  // Inspect version directly
+  const verRes = await run(['knowledge', 'inspect', 'knv_2', '--caller-id', 'call_1', '--json'], { cwd: root, preload: preloadPath });
+  assert.equal(verRes.status, 0, verRes.stderr);
+  const verParsed = JSON.parse(verRes.stdout);
+  assert.equal(verParsed.version_id, 'knv_2');
+  assert.equal(verParsed.canonical_version_id, 'knv_1');
+
+  await rm(root, { recursive: true, force: true });
+});
+

@@ -1,0 +1,45 @@
+{
+  "job": "knowledge-quorum-q-020-2026-09-18",
+  "title": "Knowledge Quorum, Independent Reviewers, and Conflict Resolution (Q-020)",
+  "status": "completed",
+  "phase": "completed",
+  "horizon": "Horizon 2 (Item #5: Q-020)",
+  "created_at": "2026-09-18T02:16:00.000Z",
+  "completed_at": "2026-09-18T03:12:00.000Z",
+  "artifacts": {
+    "prd": "prd.md",
+    "plan": "plan.md",
+    "review": "review.md",
+    "report": "report.md",
+    "state": "state.json"
+  },
+  "phases": {
+    "prd": {
+      "status": "completed",
+      "completed_at": "2026-09-18T02:16:40.000Z"
+    },
+    "plan": {
+      "status": "completed",
+      "completed_at": "2026-09-18T02:16:48.000Z"
+    },
+    "review": {
+      "status": "completed",
+      "completed_at": "2026-09-18T02:27:00.000Z",
+      "verdict": "CONDITIONAL_APPROVE"
+    },
+    "implementation": {
+      "status": "completed",
+      "completed_at": "2026-09-18T03:12:00.000Z"
+    },
+    "verification": {
+      "status": "completed",
+      "completed_at": "2026-09-18T03:12:00.000Z"
+    }
+  },
+  "scope": [
+    "apps/server: anti-Sybil distinct-owner quorum counting, same-owner vote consolidation, canonical confirmed version resolution, proposal branching resilience",
+    "packages/client: SDK support for independent review metrics, CLI knowledge inspect command",
+    "skills/olimpyx-participant: guidance for peer review independence and quorum requirements",
+    "tests: dedicated server test suite knowledge-quorum.test.ts and client tests"
+  ]
+}

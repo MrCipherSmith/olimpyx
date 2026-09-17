@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { installValidation } from "./validation.js";
 import { createEmbeddingAdapter, ensureEmbeddingSchema, type EmbeddingStatus } from "./embeddings.js";
 import { AuthRateLimiter, type RateLimitResult } from "./auth-guard.js";
@@ -55,6 +55,7 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE knowledge_versions ADD COLUMN IF NOT EXISTS idempotency_body_hash text;
     CREATE UNIQUE INDEX IF NOT EXISTS knowledge_versions_idempotency_unique ON knowledge_versions(author_agent_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
     CREATE TABLE IF NOT EXISTS knowledge_reviews (id text PRIMARY KEY, version_id text NOT NULL REFERENCES knowledge_versions(id), reviewer_agent_id text NOT NULL REFERENCES agents(id), verdict text NOT NULL, explanation text NOT NULL, evidence jsonb NOT NULL DEFAULT '[]', revision integer NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(version_id,reviewer_agent_id));
+    CREATE INDEX IF NOT EXISTS idx_knowledge_reviews_version_verdict ON knowledge_reviews(version_id, verdict);
     CREATE TABLE IF NOT EXISTS knowledge_review_revisions (review_id text NOT NULL, revision integer NOT NULL, verdict text NOT NULL, explanation text NOT NULL, evidence jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL, archived_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(review_id,revision));
     CREATE TABLE IF NOT EXISTS memories (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id), kind text NOT NULL, summary text NOT NULL, body text NOT NULL, active boolean NOT NULL, source_ref jsonb, created_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS tasks (id text PRIMARY KEY, room_id text NOT NULL REFERENCES rooms(id), creator_type text NOT NULL, creator_id text NOT NULL, creator_name text NOT NULL, assigned_agent_id text NOT NULL REFERENCES agents(id), title text NOT NULL, description text NOT NULL, status text NOT NULL DEFAULT 'proposed', result text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
@@ -64,6 +65,79 @@ export async function migrate(databaseUrl: string) {
   `);
   await ensureEmbeddingSchema(pool);
   await pool.end();
+}
+
+export type ReviewVerdictRow = {
+  verdict: string;
+  reviewer_owner_id: string;
+  author_owner_id: string;
+  reviewer_agent_restricted?: boolean;
+  reviewer_owner_restricted?: boolean;
+};
+
+export function evaluateReviewQuorum(
+  reviews: ReviewVerdictRow[],
+  threshold: number,
+  confirmedAt?: string | Date | null
+) {
+  const raw = { confirm: 0, refute: 0, comment: 0 };
+  const ownerVerdicts = new Map<string, Set<string>>();
+
+  for (const r of reviews) {
+    if (r.verdict === "confirm") raw.confirm++;
+    else if (r.verdict === "refute") raw.refute++;
+    else if (r.verdict === "comment") raw.comment++;
+
+    // Anti-Sybil Owner Independence Rule:
+    // Exclude same-owner reviews (author self-reviews or reviews from agents under author's owner)
+    if (r.reviewer_owner_id === r.author_owner_id) continue;
+    // Exclude restricted agents and restricted owners
+    if (r.reviewer_agent_restricted || r.reviewer_owner_restricted) continue;
+
+    if (!ownerVerdicts.has(r.reviewer_owner_id)) {
+      ownerVerdicts.set(r.reviewer_owner_id, new Set());
+    }
+    ownerVerdicts.get(r.reviewer_owner_id)!.add(r.verdict);
+  }
+
+  let independentConfirms = 0;
+  let independentRefutes = 0;
+
+  for (const [, verdicts] of ownerVerdicts.entries()) {
+    // Contested owner stance (M3):
+    // If any agent of that owner submitted verdict = 'refute', owner counts as 1 refute and 0 confirms
+    if (verdicts.has("refute")) {
+      independentRefutes++;
+    } else if (verdicts.has("confirm")) {
+      // At least one confirm and no refute
+      independentConfirms++;
+    }
+    // Note: comments are discussion-only (M4) and do not contribute to independent votes
+  }
+
+  let status: "unconfirmed" | "confirmed" | "refuted" = "unconfirmed";
+  if (independentRefutes >= threshold && independentRefutes > independentConfirms) {
+    status = "refuted";
+  } else if (confirmedAt != null || independentConfirms >= threshold) {
+    status = "confirmed";
+  }
+
+  return {
+    raw,
+    independent: {
+      confirm: independentConfirms,
+      refute: independentRefutes
+    },
+    threshold,
+    status,
+    quorum: {
+      threshold,
+      independent_confirms: independentConfirms,
+      independent_refutes: independentRefutes,
+      reached: status === "confirmed",
+      confirms_needed: Math.max(0, threshold - independentConfirms)
+    }
+  };
 }
 
 type Principal = { type: "owner" | "agent"; id: string; ownerId: string; name: string; tokenType: "owner" | "session" | "agent"; sessionId?: string };
@@ -477,34 +551,156 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
 
     if (q.include_refuted !== "true") {
       const threshold = Number(process.env.CONFIRMATION_THRESHOLD ?? 2);
-      clauses.push(`NOT ((SELECT count(*) FROM knowledge_reviews r WHERE r.version_id = v.id AND r.verdict = 'refute') >= ${threshold} AND (SELECT count(*) FROM knowledge_reviews r WHERE r.version_id = v.id AND r.verdict = 'refute') > (SELECT count(*) FROM knowledge_reviews r WHERE r.version_id = v.id AND r.verdict = 'confirm'))`);
+      const indRefutesSubquery = `(
+        SELECT count(DISTINCT a_rev.owner_id)
+        FROM knowledge_reviews kr
+        JOIN agents a_rev ON a_rev.id = kr.reviewer_agent_id
+        JOIN owners o_rev ON o_rev.id = a_rev.owner_id
+        JOIN agents a_auth ON a_auth.id = v.author_agent_id
+        WHERE kr.version_id = v.id
+          AND kr.verdict = 'refute'
+          AND a_rev.owner_id <> a_auth.owner_id
+          AND NOT a_rev.restricted
+          AND NOT o_rev.restricted
+      )`;
+      const indConfirmsSubquery = `(
+        SELECT count(DISTINCT a_rev.owner_id)
+        FROM knowledge_reviews kr
+        JOIN agents a_rev ON a_rev.id = kr.reviewer_agent_id
+        JOIN owners o_rev ON o_rev.id = a_rev.owner_id
+        JOIN agents a_auth ON a_auth.id = v.author_agent_id
+        WHERE kr.version_id = v.id
+          AND kr.verdict = 'confirm'
+          AND a_rev.owner_id <> a_auth.owner_id
+          AND NOT a_rev.restricted
+          AND NOT o_rev.restricted
+          AND NOT EXISTS (
+            SELECT 1 FROM knowledge_reviews kr2
+            JOIN agents a2 ON a2.id = kr2.reviewer_agent_id
+            WHERE kr2.version_id = v.id
+              AND kr2.verdict = 'refute'
+              AND a2.owner_id = a_rev.owner_id
+          )
+      )`;
+      clauses.push(
+        `NOT ((NOT EXISTS (SELECT 1 FROM knowledge_versions kv WHERE kv.card_id = c.id AND kv.confirmed_at IS NOT NULL)) AND (${indRefutesSubquery} >= ${threshold} AND ${indRefutesSubquery} > ${indConfirmsSubquery}))`
+      );
     }
 
     return { clauses, params, nextIdx: idx };
   }
 
-  async function versionFrom(versionId:string){
-    const v=(await app.pg.query(`SELECT v.*,c.challenge_card_id,c.challenge_version_id,EXISTS(SELECT 1 FROM knowledge_cards x WHERE x.challenge_version_id=v.id) has_challenges,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='confirm') confirms,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='refute') refutes,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='comment') comments FROM knowledge_versions v JOIN knowledge_cards c ON c.id=v.card_id WHERE v.id=$1`,[versionId])).rows[0];
-    if(!v)return null;
-    const confirms=Number(v.confirms),refutes=Number(v.refutes),comments=Number(v.comments);
-    const threshold=Number(process.env.CONFIRMATION_THRESHOLD??2);
-    let status:"unconfirmed"|"confirmed"|"refuted"="unconfirmed";
-    if(refutes>=threshold&&refutes>confirms)status="refuted";
-    else if(v.confirmed_at||confirms>=threshold)status="confirmed";
-    return{
-      version_id:v.id,card_id:v.card_id,version:v.version,topic:v.topic,summary:v.summary,body:v.body,sources:v.sources,references:v.refs,author_agent_id:v.author_agent_id,status,has_challenges:v.has_challenges,review_counts:{confirm:confirms,refute:refutes,comment:comments},created_at:v.created_at
+  async function getReviewMetrics(versionId: string, clientOrPool: Pool | PoolClient = app.pg) {
+    const threshold = Number(process.env.CONFIRMATION_THRESHOLD ?? 2);
+    const versionRes = await clientOrPool.query(
+      "SELECT id, confirmed_at FROM knowledge_versions WHERE id = $1",
+      [versionId]
+    );
+    const confirmedAt = versionRes.rows[0]?.confirmed_at ?? null;
+
+    const res = await clientOrPool.query(
+      `SELECT
+        kr.verdict,
+        a_reviewer.owner_id AS reviewer_owner_id,
+        a_author.owner_id AS author_owner_id,
+        a_reviewer.restricted AS reviewer_agent_restricted,
+        o_reviewer.restricted AS reviewer_owner_restricted
+      FROM knowledge_reviews kr
+      JOIN knowledge_versions v ON v.id = kr.version_id
+      JOIN agents a_reviewer ON a_reviewer.id = kr.reviewer_agent_id
+      JOIN owners o_reviewer ON o_reviewer.id = a_reviewer.owner_id
+      JOIN agents a_author ON a_author.id = v.author_agent_id
+      WHERE kr.version_id = $1`,
+      [versionId]
+    );
+
+    return evaluateReviewQuorum(res.rows, threshold, confirmedAt);
+  }
+
+  async function versionFrom(versionId: string) {
+    const v = (await app.pg.query(
+      `SELECT v.*,
+              c.challenge_card_id,
+              c.challenge_version_id,
+              EXISTS(SELECT 1 FROM knowledge_cards x WHERE x.challenge_version_id = v.id) AS has_challenges
+       FROM knowledge_versions v
+       JOIN knowledge_cards c ON c.id = v.card_id
+       WHERE v.id = $1`,
+      [versionId]
+    )).rows[0];
+    if (!v) return null;
+
+    const metrics = await getReviewMetrics(versionId);
+
+    return {
+      version_id: v.id,
+      card_id: v.card_id,
+      version: v.version,
+      topic: v.topic,
+      summary: v.summary,
+      body: v.body,
+      sources: v.sources,
+      references: v.refs,
+      author_agent_id: v.author_agent_id,
+      status: metrics.status,
+      has_challenges: v.has_challenges,
+      review_counts: metrics.raw,
+      independent_review_counts: metrics.independent,
+      quorum: metrics.quorum,
+      confirmed_at: v.confirmed_at,
+      created_at: v.created_at
     };
   }
 
-  async function cardFrom(cardId:string){
-    const c=(await app.pg.query("SELECT * FROM knowledge_cards WHERE id=$1",[cardId])).rows[0];
-    if(!c)return null;
-    const challenges=await app.pg.query("SELECT id,latest_version_id FROM knowledge_cards WHERE challenge_card_id=$1 AND challenge_version_id IS NOT NULL",[cardId]);
-    const latest=c.latest_version_id?await versionFrom(c.latest_version_id):null;
-    let status:"unconfirmed"|"confirmed"|"refuted"|"archived"=latest?.status??"unconfirmed";
-    if(c.archived)status="archived";
-    return{
-      card_id:c.id,author_agent_id:c.author_agent_id,latest_version_id:c.latest_version_id,public:c.public,archived:Boolean(c.archived),status,review_counts:latest?.review_counts??{confirm:0,refute:0,comment:0},challenge_of:c.challenge_card_id?{card_id:c.challenge_card_id,version_id:c.challenge_version_id}:null,challenged_by:challenges.rows.map(x=>({card_id:x.id,latest_version_id:x.latest_version_id})),created_at:c.created_at,latest
+  async function cardFrom(cardId: string) {
+    const c = (await app.pg.query("SELECT * FROM knowledge_cards WHERE id = $1", [cardId])).rows[0];
+    if (!c) return null;
+    const challenges = await app.pg.query(
+      "SELECT id, latest_version_id FROM knowledge_cards WHERE challenge_card_id = $1 AND challenge_version_id IS NOT NULL",
+      [cardId]
+    );
+
+    const canonicalRow = (await app.pg.query(
+      "SELECT id, version FROM knowledge_versions WHERE card_id = $1 AND confirmed_at IS NOT NULL ORDER BY version DESC, created_at DESC LIMIT 1",
+      [cardId]
+    )).rows[0];
+    const canonical_version_id = canonicalRow?.id ?? null;
+
+    const latest = c.latest_version_id ? await versionFrom(c.latest_version_id) : null;
+
+    let status: "unconfirmed" | "confirmed" | "refuted" | "archived" = "unconfirmed";
+    if (c.archived) {
+      status = "archived";
+    } else if (canonical_version_id) {
+      status = "confirmed";
+    } else if (latest?.status === "refuted") {
+      status = "refuted";
+    } else {
+      status = "unconfirmed";
+    }
+
+    const has_pending_proposal = Boolean(
+      canonical_version_id && c.latest_version_id !== canonical_version_id && latest?.status === "unconfirmed"
+    );
+    const has_refuted_proposal = Boolean(
+      canonical_version_id && c.latest_version_id !== canonical_version_id && latest?.status === "refuted"
+    );
+
+    return {
+      card_id: c.id,
+      author_agent_id: c.author_agent_id,
+      latest_version_id: c.latest_version_id,
+      canonical_version_id,
+      has_pending_proposal,
+      has_refuted_proposal,
+      public: c.public,
+      archived: Boolean(c.archived),
+      status,
+      review_counts: latest?.review_counts ?? { confirm: 0, refute: 0, comment: 0 },
+      challenge_of: c.challenge_card_id ? { card_id: c.challenge_card_id, version_id: c.challenge_version_id } : null,
+      challenged_by: challenges.rows.map(x => ({ card_id: x.id, latest_version_id: x.latest_version_id })),
+      created_at: c.created_at,
+      latest
     };
   }
 
@@ -683,8 +879,10 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         }else{
           r=(await client.query("INSERT INTO knowledge_reviews(id,version_id,reviewer_agent_id,verdict,explanation,evidence) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",[id("rev"),vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
         }
-        const count=Number((await client.query("SELECT count(*) n FROM knowledge_reviews WHERE version_id=$1 AND verdict='confirm'",[vid])).rows[0].n);
-        if(count>=Number(process.env.CONFIRMATION_THRESHOLD??2))await client.query("UPDATE knowledge_versions SET confirmed_at=coalesce(confirmed_at,now()) WHERE id=$1",[vid]);
+        const metrics = await getReviewMetrics(vid, client);
+        if (metrics.independent.confirm >= metrics.threshold) {
+          await client.query("UPDATE knowledge_versions SET confirmed_at = coalesce(confirmed_at, now()) WHERE id = $1", [vid]);
+        }
         await client.query("COMMIT");
       }catch(e){
         await client.query("ROLLBACK");
