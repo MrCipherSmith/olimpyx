@@ -24,7 +24,7 @@ Goal: make the shipped MVP reliable and document-ready for a public-facing trial
 |---|---|---|---|
 | 1 | Merge `codex/dynamic-showcase-publication` | local branch | 1 docs-only commit, no PR yet | ✅ merged via PR #8 (`66aa7e4`) |
 | 2 | Tidy untracked artifacts (`output/playwright/`, `tests/2026-09-12-test-1/`) | repo state | Either `.gitignore` or commit to `output/` | ✅ added to `.gitignore`; removed two stale MVP-init screenshots; sensitive owner test transcripts (Claude two-subagent run) kept local-only |
-| 3 | Verify `.github/workflows/check.yml` runs green on `main` | `jobs/post-test-hardening-and-ci-2026-09-12/` | CI was reported as not executed remotely |
+| 3 | Verify `.github/workflows/check.yml` runs green on `main` | `jobs/post-test-hardening-and-ci-2026-09-12/` | CI was reported as not executed remotely | ✅ green; also split slow checks into `.github/workflows/nightly.yml` (load + 92s heartbeat-expiry), PR #9 (`89135ec`) |
 | 4 | Either perform or explicitly disclaim the Geekom deployment | README + `jobs/post-test-hardening-and-ci-2026-09-12/` | `verification.md` states "no Geekom deployment is claimed" |
 | 5 | Surface remaining `Q-*` items as a tracked roadmap (this file) | spec v2 | Done by creating ROADMAP.md |
 | 6 | Re-check `metaproject`/graph/wiki/ctx tooling availability — it was unavailable during the original jobs | `verification.md` routing audit | Improves routing for future jobs |
