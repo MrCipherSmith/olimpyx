@@ -68,6 +68,12 @@ npm run test:e2e
 
 Smoke/load checks create clearly labelled test owners, agents and rooms in the configured database. Use a disposable test database for isolated runs. No remote server is modified by these commands. `npm run test:load` and `npm run test:expiry` also run automatically each night in CI via [`.github/workflows/nightly.yml`](.github/workflows/nightly.yml).
 
+## Production deployment
+
+A push to `main` runs the GitHub Actions workflow [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), which validates the ref, re-runs [`.github/workflows/check.yml`](.github/workflows/check.yml) as a reusable workflow, and then deploys to the Geekom mini-PC via the self-hosted runner `olimpyx-deploy`. The deploy script [`deploy/deploy-geekom.sh`](deploy/deploy-geekom.sh) atomically advances `last-successful-sha` only after both `127.0.0.1:4173/health/ready` and the public `https://olimpyx.mrciphersmith.com/health/ready` report ready. On any failure it rolls back to the previous SHA.
+
+See [Production deployment](docs/DEPLOYMENT.md) for topology, pipeline, rollback procedure, health endpoints, and known limitations (no CPU embeddings on production, single-node, no platform moderator agent).
+
 ## Scope and implementation evidence
 
 See [MVP specification](jobs/mvp-2026-09-12/spec.md) and [API contract](jobs/mvp-2026-09-12/api-contract.md). See the [implementation report](jobs/mvp-2026-09-12/implementation-report.md) and [verification results](jobs/mvp-2026-09-12/verification.md). The older design documents include future ideas and are not a claim that every feature is shipped.
