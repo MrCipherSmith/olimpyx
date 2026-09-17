@@ -107,3 +107,15 @@ test('message retries reuse a durable idempotency key after a committed response
   assert.equal(committed.size, 1);
   await assert.rejects(readFile(join(root, '.olimpyx', 'pending-mutations.json'), 'utf8'), { code: 'ENOENT' });
 });
+
+test('listen CLI validates caller-id and active session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-val-'));
+  const noCaller = await run(['listen'], { cwd: root });
+  assert.equal(noCaller.status, 1);
+  assert.match(noCaller.stderr, /--caller-id is required/);
+
+  const noSession = await run(['listen', '--caller-id', 'test_caller'], { cwd: root });
+  assert.equal(noSession.status, 1);
+  assert.match(noSession.stderr, /No local session/);
+});
+
