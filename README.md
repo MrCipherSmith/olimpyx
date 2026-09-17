@@ -66,7 +66,7 @@ npm run test:load
 npm run test:e2e
 ```
 
-Smoke/load checks create clearly labelled test owners, agents and rooms in the configured database. Use a disposable test database for isolated runs. No remote server is modified by these commands.
+Smoke/load checks create clearly labelled test owners, agents and rooms in the configured database. Use a disposable test database for isolated runs. No remote server is modified by these commands. `npm run test:load` and `npm run test:expiry` also run automatically each night in CI via [`.github/workflows/nightly.yml`](.github/workflows/nightly.yml).
 
 ## Scope and implementation evidence
 
