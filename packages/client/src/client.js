@@ -84,7 +84,61 @@ export class OlimpyxClient {
   bootstrap() { return this.request('GET', '/v1/bootstrap'); }
   inbox(query = '') { return this.request('GET', `/v1/inbox/overview${query ? `?${query}` : ''}`); }
   rooms(query = '') { return this.request('GET', `/v1/rooms${query ? `?${query}` : ''}`); }
-  knowledge(query = '') { return this.request('GET', `/v1/knowledge/cards${query ? `?${query}` : ''}`); }
+  knowledge(query = '', options = {}) {
+    let q;
+    if (typeof query === 'string') {
+      if (query.includes('=') || query.startsWith('?')) {
+        q = new URLSearchParams(query.replace(/^\?/, ''));
+        for (const [k, v] of Object.entries(options)) {
+          if (v !== undefined && v !== null) q.set(k, String(v));
+        }
+      } else if (query) {
+        q = new URLSearchParams({ q: query });
+        for (const [k, v] of Object.entries(options)) {
+          if (v !== undefined && v !== null) q.set(k, String(v));
+        }
+      } else if (Object.keys(options).length > 0) {
+        q = new URLSearchParams();
+        for (const [k, v] of Object.entries(options)) {
+          if (v !== undefined && v !== null) q.set(k, String(v));
+        }
+      }
+    } else if (typeof query === 'object' && query !== null) {
+      q = new URLSearchParams();
+      for (const [k, v] of Object.entries(query)) {
+        if (v !== undefined && v !== null) q.set(k, String(v));
+      }
+    }
+    const qs = q ? q.toString() : '';
+    return this.request('GET', `/v1/knowledge/cards${qs ? `?${qs}` : ''}`);
+  }
+  getKnowledgeCard(cardId) {
+    return this.request('GET', `/v1/knowledge/cards/${encodeURIComponent(cardId)}`);
+  }
+  createKnowledgeCard(data, idempotencyKey) {
+    return this.request('POST', '/v1/knowledge/cards', data, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  createKnowledgeVersion(cardId, data, idempotencyKey) {
+    return this.request('POST', `/v1/knowledge/cards/${encodeURIComponent(cardId)}/versions`, data, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  getKnowledgeVersion(versionId) {
+    return this.request('GET', `/v1/knowledge/versions/${encodeURIComponent(versionId)}`);
+  }
+  reviewKnowledgeVersion(versionId, data, idempotencyKey) {
+    return this.request('POST', `/v1/knowledge/versions/${encodeURIComponent(versionId)}/reviews`, data, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  setCardPublication(cardId, isPublic) {
+    return this.request('PATCH', `/v1/knowledge/cards/${encodeURIComponent(cardId)}/public`, { public: Boolean(isPublic) });
+  }
+  setCardArchived(cardId, isArchived) {
+    return this.request('PATCH', `/v1/knowledge/cards/${encodeURIComponent(cardId)}/archive`, { archived: Boolean(isArchived) });
+  }
   sendMessage(roomId, body, idempotencyKey) { return this.request('POST', `/v1/rooms/${encodeURIComponent(roomId)}/messages`, body, { headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {} }); }
   getRoomMessages(roomId, { limit, before_cursor, after_cursor } = {}) {
     const cursor = before_cursor ?? after_cursor;
