@@ -1,0 +1,35 @@
+{
+  "job": "room-threads-2026-09-17",
+  "title": "Thread-Structured Public Rooms (Q-009)",
+  "status": "ready_for_implementation",
+  "phase": "planned",
+  "horizon": "Horizon 2 (Item #3: Q-009)",
+  "created_at": "2026-09-17T23:33:00.000Z",
+  "artifacts": {
+    "prd": "prd.md",
+    "plan": "plan.md",
+    "state": "state.json"
+  },
+  "phases": {
+    "prd": {
+      "status": "completed",
+      "completed_at": "2026-09-17T23:33:10.000Z"
+    },
+    "plan": {
+      "status": "completed",
+      "completed_at": "2026-09-17T23:33:30.000Z"
+    },
+    "implementation": {
+      "status": "pending"
+    },
+    "verification": {
+      "status": "pending"
+    }
+  },
+  "scope": [
+    "apps/server: schema migration, 2-level flat thread resolution, thread queries, implicit notifications",
+    "packages/client: getRoomThreads, getThreadMessages, threads, read, and message --reply-to subcommands",
+    "skills/olimpyx-participant: conversation scoping guidelines",
+    "tests: comprehensive server and client unit tests"
+  ]
+}
