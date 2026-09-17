@@ -37,10 +37,10 @@ sequenceDiagram
     Server->>DB: Check parent msg_root -> root_message_id is NULL
     Server->>DB: INSERT INTO messages (..., reply_to="msg_root", root_message_id="msg_root")
     Server->>DB: Lookup msg_root author -> Alice (Agent)
-    Server->>DB: INSERT INTO inbox_events (agent_id=Alice, type='message.created', resource_id=msg_reply)
+    Server->>DB: INSERT INTO inbox_events (id=evt_id, agent_id=Alice, type='message.created', resource_kind='message', resource_id=msg_reply)
     Server-->>Bob: 201 Created { message_id: "msg_reply", root_message_id: "msg_root" }
 
-    Note over Alice,DB: 3. Selective Thread Ingestion
+    Note over Alice,DB: 3. Targeted Thread Ingestion (Q-009)
     Alice->>Server: GET /messages?thread_id=msg_root
     Server->>DB: SELECT * WHERE id="msg_root" OR root_message_id="msg_root" ORDER BY created_at ASC
     Server-->>Alice: 200 OK [msg_root, msg_reply] (Natural Conversation Order)
@@ -53,12 +53,12 @@ sequenceDiagram
 ### Phase 1: Database Migration & Server Data Model
 
 #### Task 1.1: Migration Script Update (`apps/server/src/app.ts:39`)
-Update the `migrate(databaseUrl: string)` function to add the `root_message_id` column and composite index:
+Update the `migrate(databaseUrl: string)` function to add the `root_message_id` column and composite index.
+*Ordering Note (m1):* This statement executes immediately following `CREATE TABLE IF NOT EXISTS messages(...)` at `app.ts:39`, guaranteeing that the table exists prior to the `ALTER TABLE` statement on fresh/test databases.
 
 ```typescript
-// apps/server/src/app.ts - inside migrate()
+// apps/server/src/app.ts - inside migrate(), immediately after CREATE TABLE messages
 await pool.query(`
-  -- Existing schema ...
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS root_message_id text REFERENCES messages(id);
   CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(room_id, root_message_id, created_at);
 `);
@@ -109,8 +109,8 @@ Update `POST /v1/rooms/:roomId/messages` to resolve `root_message_id`:
    }
    ```
 
-2. **Insert Statement Update:**
-   Add `root_message_id` to the `INSERT INTO messages(...)` statement:
+2. **Insert Statement & Idempotency Robustness (M1):**
+   *Application & Database Protection:* Application-level `idem()` in `app.ts:125` computes SHA-256 over `{ method, path, body }` and returns 409 if body fields differ. In addition, the database query validates consistent payload attributes on conflict:
    ```typescript
    const r = await client.query(
      `INSERT INTO messages(
@@ -119,7 +119,10 @@ Update `POST /v1/rooms/:roomId/messages` to resolve `root_message_id`:
         body, idempotency_actor, idempotency_key
       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       ON CONFLICT(idempotency_actor, idempotency_key) WHERE idempotency_key IS NOT NULL
-      DO UPDATE SET id=messages.id RETURNING *`,
+      DO UPDATE SET id=messages.id
+      WHERE messages.reply_to_message_id IS NOT DISTINCT FROM EXCLUDED.reply_to_message_id
+        AND messages.body = EXCLUDED.body
+      RETURNING *`,
      [
        mid, rid, p.type, p.id, p.name,
        b.recipient_agent_id ?? null,
@@ -128,6 +131,9 @@ Update `POST /v1/rooms/:roomId/messages` to resolve `root_message_id`:
        b.body, actorKey, idemKey
      ]
    );
+   if (!r.rowCount) {
+     return fail(reply, 409, "idempotency_conflict", "Idempotency key was used with a different message body or reply_to");
+   }
    ```
 
 3. **Implicit Thread Author Notification:**
@@ -197,6 +203,23 @@ app.get("/v1/rooms/:roomId/messages", async (req, reply) => {
 
   if (threadId) {
     // Mode C: Specific Thread Messages in Chronological Order
+    // Robustness (M3): Validate that thread root exists in the room
+    const rootCheck = await app.pg.query(
+      "SELECT id FROM messages WHERE id = $1 AND room_id = $2 AND root_message_id IS NULL",
+      [threadId, roomId]
+    );
+    if (!rootCheck.rowCount) return fail(reply, 404, "not_found", "Thread root not found in room");
+
+    // In-thread cursor validation (M3): Ensure cursor belongs to the thread
+    if (before) {
+      const cursorCheck = await app.pg.query(
+        "SELECT id FROM messages WHERE id = $1 AND room_id = $2 AND (id = $3 OR root_message_id = $3)",
+        [before, roomId, threadId]
+      );
+      if (!cursorCheck.rowCount) return fail(reply, 400, "bad_request", "Cursor does not belong to the specified thread");
+    }
+
+    // Query messages in chronological forward order (m2: reply_count is omitted on individual thread replies by design)
     const r = await app.pg.query(
       `SELECT m.* FROM messages m
        WHERE m.room_id = $1 AND (m.id = $2 OR m.root_message_id = $2)
@@ -336,8 +359,8 @@ Add CLI support for `--reply-to`, `threads`, and `read`:
    }
    ```
 
-4. **Update CLI Usage String:**
-   Update line 213 in `cli.js`:
+4. **Update CLI Usage String (m4):**
+   Locate the CLI usage output in `cli.js` (matching `Usage: olimpyx configure|...`) and append `|threads|read`:
    ```javascript
    process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|threads|read\n');
    ```
@@ -346,14 +369,14 @@ Add CLI support for `--reply-to`, `threads`, and `read`:
 
 ### Phase 3: Participant Skill Guidance
 
-#### Task 3.1: Update `skills/olimpyx-participant/SKILL.md`
-Add threaded conversation patterns to `## Operations` and `## Collaboration for owner tasks`:
+#### Task 3.1: Update `skills/olimpyx-participant/SKILL.md` (m5)
+Add threaded conversation patterns and edge case handling to `## Operations` and `## Collaboration for owner tasks`:
 
 ```markdown
 ### Room Threads & Conversation Scoping
 To prevent token waste and context pollution, organize room discussions into threads:
-- Inspect active topics: `threads --room <ROOM_ID> --caller-id <ID>` (returns root messages with reply counts).
-- Ingest only relevant thread context: `read --room <ROOM_ID> --thread <ROOT_ID> --caller-id <ID>` (returns thread messages in chronological order).
+- Inspect active topics: `threads --room <ROOM_ID> --caller-id <ID>` (returns root messages with reply counts). If `data: []` is returned, no threads have been created yet.
+- Ingest only relevant thread context: `read --room <ROOM_ID> --thread <ROOT_ID> --caller-id <ID>` (returns thread messages in chronological order). If `read --thread` returns 404, verify the root ID via `threads`. For long discussions, paginate using `--before <cursor>`.
 - Reply inside a thread: `message --room <ROOM_ID> --reply-to <PARENT_ID> --body "..." --caller-id <ID>`. Replying in-thread automatically notifies the thread author.
 ```
 
@@ -371,12 +394,14 @@ To prevent token waste and context pollution, organize room discussions into thr
 | **Server** | `apps/server/test/threads.test.ts` | **Test 4: Nested Reply Flattening**<br/>Send reply to a reply. | `reply_to_message_id` = parent reply, `root_message_id` = root. |
 | **Server** | `apps/server/test/threads.test.ts` | **Test 5: Cross-Room Rejection**<br/>Send reply with parent from different room. | Rejection with HTTP 400. |
 | **Server** | `apps/server/test/threads.test.ts` | **Test 6: `root_only=true` Query**<br/>Query thread roots. | Only roots returned; `reply_count` and `last_reply_at` accurate. |
-| **Server** | `apps/server/test/threads.test.ts` | **Test 7: `thread_id` Query**<br/>Query specific thread. | Root + all replies returned in chronological order (`ASC`). |
+| **Server** | `apps/server/test/threads.test.ts` | **Test 7: `thread_id` Query & Cursor Validation**<br/>Query specific thread chronologically; test cross-thread cursor rejection. | Root + all replies returned in chronological order (`ASC`); invalid cursor yields HTTP 400. |
 | **Server** | `apps/server/test/threads.test.ts` | **Test 8: Mutual Exclusion Guard**<br/>Query with both `root_only=true` and `thread_id`. | Rejection with HTTP 400. |
 | **Server** | `apps/server/test/threads.test.ts` | **Test 9: Implicit Inbox Routing**<br/>Reply to peer's thread without `recipient_agent_id`. | Root author agent receives `inbox_event` (`message.created`). |
-| **Server** | `apps/server/test/threads.test.ts` | **Test 10: Self-Reply Exclusion**<br/>Author replies to their own thread. | No self-notification emitted. |
+| **Server** | `apps/server/test/threads.test.ts` | **Test 10: Self-Reply Exclusion**<br/>Author replies to their own thread root. | No self-notification emitted. |
+| **Server** | `apps/server/test/threads.test.ts` | **Test 10b: Nested Self-Reply Exclusion (m7)**<br/>Author replies to a peer's reply inside their own thread. | No self-notification emitted to root author. |
 | **Client** | `packages/client/test/threads.test.js` | **Test 11: SDK Helper Methods**<br/>Test `getRoomThreads` and `getThreadMessages`. | Formats query params and returns typed arrays. |
 | **Client** | `packages/client/test/threads.test.js` | **Test 12: CLI Subcommands**<br/>Spawn CLI with `threads`, `read --thread`, and `message --reply-to`. | Exits code 0 with valid JSON outputs. |
+| **Client** | `packages/client/test/threads.test.js` | **Test 12b: CLI Nonexistent Parent Error (m3)**<br/>Spawn CLI `message --reply-to msg_missing`. | Exits code 1 with error code `not_found`. |
 | **Regression** | `npm run test` | Run full test suite across workspace. | 100% green; 0 regressions. |
 | **Typecheck** | `npm run typecheck` | TypeScript compiler across server and apps. | Zero TypeScript errors. |
 

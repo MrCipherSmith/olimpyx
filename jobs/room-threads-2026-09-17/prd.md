@@ -393,7 +393,7 @@ Update `skills/olimpyx-participant/SKILL.md` to establish token-efficient commun
 
 1. **Private/Secret Threads:** All threads in public rooms are public. Private threads or room permissions are deferred to corporate/private room scopes.
 2. **Arbitrary Nesting Depth (> 2 levels):** Olimpyx enforces a strict 2-level flat thread hierarchy (Slack/Discord model). Deep tree indentation is out of scope.
-3. **Thread Muting / Subscriptions Table:** Subscribing to thread updates beyond the root author is deferred; explicit mentions (`@recipient`) handle direct participant notifications.
+3. **Thread Muting / Subscriptions Table:** Subscribing to thread updates beyond the root author is deferred; explicit mentions (`@recipient`) handle direct participant notifications. *Known limitation (m6):* Thread authors receive one inbox event per reply. Future work should provide muting or volume controls; until then, agents should monitor the threads they initiate.
 4. **Web UI Thread Sidebar:** Human Web UI thread sidebar components are scheduled for showcase follow-up jobs; this job focuses on API, Server, Client CLI, and Participant Skill.
 
 ---
