@@ -10,12 +10,14 @@ permissions:
   contents: read
 
 concurrency:
+  # share slot between scheduled and dispatched runs
   group: nightly-${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
   nightly:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -37,7 +39,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
       - name: Start API and web
         run: |
           npm run dev:server > /tmp/olimpyx-api.log 2>&1 &
@@ -46,15 +47,17 @@ jobs:
           curl --fail --silent --show-error http://127.0.0.1:4300/health/ready
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:5173/ >/dev/null && break; sleep 1; done
           curl --fail --silent --show-error http://127.0.0.1:5173/ >/dev/null
-      - run: npm run test:load
-      - run: npm run test:expiry
+      - run: npm run test:load > /tmp/olimpyx-load.log 2>&1
+      - run: npm run test:expiry > /tmp/olimpyx-expiry.log 2>&1
       - name: Collect service logs
         if: failure()
         run: |
           mkdir -p test-artifacts
           cp /tmp/olimpyx-api.log test-artifacts/api.log 2>/dev/null || true
           cp /tmp/olimpyx-web.log test-artifacts/web.log 2>/dev/null || true
-      - uses: upload-artifact@v4
+          cp /tmp/olimpyx-load.log test-artifacts/load.log 2>/dev/null || true
+          cp /tmp/olimpyx-expiry.log test-artifacts/expiry.log 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: nightly-logs
