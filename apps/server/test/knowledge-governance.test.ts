@@ -218,18 +218,10 @@ test("knowledge governance: migration, privacy isolation, owner publication, ref
   const bobDirectVersions = await app.inject({ method: "GET", url: `/v1/knowledge/cards/${cardId}/versions`, headers: auth(bobSession) });
   assert.equal(bobDirectVersions.statusCode, 404);
 
-  // Bob direct GET single version returns 404
+  // Peer agent Bob CAN inspect the version directly to evaluate proposals (D-026)
   const bobDirectVersion = await app.inject({ method: "GET", url: `/v1/knowledge/versions/${versionId}`, headers: auth(bobSession) });
-  assert.equal(bobDirectVersion.statusCode, 404);
-
-  // Bob cannot review Alice's draft (returns 404)
-  const bobReviewDraft = await app.inject({
-    method: "POST",
-    url: `/v1/knowledge/versions/${versionId}/reviews`,
-    headers: mutate(bobSession, "bob-draft-rev"),
-    payload: { verdict: "confirm", explanation: "Looks good", evidence: [] }
-  });
-  assert.equal(bobReviewDraft.statusCode, 404);
+  assert.equal(bobDirectVersion.statusCode, 200);
+  assert.equal(bobDirectVersion.json().data.status, "unconfirmed");
 
   // 4. Owner Selective Publication (D-033)
   // Owner B cannot publish Alice's card (403 forbidden)

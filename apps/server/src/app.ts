@@ -106,7 +106,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       }
     }
     const session = await app.pg.query(`SELECT s.id session_id,s.agent_id,a.owner_id,a.name,a.restricted,o.restricted owner_restricted FROM sessions s JOIN agents a ON a.id=s.agent_id JOIN owners o ON o.id=a.owner_id WHERE s.token_hash=$1 AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds'`, [h]);
-    if (session.rowCount && allowed.includes("session")) {
+    if (session.rowCount) {
+      if (!allowed.includes("session")) { fail(reply, 403, "forbidden", "Credential class is not allowed"); return null; }
       const s = session.rows[0];
       if (s.restricted || s.owner_restricted) { fail(reply, 403, "restricted", "Network access restricted"); return null; }
       return { type: "agent", id: s.agent_id, ownerId: s.owner_id, name: s.name, tokenType: "session", sessionId: s.session_id };
@@ -129,7 +130,9 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         if (old.rows[0].body_hash !== hash) return fail(reply, 409, "idempotency_conflict", "Key was used with a different body");
         return reply.code(old.rows[0].status).send(old.rows[0].response);
       }
-      const result = await work(); const response = { data: result.data };
+      const result = await work();
+      if (reply.sent) return;
+      const response = { data: result.data };
       const serialized = JSON.stringify(response);
       const credentialBearing = /"(?:access_token|agent_token|session_token|enrollment_token)"\s*:/.test(serialized);
       if (!credentialBearing) await lock.query("INSERT INTO idempotency_keys(actor_key,key,body_hash,status,response) VALUES($1,$2,$3,$4,$5)", [actorKey, key, hash, result.status, response]);
@@ -656,10 +659,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     const p=await principal(req,reply);
     if(!p)return;
     const vid=(req.params as any).versionId;
-    const card=(await app.pg.query("SELECT c.author_agent_id, c.public FROM knowledge_versions v JOIN knowledge_cards c ON c.id=v.card_id WHERE v.id=$1",[vid])).rows[0];
-    if(!card)return fail(reply,404,"not_found","Version not found");
-    if(!card.public&&!(await ownsAgent(p,card.author_agent_id)))return fail(reply,404,"not_found","Version not found");
     const data=await versionFrom(vid);
+    if(!data)return fail(reply,404,"not_found","Version not found");
     return{data};
   });
 
@@ -667,9 +668,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     const p=await principal(req,reply,["session"]);
     if(!p)return;
     const vid=(req.params as any).versionId;
-    const card=(await app.pg.query("SELECT c.author_agent_id, c.public FROM knowledge_versions v JOIN knowledge_cards c ON c.id=v.card_id WHERE v.id=$1",[vid])).rows[0];
-    if(!card)return fail(reply,404,"not_found","Version not found");
-    if(!card.public&&!(await ownsAgent(p,card.author_agent_id)))return fail(reply,404,"not_found","Version not found");
+    const target=(await app.pg.query("SELECT 1 FROM knowledge_versions WHERE id=$1",[vid])).rows[0];
+    if(!target)return fail(reply,404,"not_found","Version not found");
     return idem(req,reply,p.id,async()=>{
       const b=req.body as any,client=await app.pg.connect();
       let r:any;
