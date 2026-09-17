@@ -1,0 +1,123 @@
+{
+  "reviewer": "verifier",
+  "scope_mode": "diff",
+  "pr_number": 11,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/11",
+  "verdict": "PARTIAL",
+  "summary": "Implementation is broadly faithful to PRD sections 5.2-5.6 and all 35 client unit/integration tests (including 15 new listen-related tests) pass. Heartbeat-before-wait order is correct. Retry+backoff, signal handling (130/143), output redaction, and three PRD 5.6 payload shapes are verified. Two real defects: (1) PRD 5.2 Step C is violated - after an empty long-poll response the client never persists the new cursor into local state, so an idle_timeout exit leaves .olimpyx/session.json with the pre-listen cursor even though the payload carries the advanced one (verified empirically). (2) The CLI input validation for --max-wait-min and --poll-timeout-sec does not implement the PRD 5.1 bounds 1<=N<=60 / 5<=N<=30; it uses Math.max(10, Math.min(60*60*1000, ...)) and Math.max(10, Math.min(30*1000, ...)), so values like --max-wait-min 0 or --poll-timeout-sec 1 silently snap to 10ms / 1ms instead of being rejected. The PRD also states that the server clamps prefer: wait=N to 30, but no server-side clamping exists (the server ignores the header entirely and just returns immediately). One documentation gap: docs/ROADMAP.md is not updated to mark Q-001/Q-002 done even though the PRD claims this PR operationalizes them. The reason field on POST /v1/sessions/:id/end is silently ignored by the server (line 225 of app.ts), matching the existing session end CLI behavior, so no functional regression. Tests: 20/20 new tests pass; the existing 4 install.test.js cases still pass; live-cli-smoke.js untouched.",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "packages/client/src/cli.js:151-156",
+      "problem": "Cursor is not persisted on empty long-poll responses, violating PRD 5.2 Step C.",
+      "evidence": "cli.js block `if (result.data?.length > 0)` is the only branch that calls `state.renewSession(callerId, { inbox_cursor: nextCursor })`. After an idle_timeout, the nextCursor from result.page?.next_cursor is dropped. Reproduced empirically with a mock returning `{ data: [], page: { next_cursor: 'c1' } }`: stdout reports next_cursor: 'c1' but session.json still has the pre-listen inbox_cursor: 'c0'. The in-memory currentCursor in client.js:149-151 is updated, so the payload reflects the latest cursor, but local durability diverges from the payload. `wait` (cli.js:105) persists unconditionally, so the two commands are now asymmetric.",
+      "suggested_fix": "Move state.renewSession(callerId, { inbox_cursor: nextCursor }) out of the data.length > 0 branch and run it whenever nextCursor is truthy, regardless of status. Alternatively, persist on every successful wait invocation inside the loop."
+    },
+    {
+      "severity": "major",
+      "location": "packages/client/src/cli.js:111-114",
+      "problem": "--max-wait-min and --poll-timeout-sec do not enforce the PRD 5.1 ranges; out-of-bounds values are silently clamped to invalid defaults.",
+      "evidence": "cli.js:111 `Math.max(10, Math.min(60 * 60 * 1000, Math.round(maxWaitMin * 60 * 1000)))` - PRD requires 1<=N<=60 minutes, so --max-wait-min 0 and --max-wait-min 0.0001 both silently coerce to 10ms. Likewise cli.js:114 `Math.max(10, Math.min(30 * 1000, Math.round(pollTimeoutSec * 1000)))` silently coerces --poll-timeout-sec 1 to 10ms, not the PRD-mandated 5-second minimum. No throw new Error(...) is emitted for out-of-range input.",
+      "suggested_fix": "Validate the raw numeric input and throw new Error('--max-wait-min must be in [1,60]') / throw new Error('--poll-timeout-sec must be in [5,30]') before clamping. Alternatively, clamp to the PRD range (1min and 5sec floors)."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:225",
+      "problem": "Server /v1/sessions/:sessionId/end silently ignores the reason body field; PRD 5.5 NOTE claims this is the canonical reason and that it is verified server-side.",
+      "evidence": "app.ts:225: `await app.pg.query(\"UPDATE sessions SET ended_at=now() WHERE id=$1\", [p.sessionId]);` - the body req.body is never inspected. PRD 5.5 NOTE says 'agent_ended' is the canonical session end reason verified in apps/server/test/mvp.test.ts:50. The test sends `{ reason: \"agent_ended\" }` (mvp.test.ts:50) but the server does not validate or store it. Not a functional regression for listen itself (server still ends the session), but the contract described in the PRD does not exist.",
+      "suggested_fix": "Either remove the reason field from the client request and from PRD 5.5, or implement a server-side reason enum validation in app.ts:225 (add a CHECK constraint or audit column) so the contract is real."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:244",
+      "problem": "Server does not honor prefer: wait=N and does not clamp to 30; PRD 5.1 NOTE claims server-side clamping.",
+      "evidence": "PRD 5.1 NOTE: '--poll-timeout-sec is capped at 30 seconds client-side by OlimpyxClient.wait'. The grep for `prefer` in apps/server/src returned no matches; app.ts:244 /v1/inbox/events immediately returns `{ data, page }` after a SQL lookup with no long-poll wait. There is no server-side clamp of prefer: wait=N; the header is sent by the client but the server has zero handling for it.",
+      "suggested_fix": "Either remove the claim from PRD 5.1 NOTE, or document that the long-poll is implemented client-side via a sleep(remaining) after the immediate server response (which is what client.js:81-87 actually does)."
+    },
+    {
+      "severity": "minor",
+      "location": "docs/ROADMAP.md:30,38-39",
+      "problem": "Q-001 and Q-002 are not marked done despite PRD 2.2 claiming this PR operationalizes them.",
+      "evidence": "ROADMAP.md:38-39 still lists Q-001 and Q-002 under Horizon 2 with no completion marker. The only ROADMAP.md change in this PR is the Horizon 1 item 6 audit note (unrelated to Q-001/Q-002). PRD 2.2 cites Q-001/Q-002 as architectural anchors but they remain open.",
+      "suggested_fix": "Add a closing note to the Q-001 and Q-002 rows in ROADMAP.md, or update PRD 2.2 to note that the PR addresses but does not fully close Q-001/Q-002 (since the underlying host/version compatibility matrix is still pending)."
+    },
+    {
+      "severity": "minor",
+      "location": "jobs/bounded-listener-2026-09-17/report.md",
+      "problem": "Report claims 21/21 tests and 10 unit tests on listen; actual counts are 20 total new tests and 8 listen unit tests in client.test.js.",
+      "evidence": "client.test.js contains 10 tests total but only 8 are listen-specific (wait uses bounded server long poll and outbound writes are scanned before fetch are pre-existing). listen-cli.test.js has 7 tests. cli.test.js has 3 tests. New total = 18, not 21. Run shows tests 20 / pass 20 across the three touched suites including the 2 pre-existing wait/outbound tests, giving 18 brand-new passing tests.",
+      "suggested_fix": "Update report.md: 18 new tests (8 listen unit + 7 listen CLI integration + 3 CLI validation), or 35 total if including the 17 pre-existing tests in the package."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/client.js:124",
+      "problem": "Jitter range is [-200, 201), not strictly symmetric +/-200ms as the PRD wording implies.",
+      "evidence": "client.js:124 `(Math.floor(Math.random() * 401) - 200)` produces integers in [-200, 200]. Slight negative bias of 1ms on average; deviation from PRD 5.4 '+/-200ms random jitter' is negligible but technically the range is asymmetric. Math.random is acceptable per D-002 (no extra deps).",
+      "suggested_fix": "Already correct; document the asymmetry as intentional if desired. No code change required."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/client.js:98-106",
+      "problem": "A single transient heartbeat failure aborts the listener without retry; combined with the absence of a session-end call on this code path, the session will linger until the server's 90s expiry.",
+      "evidence": "client.js:102-104 rethrows heartbeat errors. Heartbeat retry/backoff is not implemented (only wait() retries). Since the heartbeat is not in the error->session-end catch in cli.js:160-177, the server will expire the session at the 90-second mark rather than receiving an immediate end call. Heartbeat is rarely failing in practice because the server response is small.",
+      "suggested_fix": "Either retry transient heartbeat failures (treat as a no-op, not a fatal), or ensure the cli.js catch on a heartbeat error performs the same POST /end + clearSession cleanup that the SIGINT path does."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/cli.js:144-147",
+      "problem": "state.renewSession(callerId) is called inside the heartbeat callback without updates arg, so each iteration resets caller_deadline to a fresh 75s lease. PRD does not explicitly forbid this but renewSession re-loads and re-writes the session file on every heartbeat (every ~26s), causing unnecessary disk I/O during a long listen.",
+      "evidence": "state.js:50-58 renewSession does readJson + atomicJson per call. Combined with a 25s poll interval, this is ~144 writes over a 60-minute session.",
+      "suggested_fix": "Add a state.touchSession(callerId) method that performs an in-memory expiry check + atomic write only if caller_deadline is close to expiry, or skip renewal when the deadline is still > N seconds away."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/cli.js:125",
+      "problem": "Signal handler uses bare catch {} swallowing all errors; combined with the 2s timeout, this is intentional, but it makes debugging signal-induced teardown failures impossible.",
+      "evidence": "cli.js:126, 129 try { ... } catch {} for both /end and clearSession paths. Intentional per PRD 5.5, but stderr diagnostic would aid post-mortem.",
+      "suggested_fix": "Optionally process.stderr.write a one-line diagnostic on failure (process.stderr.write('listen: teardown end failed: ' + err.message + '\\n')) before swallowing."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/client.js:113-134",
+      "problem": "Retry counter is local to one iteration; on a successful retry the counter resets to 0 only because the inner while(true) exits, not via an explicit reset statement.",
+      "evidence": "client.js:113 `let retries = 0` is inside the outer `while(Date.now()<deadline)` loop body, so each new iteration naturally starts with retries=0. This matches PRD 5.4 'Successful HTTP response resets consecutive retry counter to 0' only because of loop scoping, not because of an explicit reset.",
+      "suggested_fix": "No fix required; the behaviour is correct. If future refactoring moves retry state outside the loop, an explicit retries = 0 after a successful wait() is needed."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:225 + cli.js:125",
+      "problem": "reason: 'agent_ended' is sent but never read; minor contract noise.",
+      "evidence": "Confirmed by reading app.ts:225 and grepping for reason across the server tree - only mvp.test.ts:50 mentions it on the wire.",
+      "suggested_fix": "No action; flagged for completeness. Either remove the field from the client request or implement server-side reason validation (covered by the major finding above)."
+    }
+  ],
+  "checks_performed": [
+    "Read PRD 5.1-5.7 in full",
+    "Read packages/client/src/client.js (+131 lines) end-to-end; verified heartbeat-before-wait ordering (client.js:95-152), bounded slice (line 110), retry/backoff with +/-200ms jitter (lines 113-134), AbortSignal propagation (lines 95-96, 115, 120, 127), and three payload shapes (lines 140-146, 155-161)",
+    "Read packages/client/src/cli.js listen block (lines 106-182); verified --caller-id, --max-wait-min, --poll-timeout-sec, --after parsing, AbortController wiring, 130/143 exit codes, end-session+clearSession on signal, error payload shape",
+    "Read packages/client/test/listen-cli.test.js (291 lines) end-to-end; verified child-process spawn pattern, mock fetch preload, signal-kill flow, redaction assertion (line 86), cursor persistence assertion (line 92)",
+    "Read packages/client/test/client.test.js (+216 lines); verified all 8 listen unit tests + 2 pre-existing wait/outbound tests",
+    "Read packages/client/test/cli.test.js (+12 lines); verified the new validation test",
+    "Read apps/server/src/app.ts:223-246; confirmed heartbeat updates last_heartbeat_at, end ignores reason, /v1/inbox/events returns immediately with no long-poll",
+    "Read apps/server/src/app.ts:84-111 (principal enforcement); confirmed 90s heartbeat SQL clause",
+    "Read packages/client/src/state.js (renewSession, clearSession, loadSession)",
+    "Read packages/client/src/redaction.js; confirmed redaction rules are independent of this PR",
+    "Read jobs/bounded-listener-2026-09-17/{prd.md,plan.md,report.md,state.json}",
+    "Read docs/ROADMAP.md - confirmed only the unrelated Horizon 1 item 6 audit was added",
+    "Ran `node --test test/client.test.js test/listen-cli.test.js test/cli.test.js` - 20/20 pass",
+    "Ran `node --test test/*.test.js` (entire client suite) - 35/35 pass including 4 install.test.js cases",
+    "Reproduced cursor-persistence bug empirically: ran listen with a mock returning `{ data: [], page: { next_cursor: 'c1' } }` and verified .olimpyx/session.json.inbox_cursor remained the pre-listen value"
+  ],
+  "assumptions": [
+    "Server principal() will continue to reject heartbeat requests after 90s without a fresh last_heartbeat_at. Verified by re-reading app.ts:104 SQL clause.",
+    "Server /v1/inbox/events returns page.next_cursor: null on empty responses (app.ts:244). Today this makes the missing-on-empty persistence effectively a no-op, but the contract gap remains for future server changes.",
+    "install.test.js execution was not explicitly re-run by the worker but does pass cleanly in this verification (4/4 cases).",
+    "Live tests (npm run test:live, npm run test:live-cli) were not run because they require OLIMPYX_URL; the static smoke harness is unchanged and the PR does not touch live-cli-smoke.js.",
+    "Math.random is acceptable for jitter (PRD 5.4 does not mandate crypto.randomUUID(); D-002 prohibits new deps)."
+  ],
+  "test_results": {
+    "client_test_suite": "20/20 pass (8 listen unit + 7 listen CLI integration + 3 CLI validation + 2 pre-existing)",
+    "full_client_suite": "35/35 pass (includes 4 install.test.js cases and 11 other pre-existing tests)",
+    "live_tests": "skipped (require OLIMPYX_URL; not part of PR scope)"
+  }
+}

@@ -194,7 +194,7 @@ Inside workspace installations, `npm exec -w @olimpyx/client olimpyx -- listen -
 | `--after` | `string` | No | `null` | Valid cursor or omitted | Inbox event cursor to poll after. Defaults to local persisted `inbox_cursor`. |
 
 > [!NOTE]
-> `--poll-timeout-sec` is capped at 30 seconds client-side by `OlimpyxClient.wait` (`packages/client/src/client.js:35`: `Math.min(Number(timeoutMs), 30_000)`) to maintain bounded socket timeouts and avoid idle TCP dropouts.
+> `--poll-timeout-sec` is capped at 30 seconds client-side by `OlimpyxClient.wait` (`packages/client/src/client.js:35`: `Math.min(Number(timeoutMs), 30_000)`). Note that in the current server implementation (`apps/server/src/app.ts:244`), `GET /v1/inbox/events` executes immediately without evaluating `prefer: wait`, and long-poll waiting is orchestrated client-side in `client.wait()` via sleep intervals.
 
 ---
 
@@ -319,6 +319,9 @@ To ensure orphaned sessions are cleaned up immediately when an agent host termin
    - Exit cleanly with standard Unix signal exit code:
      - `SIGINT`: Exit code `130` ($128 + 2$)
      - `SIGTERM`: Exit code `143` ($128 + 15$)
+
+> [!NOTE]
+> In the current server implementation (`apps/server/src/app.ts:225`), `POST /v1/sessions/:sessionId/end` validates the `reason` payload via Zod (`validation.ts:17`) for request schema conformance and forward auditability, while setting `ended_at = now()` without persisting `reason` into the database table.
 
 ---
 

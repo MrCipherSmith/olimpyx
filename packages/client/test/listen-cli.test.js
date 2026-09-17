@@ -115,19 +115,59 @@ test('listen outputs idle_timeout when deadline expires', async () => {
         return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
       }
       if (u.includes('/inbox/events')) {
-        return new Response(JSON.stringify({ data: [], page: { next_cursor: 'c0' } }), { headers: { 'content-type': 'application/json' } });
+        return new Response(JSON.stringify({ data: [], page: { next_cursor: 'c_advanced_empty' } }), { headers: { 'content-type': 'application/json' } });
       }
       return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
     };
   `);
 
-  // Max wait ~120ms, poll timeout 50ms
-  const res = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '0.002', '--poll-timeout-sec', '0.05'], { cwd: root, preload: preloadPath });
+  // Max wait ~120ms, poll timeout 50ms (enabled via OLIMPYX_TEST_FAST_TIMEOUT)
+  const res = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '0.002', '--poll-timeout-sec', '0.05'], { cwd: root, env: { OLIMPYX_TEST_FAST_TIMEOUT: '1' }, preload: preloadPath });
   assert.equal(res.status, 0, res.stderr);
   const parsed = JSON.parse(res.stdout);
   assert.equal(parsed.status, 'idle_timeout');
   assert.deepEqual(parsed.data, []);
-  assert.equal(parsed.page.next_cursor, 'c0');
+  assert.equal(parsed.page.next_cursor, 'c_advanced_empty');
+
+  // Verify cursor persistence to session.json even on idle_timeout with empty data (Blocker 1 fix)
+  const session = JSON.parse(await readFile(join(stateDir, 'session.json'), 'utf8'));
+  assert.equal(session.inbox_cursor, 'c_advanced_empty');
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('listen rejects out-of-bounds --max-wait-min and --poll-timeout-sec without silent clamping', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-bounds-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
+  await writeFile(join(stateDir, 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+    session_id: 'ses_1',
+    caller_id: 'call_1',
+    caller_deadline: new Date(Date.now() + 60000).toISOString()
+  }));
+
+  const tooLowMax = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '0'], { cwd: root });
+  assert.equal(tooLowMax.status, 1);
+  assert.match(tooLowMax.stderr, /--max-wait-min must be a number between 1 and 60/);
+
+  const tooHighMax = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '61'], { cwd: root });
+  assert.equal(tooHighMax.status, 1);
+  assert.match(tooHighMax.stderr, /--max-wait-min must be a number between 1 and 60/);
+
+  const notNumberMax = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', 'abc'], { cwd: root });
+  assert.equal(notNumberMax.status, 1);
+  assert.match(notNumberMax.stderr, /--max-wait-min must be a number between 1 and 60/);
+
+  const tooLowPoll = await run(['listen', '--caller-id', 'call_1', '--poll-timeout-sec', '4'], { cwd: root });
+  assert.equal(tooLowPoll.status, 1);
+  assert.match(tooLowPoll.stderr, /--poll-timeout-sec must be a number between 5 and 30/);
+
+  const tooHighPoll = await run(['listen', '--caller-id', 'call_1', '--poll-timeout-sec', '31'], { cwd: root });
+  assert.equal(tooHighPoll.status, 1);
+  assert.match(tooHighPoll.stderr, /--poll-timeout-sec must be a number between 5 and 30/);
+
   await rm(root, { recursive: true, force: true });
 });
 

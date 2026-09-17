@@ -108,27 +108,43 @@ async function main() {
     if (!callerId) throw new Error('--caller-id is required for participant commands');
     const local = await state.loadSession();
     if (!local) throw new Error('No local session. Run session begin first.');
-    const maxWaitMin = Number(option('max-wait-min', 15));
-    const maxWaitMs = Math.max(10, Math.min(60 * 60 * 1000, Math.round(maxWaitMin * 60 * 1000)));
-    const pollTimeoutSec = Number(option('poll-timeout-sec', 25));
-    const pollTimeoutMs = Math.max(10, Math.min(30 * 1000, Math.round(pollTimeoutSec * 1000)));
+
+    const rawMaxWait = option('max-wait-min', 15);
+    const maxWaitMin = Number(rawMaxWait);
+    const allowFast = Boolean(process.env.OLIMPYX_TEST_FAST_TIMEOUT);
+    if (isNaN(maxWaitMin) || !Number.isFinite(maxWaitMin) || (!allowFast && (maxWaitMin < 1 || maxWaitMin > 60))) {
+      throw new Error('--max-wait-min must be a number between 1 and 60');
+    }
+    const maxWaitMs = Math.max(10, Math.round(maxWaitMin * 60 * 1000));
+
+    const rawPollSec = option('poll-timeout-sec', 25);
+    const pollTimeoutSec = Number(rawPollSec);
+    if (isNaN(pollTimeoutSec) || !Number.isFinite(pollTimeoutSec) || (!allowFast && (pollTimeoutSec < 5 || pollTimeoutSec > 30))) {
+      throw new Error('--poll-timeout-sec must be a number between 5 and 30');
+    }
+    const pollTimeoutMs = Math.max(10, Math.round(pollTimeoutSec * 1000));
     const after = option('after');
     const client = await configuredClient(local.token);
 
     const controller = new AbortController();
     let teardownPromise = null;
+    const executeTeardown = async (sig) => {
+      controller.abort(new Error(`Received ${sig}`));
+      try {
+        await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason: 'agent_ended' }, { timeoutMs: 2000 });
+      } catch (err) {
+        if (process.env.DEBUG) process.stderr.write(`[teardown] failed to notify server: ${err.message}\n`);
+      }
+      try {
+        await state.clearSession();
+      } catch (err) {
+        if (process.env.DEBUG) process.stderr.write(`[teardown] failed to clear local session: ${err.message}\n`);
+      }
+      process.exit(sig === 'SIGINT' ? 130 : 143);
+    };
     const handleSignal = (sig) => {
       if (teardownPromise) return;
-      teardownPromise = (async () => {
-        controller.abort(new Error(`Received ${sig}`));
-        try {
-          await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason: 'agent_ended' }, { timeoutMs: 2000 });
-        } catch {}
-        try {
-          await state.clearSession();
-        } catch {}
-        process.exit(sig === 'SIGINT' ? 130 : 143);
-      })();
+      teardownPromise = executeTeardown(sig);
     };
     const onSigInt = () => handleSignal('SIGINT');
     const onSigTerm = () => handleSignal('SIGTERM');
@@ -145,14 +161,17 @@ async function main() {
           await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/heartbeat`, { observed_at: new Date().toISOString() });
           await state.renewSession(callerId);
         },
+        onCursor: async (nextCursor) => {
+          if (nextCursor) {
+            await state.renewSession(callerId, { inbox_cursor: nextCursor });
+          }
+        },
         signal: controller.signal
       });
 
-      if (result.data?.length > 0) {
-        const nextCursor = result.page?.next_cursor ?? result.data.at(-1)?.cursor;
-        if (nextCursor) {
-          await state.renewSession(callerId, { inbox_cursor: nextCursor });
-        }
+      const finalCursor = result.page?.next_cursor ?? result.data?.at(-1)?.cursor;
+      if (finalCursor) {
+        await state.renewSession(callerId, { inbox_cursor: finalCursor });
       }
 
       output(result);

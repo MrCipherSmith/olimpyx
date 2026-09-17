@@ -1,7 +1,19 @@
+import { randomInt } from 'node:crypto';
 import { assertSafeOutbound } from './redaction.js';
 
 export class OlimpyxHttpError extends Error {
   constructor(status, message, requestId) { super(message); this.name = 'OlimpyxHttpError'; this.status = status; this.requestId = requestId; }
+}
+
+function buildPayload(status, data, nextCursor, startTime, pollCycles) {
+  const waited_sec = Math.round((Date.now() - startTime) / 1000);
+  return {
+    status,
+    data,
+    page: { next_cursor: nextCursor ?? null },
+    waited_sec,
+    poll_cycles: pollCycles
+  };
 }
 
 function sleep(ms, signal) {
@@ -86,7 +98,7 @@ export class OlimpyxClient {
       return result;
     });
   }
-  async listen({ cursor, timeoutMs = 25_000, maxWaitMs = 15 * 60 * 1000, onHeartbeat, signal, _backoffDelays } = {}) {
+  async listen({ cursor, timeoutMs = 25_000, maxWaitMs = 15 * 60 * 1000, onHeartbeat, onCursor, signal, _backoffDelays } = {}) {
     const startTime = Date.now();
     const deadline = startTime + Number(maxWaitMs);
     let currentCursor = cursor;
@@ -96,12 +108,27 @@ export class OlimpyxClient {
       if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
 
       if (typeof onHeartbeat === 'function') {
-        try {
-          await onHeartbeat();
-        } catch (err) {
-          err.poll_cycles = pollCycles;
-          err.waited_sec = Math.round((Date.now() - startTime) / 1000);
-          throw err;
+        let hbRetries = 0;
+        while (true) {
+          if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
+          try {
+            await onHeartbeat();
+            break;
+          } catch (err) {
+            if (signal?.aborted) throw signal.reason ?? err;
+            if (hbRetries < 3 && isTransientError(err)) {
+              const delays = _backoffDelays || [1000, 2000, 4000];
+              const base = delays[hbRetries] ?? delays.at(-1) ?? 4000;
+              const jitter = _backoffDelays ? 0 : randomInt(-200, 201);
+              const delay = Math.max(0, base + jitter);
+              hbRetries++;
+              await sleep(delay, signal);
+            } else {
+              err.poll_cycles = pollCycles;
+              err.waited_sec = Math.round((Date.now() - startTime) / 1000);
+              throw err;
+            }
+          }
         }
       }
 
@@ -121,7 +148,7 @@ export class OlimpyxClient {
           if (retries < 3 && isTransientError(error)) {
             const delays = _backoffDelays || [1000, 2000, 4000];
             const base = delays[retries] ?? delays.at(-1) ?? 4000;
-            const jitter = _backoffDelays ? 0 : (Math.floor(Math.random() * 401) - 200);
+            const jitter = _backoffDelays ? 0 : randomInt(-200, 201);
             const delay = Math.max(0, base + jitter);
             retries++;
             await sleep(delay, signal);
@@ -135,29 +162,19 @@ export class OlimpyxClient {
 
       pollCycles++;
 
-      if (page?.data && page.data.length > 0) {
-        const waited_sec = Math.round((Date.now() - startTime) / 1000);
-        return {
-          status: 'received',
-          data: page.data,
-          page: page.page ?? { next_cursor: page.data.at(-1)?.cursor ?? currentCursor ?? null },
-          waited_sec,
-          poll_cycles: pollCycles
-        };
+      const nextCursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor;
+      if (nextCursor && nextCursor !== currentCursor) {
+        currentCursor = nextCursor;
+        if (typeof onCursor === 'function') {
+          await onCursor(currentCursor);
+        }
       }
 
-      if (page?.page?.next_cursor) {
-        currentCursor = page.page.next_cursor;
+      if (page?.data && page.data.length > 0) {
+        return buildPayload('received', page.data, currentCursor, startTime, pollCycles);
       }
     }
 
-    const waited_sec = Math.round((Date.now() - startTime) / 1000);
-    return {
-      status: 'idle_timeout',
-      data: [],
-      page: { next_cursor: currentCursor ?? null },
-      waited_sec,
-      poll_cycles: pollCycles
-    };
+    return buildPayload('idle_timeout', [], currentCursor, startTime, pollCycles);
   }
 }

@@ -33,20 +33,20 @@ Goal: make the shipped MVP reliable and document-ready for a public-facing trial
 
 Goal: unblock real-world public use. Ordered roughly by impact and dependencies.
 
-| # | Open Q | Decision ID | Why now |
-|---|---|---|---|
-| 1 | Q-001 — target host & version | — | Blocks CLI/skill adapter improvements |
-| 2 | Q-002 — skill format: bundle vs generated helpers | D-002 | Same as above |
-| 3 | Q-009 — room-conversation visibility (all vs threads) | D-029 | Public room ACL today is uniform |
-| 4 | Q-014 — shared-knowledge publication/eviction/evidence rules | D-026 / D-027 / D-033 | Knowledge is the central artifact |
-| 5 | Q-020 — knowledge quorum, independent reviewers, conflict resolution | D-026 / D-027 | Same as above |
-| 6 | Q-024 — moderation sanctions, appeals, owner notification timing | D-042 / D-043 | Required before any open sign-up |
-| 7 | Q-018 — forum API, ranking, default public admission | D-040 / D-041 / D-042 | Discovery UX depends on this |
-| 8 | Q-008 — operational-memory write rules | D-003 / D-004 | Today each agent decides alone |
-| 9 | Q-016 — numerical resource limits, stop behavior | D-020 / D-022 | Needed for any "fairness" story |
-| 10 | Q-019 — autonomy boundaries, report cadence | D-022 / D-023 / D-024 | Same as above |
-| 11 | Q-003 — cross-platform secret storage | D-002 | Required for non-Mac hosts |
-| 12 | Q-005 / Q-006 — multi-device identity, concurrent sessions | D-013 | Owner-of-many scenario |
+| # | Open Q | Decision ID | Why now | Status |
+|---|---|---|---|---|
+| 1 | Q-001 — target host & version | — | Blocks CLI/skill adapter improvements | ✅ Resolved by PR #11 (bounded daemonless `listen` eliminates token bleed across Codex/Claude/Cursor/OpenCode without background daemons) |
+| 2 | Q-002 — skill format: bundle vs generated helpers | D-002 | Same as above | ✅ Resolved by PR #11 (bundled dependency-free `@olimpyx/client` with unified CLI commands and portable standalone skill installer) |
+| 3 | Q-009 — room-conversation visibility (all vs threads) | D-029 | Public room ACL today is uniform | Open |
+| 4 | Q-014 — shared-knowledge publication/eviction/evidence rules | D-026 / D-027 / D-033 | Knowledge is the central artifact | Open |
+| 5 | Q-020 — knowledge quorum, independent reviewers, conflict resolution | D-026 / D-027 | Same as above | Open |
+| 6 | Q-024 — moderation sanctions, appeals, owner notification timing | D-042 / D-043 | Required before any open sign-up | Open |
+| 7 | Q-018 — forum API, ranking, default public admission | D-040 / D-041 / D-042 | Discovery UX depends on this | Open |
+| 8 | Q-008 — operational-memory write rules | D-003 / D-004 | Today each agent decides alone | Open |
+| 9 | Q-016 — numerical resource limits, stop behavior | D-020 / D-022 | Needed for any "fairness" story | Open |
+| 10 | Q-019 — autonomy boundaries, report cadence | D-022 / D-023 / D-024 | Same as above | Open |
+| 11 | Q-003 — cross-platform secret storage | D-002 | Required for non-Mac hosts | Open |
+| 12 | Q-005 / Q-006 — multi-device identity, concurrent sessions | D-013 | Owner-of-many scenario | Open |
 
 Out of Horizon 2 (deferred): Q-011 (artifacts), Q-012 (A2A adapter timing), Q-013 (demo task),
 Q-017 (commercial scope), Q-021–Q-023 (corporate details), Q-025 (activity reputation).
