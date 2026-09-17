@@ -47,7 +47,9 @@ export async function migrate(databaseUrl: string) {
     CREATE TABLE IF NOT EXISTS idempotency_keys (actor_key text NOT NULL, key text NOT NULL, body_hash text NOT NULL, status integer NOT NULL, response jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(actor_key,key));
     CREATE TABLE IF NOT EXISTS knowledge_cards (id text PRIMARY KEY, author_agent_id text NOT NULL REFERENCES agents(id), latest_version_id text, challenge_card_id text REFERENCES knowledge_cards(id), challenge_version_id text, created_at timestamptz NOT NULL DEFAULT now());
     ALTER TABLE knowledge_cards ADD COLUMN IF NOT EXISTS public boolean NOT NULL DEFAULT false;
+    ALTER TABLE knowledge_cards ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
     CREATE INDEX IF NOT EXISTS knowledge_cards_public_created_at ON knowledge_cards(public,created_at DESC) WHERE public=true;
+    CREATE INDEX IF NOT EXISTS idx_knowledge_cards_pub_arch ON knowledge_cards(public, archived, created_at DESC);
     CREATE TABLE IF NOT EXISTS knowledge_versions (id text PRIMARY KEY, card_id text NOT NULL REFERENCES knowledge_cards(id), version integer NOT NULL, topic text NOT NULL, summary text NOT NULL, body text NOT NULL, sources jsonb NOT NULL DEFAULT '[]', refs jsonb NOT NULL DEFAULT '[]', author_agent_id text NOT NULL REFERENCES agents(id), confirmed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(card_id,version));
     ALTER TABLE knowledge_versions ADD COLUMN IF NOT EXISTS idempotency_key text;
     ALTER TABLE knowledge_versions ADD COLUMN IF NOT EXISTS idempotency_body_hash text;
@@ -104,7 +106,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       }
     }
     const session = await app.pg.query(`SELECT s.id session_id,s.agent_id,a.owner_id,a.name,a.restricted,o.restricted owner_restricted FROM sessions s JOIN agents a ON a.id=s.agent_id JOIN owners o ON o.id=a.owner_id WHERE s.token_hash=$1 AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds'`, [h]);
-    if (session.rowCount && allowed.includes("session")) {
+    if (session.rowCount) {
+      if (!allowed.includes("session")) { fail(reply, 403, "forbidden", "Credential class is not allowed"); return null; }
       const s = session.rows[0];
       if (s.restricted || s.owner_restricted) { fail(reply, 403, "restricted", "Network access restricted"); return null; }
       return { type: "agent", id: s.agent_id, ownerId: s.owner_id, name: s.name, tokenType: "session", sessionId: s.session_id };
@@ -127,7 +130,9 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         if (old.rows[0].body_hash !== hash) return fail(reply, 409, "idempotency_conflict", "Key was used with a different body");
         return reply.code(old.rows[0].status).send(old.rows[0].response);
       }
-      const result = await work(); const response = { data: result.data };
+      const result = await work();
+      if (reply.sent) return;
+      const response = { data: result.data };
       const serialized = JSON.stringify(response);
       const credentialBearing = /"(?:access_token|agent_token|session_token|enrollment_token)"\s*:/.test(serialized);
       if (!credentialBearing) await lock.query("INSERT INTO idempotency_keys(actor_key,key,body_hash,status,response) VALUES($1,$2,$3,$4,$5)", [actorKey, key, hash, result.status, response]);
@@ -418,16 +423,278 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed").length,moderation:pending.filter(x=>x.type==="moderation.updated").length},latest}}});
   app.post("/v1/inbox/cursors",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const cursor=(req.body as any).cursor,sequence=cursorFrom(cursor);await app.pg.query("INSERT INTO inbox_checkpoints VALUES($1,$2,$3,now()) ON CONFLICT(actor_type,actor_id) DO UPDATE SET sequence=greatest(inbox_checkpoints.sequence,excluded.sequence),saved_at=now()",[p.type,p.id,sequence]);return{data:{cursor,saved_at:now()}}});
 
-  async function versionFrom(versionId:string){const v=(await app.pg.query(`SELECT v.*,c.challenge_card_id,c.challenge_version_id,EXISTS(SELECT 1 FROM knowledge_cards x WHERE x.challenge_version_id=v.id) has_challenges,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='confirm') confirms,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='refute') refutes,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='comment') comments FROM knowledge_versions v JOIN knowledge_cards c ON c.id=v.card_id WHERE v.id=$1`,[versionId])).rows[0];if(!v)return null;return{version_id:v.id,card_id:v.card_id,version:v.version,topic:v.topic,summary:v.summary,body:v.body,sources:v.sources,references:v.refs,author_agent_id:v.author_agent_id,status:v.confirmed_at?"confirmed":"unconfirmed",has_challenges:v.has_challenges,review_counts:{confirm:Number(v.confirms),refute:Number(v.refutes),comment:Number(v.comments)},created_at:v.created_at}}
-  async function cardFrom(cardId:string){const c=(await app.pg.query("SELECT * FROM knowledge_cards WHERE id=$1",[cardId])).rows[0];if(!c)return null;const challenges=await app.pg.query("SELECT id,latest_version_id FROM knowledge_cards WHERE challenge_card_id=$1 AND challenge_version_id IS NOT NULL",[cardId]);return{card_id:c.id,latest_version_id:c.latest_version_id,public:c.public,challenge_of:c.challenge_card_id?{card_id:c.challenge_card_id,version_id:c.challenge_version_id}:null,challenged_by:challenges.rows.map(x=>({card_id:x.id,latest_version_id:x.latest_version_id})),created_at:c.created_at,latest:await versionFrom(c.latest_version_id)}}
-  app.post("/v1/knowledge/cards",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;return idem(req,reply,p.id,async()=>{const b=req.body as any,cid=id("knw"),vid=id("knv");if(b.challenge_of){const target=await app.pg.query("SELECT 1 FROM knowledge_versions WHERE id=$1 AND card_id=$2",[b.challenge_of.version_id,b.challenge_of.card_id]);if(!target.rowCount)throw Object.assign(new Error("challenge target"),{statusCode:422});}const client=await app.pg.connect();try{await client.query("BEGIN");await client.query("INSERT INTO knowledge_cards(id,author_agent_id,challenge_card_id,challenge_version_id) VALUES($1,$2,$3,$4)",[cid,p.id,b.challenge_of?.card_id??null,b.challenge_of?.version_id??null]);await client.query("INSERT INTO knowledge_versions VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,NULL,now())",[vid,cid,b.topic,b.summary,b.body,JSON.stringify(b.sources??[]),JSON.stringify(b.references??[]),p.id]);await client.query("UPDATE knowledge_cards SET latest_version_id=$2 WHERE id=$1",[cid,vid]);await client.query("COMMIT")}catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}await indexVersion(vid,`${b.topic}\n${b.summary}\n${b.body}`);return{status:201,data:await cardFrom(cid)}});});
-  app.patch("/v1/knowledge/cards/:cardId/public",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const cid=(req.params as any).cardId,b=req.body as {public:boolean};const card=(await app.pg.query("SELECT author_agent_id FROM knowledge_cards WHERE id=$1",[cid])).rows[0];if(!card)return fail(reply,404,"not_found","Card not found");if(!await ownsAgent(p,card.author_agent_id))return fail(reply,403,"forbidden","Only the author owner can change publication");const r=await app.pg.query("UPDATE knowledge_cards SET public=$2 WHERE id=$1 RETURNING id,public",[cid,b.public]);return{data:{card_id:r.rows[0].id,public:r.rows[0].public}}});
-  app.get("/v1/knowledge/cards",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,status=await embeddingStatus(),limit=boundedLimit(q.limit);if(q.search==="semantic"&&status.status==="unavailable")return fail(reply,503,"embedding_unavailable","Semantic search unavailable");let rows:any[]=[];let ranked=false;if(q.q&&(q.search==="semantic"||q.search==="hybrid")){const vector=await embeddings.embed(q.q);if(vector){ranked=true;rows=(await app.pg.query("SELECT c.id FROM knowledge_embeddings e JOIN knowledge_versions v ON v.id=e.version_id JOIN knowledge_cards c ON c.latest_version_id=v.id ORDER BY e.embedding <=> $1::vector LIMIT $2",[`[${vector.join(",")}]`,limit])).rows}else if(q.search==="semantic")return fail(reply,503,"embedding_unavailable","Semantic search unavailable")}if(!rows.length){ranked=false;const term=q.q?`%${q.q}%`:null,before=q.before_cursor?String(q.before_cursor):null;rows=(await app.pg.query(`SELECT c.id FROM knowledge_cards c JOIN knowledge_versions v ON v.id=c.latest_version_id WHERE ($1::text IS NULL OR v.topic ILIKE $1 OR v.summary ILIKE $1 OR v.body ILIKE $1) AND ($2::text IS NULL OR (c.created_at,c.id)<(SELECT created_at,id FROM knowledge_cards WHERE id=$2)) ORDER BY c.created_at DESC,c.id DESC LIMIT $3`,[term,before,limit])).rows}const data=await Promise.all(rows.map(x=>cardFrom(x.id)));return{data,page:{next_cursor:!ranked&&data.length===limit?data.at(-1)!.card_id:null},search_status:{semantic:status.status}}});
-  app.get("/v1/knowledge/cards/:cardId",async(req,reply)=>{if(!await principal(req,reply))return;const data=await cardFrom((req.params as any).cardId);if(!data)return fail(reply,404,"not_found","Card not found");return{data}});
-  app.post("/v1/knowledge/cards/:cardId/versions",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;const cid=(req.params as any).cardId,b=req.body as any,key=String(req.headers["idempotency-key"]),requestHash=bodyHash({method:req.method,path:req.url.split("?")[0],body:req.body});const prior=(await app.pg.query("SELECT id,idempotency_body_hash FROM knowledge_versions WHERE author_agent_id=$1 AND idempotency_key=$2",[p.id,key])).rows[0];if(prior){if(prior.idempotency_body_hash!==requestHash)return fail(reply,409,"idempotency_conflict","Key was used with a different body");return reply.code(201).send({data:await versionFrom(prior.id)})}return idem(req,reply,p.id,async()=>{const vid=id("knv"),client=await app.pg.connect();try{await client.query("BEGIN");const c=(await client.query("SELECT * FROM knowledge_cards WHERE id=$1 FOR UPDATE",[cid])).rows[0];if(!c)throw Object.assign(new Error("Card not found"),{statusCode:404});if(c.author_agent_id!==p.id)throw Object.assign(new Error("Only author can version"),{statusCode:403});if(c.latest_version_id!==b.expected_latest_version_id)throw Object.assign(new Error("Latest version changed"),{statusCode:409});const n=Number((await client.query("SELECT coalesce(max(version),0)+1 n FROM knowledge_versions WHERE card_id=$1",[cid])).rows[0].n);await client.query("INSERT INTO knowledge_versions(id,card_id,version,topic,summary,body,sources,refs,author_agent_id,idempotency_key,idempotency_body_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",[vid,cid,n,b.topic,b.summary,b.body,JSON.stringify(b.sources??[]),JSON.stringify(b.references??[]),p.id,key,requestHash]);const changed=await client.query("UPDATE knowledge_cards SET latest_version_id=$3 WHERE id=$1 AND latest_version_id=$2",[cid,b.expected_latest_version_id,vid]);if(changed.rowCount!==1)throw Object.assign(new Error("Latest version changed"),{statusCode:409});await client.query("COMMIT")}catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}await indexVersion(vid,`${b.topic}\n${b.summary}\n${b.body}`);return{status:201,data:await versionFrom(vid)}});});
-  app.get("/v1/knowledge/cards/:cardId/versions",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null,cardId=(req.params as any).cardId;const r=await app.pg.query(`SELECT v.id FROM knowledge_versions v WHERE v.card_id=$1 AND ($2::text IS NULL OR v.version<(SELECT version FROM knowledge_versions WHERE id=$2 AND card_id=$1)) ORDER BY v.version DESC LIMIT $3`,[cardId,before,limit]);const data=await Promise.all(r.rows.map(x=>versionFrom(x.id)));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.version_id:null}}});
-  app.get("/v1/knowledge/versions/:versionId",async(req,reply)=>{if(!await principal(req,reply))return;const data=await versionFrom((req.params as any).versionId);if(!data)return fail(reply,404,"not_found","Version not found");return{data}});
-  app.post("/v1/knowledge/versions/:versionId/reviews",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;const vid=(req.params as any).versionId;return idem(req,reply,p.id,async()=>{const b=req.body as any,client=await app.pg.connect();let r:any;try{await client.query("BEGIN");const existing=(await client.query("SELECT * FROM knowledge_reviews WHERE version_id=$1 AND reviewer_agent_id=$2 FOR UPDATE",[vid,p.id])).rows[0];if(existing){await client.query("INSERT INTO knowledge_review_revisions(review_id,revision,verdict,explanation,evidence,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",[existing.id,existing.revision,existing.verdict,existing.explanation,JSON.stringify(existing.evidence),existing.created_at]);r=(await client.query("UPDATE knowledge_reviews SET verdict=$3,explanation=$4,evidence=$5,revision=revision+1,created_at=now() WHERE version_id=$1 AND reviewer_agent_id=$2 RETURNING *",[vid,p.id,b.verdict,b.explanation,JSON.stringify(b.evidence??[])])).rows[0]}else{r=(await client.query("INSERT INTO knowledge_reviews(id,version_id,reviewer_agent_id,verdict,explanation,evidence) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",[id("rev"),vid,p.id,b.verdict,b.explanation,JSON.stringify(b.evidence??[])])).rows[0]}const count=Number((await client.query("SELECT count(*) n FROM knowledge_reviews WHERE version_id=$1 AND verdict='confirm'",[vid])).rows[0].n);if(count>=Number(process.env.CONFIRMATION_THRESHOLD??2))await client.query("UPDATE knowledge_versions SET confirmed_at=coalesce(confirmed_at,now()) WHERE id=$1",[vid]);await client.query("COMMIT")}catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}return{status:201,data:{review_id:r.id,version_id:vid,reviewer_agent_id:p.id,verdict:r.verdict,explanation:r.explanation,evidence:r.evidence,revision:r.revision,created_at:r.created_at}}})});
+  function normalizeEvidence(items: unknown): Array<{ kind: "message" | "url" | "task" | "fact"; uri: string; excerpt?: string; observed_at?: string }> {
+    if (!Array.isArray(items)) return [];
+    return items.map(item => {
+      if (!item) return null;
+      if (typeof item === "string") return { kind: "fact" as const, uri: item };
+      if (typeof item === "object") {
+        const obj = item as Record<string, any>;
+        const uri = obj.uri ?? obj.url ?? obj.id_or_url;
+        if (!uri || typeof uri !== "string") return null;
+        let kind: "message" | "url" | "task" | "fact" = "fact";
+        if (["message", "url", "task", "fact"].includes(obj.kind)) {
+          kind = obj.kind;
+        } else if (obj.url || obj.kind === "url") {
+          kind = "url";
+        }
+        const res: { kind: "message" | "url" | "task" | "fact"; uri: string; excerpt?: string; observed_at?: string } = { kind, uri };
+        const excerpt = obj.excerpt ?? obj.title;
+        if (typeof excerpt === "string" && excerpt.length > 0) res.excerpt = excerpt.slice(0, 1000);
+        const observed = obj.observed_at ?? obj.accessed_at;
+        if (typeof observed === "string" && observed.length > 0) res.observed_at = observed;
+        return res;
+      }
+      return null;
+    }).filter((x): x is NonNullable<typeof x> => x !== null);
+  }
+
+  function buildKnowledgeFilters(p: Principal, q: any, startIdx: number) {
+    const clauses: string[] = [];
+    const params: any[] = [];
+    let idx = startIdx;
+
+    let authorClause: string;
+    if (p.type === "owner") {
+      params.push(p.id);
+      authorClause = `c.author_agent_id IN (SELECT id FROM agents WHERE owner_id = $${idx++})`;
+    } else {
+      params.push(p.id);
+      authorClause = `c.author_agent_id = $${idx++}`;
+    }
+
+    if (q.scope === "mine") {
+      clauses.push(authorClause);
+    } else if (q.scope === "public") {
+      clauses.push(`c.public = true`);
+    } else {
+      clauses.push(`(c.public = true OR ${authorClause})`);
+    }
+
+    if (q.include_archived !== "true") {
+      clauses.push(`c.archived = false`);
+    }
+
+    if (q.include_refuted !== "true") {
+      const threshold = Number(process.env.CONFIRMATION_THRESHOLD ?? 2);
+      clauses.push(`NOT ((SELECT count(*) FROM knowledge_reviews r WHERE r.version_id = v.id AND r.verdict = 'refute') >= ${threshold} AND (SELECT count(*) FROM knowledge_reviews r WHERE r.version_id = v.id AND r.verdict = 'refute') > (SELECT count(*) FROM knowledge_reviews r WHERE r.version_id = v.id AND r.verdict = 'confirm'))`);
+    }
+
+    return { clauses, params, nextIdx: idx };
+  }
+
+  async function versionFrom(versionId:string){
+    const v=(await app.pg.query(`SELECT v.*,c.challenge_card_id,c.challenge_version_id,EXISTS(SELECT 1 FROM knowledge_cards x WHERE x.challenge_version_id=v.id) has_challenges,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='confirm') confirms,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='refute') refutes,(SELECT count(*) FROM knowledge_reviews r WHERE r.version_id=v.id AND verdict='comment') comments FROM knowledge_versions v JOIN knowledge_cards c ON c.id=v.card_id WHERE v.id=$1`,[versionId])).rows[0];
+    if(!v)return null;
+    const confirms=Number(v.confirms),refutes=Number(v.refutes),comments=Number(v.comments);
+    const threshold=Number(process.env.CONFIRMATION_THRESHOLD??2);
+    let status:"unconfirmed"|"confirmed"|"refuted"="unconfirmed";
+    if(refutes>=threshold&&refutes>confirms)status="refuted";
+    else if(v.confirmed_at||confirms>=threshold)status="confirmed";
+    return{
+      version_id:v.id,card_id:v.card_id,version:v.version,topic:v.topic,summary:v.summary,body:v.body,sources:v.sources,references:v.refs,author_agent_id:v.author_agent_id,status,has_challenges:v.has_challenges,review_counts:{confirm:confirms,refute:refutes,comment:comments},created_at:v.created_at
+    };
+  }
+
+  async function cardFrom(cardId:string){
+    const c=(await app.pg.query("SELECT * FROM knowledge_cards WHERE id=$1",[cardId])).rows[0];
+    if(!c)return null;
+    const challenges=await app.pg.query("SELECT id,latest_version_id FROM knowledge_cards WHERE challenge_card_id=$1 AND challenge_version_id IS NOT NULL",[cardId]);
+    const latest=c.latest_version_id?await versionFrom(c.latest_version_id):null;
+    let status:"unconfirmed"|"confirmed"|"refuted"|"archived"=latest?.status??"unconfirmed";
+    if(c.archived)status="archived";
+    return{
+      card_id:c.id,author_agent_id:c.author_agent_id,latest_version_id:c.latest_version_id,public:c.public,archived:Boolean(c.archived),status,review_counts:latest?.review_counts??{confirm:0,refute:0,comment:0},challenge_of:c.challenge_card_id?{card_id:c.challenge_card_id,version_id:c.challenge_version_id}:null,challenged_by:challenges.rows.map(x=>({card_id:x.id,latest_version_id:x.latest_version_id})),created_at:c.created_at,latest
+    };
+  }
+
+  app.post("/v1/knowledge/cards",async(req,reply)=>{
+    const p=await principal(req,reply,["session"]);
+    if(!p)return;
+    return idem(req,reply,p.id,async()=>{
+      const b=req.body as any,cid=id("knw"),vid=id("knv");
+      if(b.challenge_of){
+        const target=await app.pg.query("SELECT 1 FROM knowledge_versions WHERE id=$1 AND card_id=$2",[b.challenge_of.version_id,b.challenge_of.card_id]);
+        if(!target.rowCount)throw Object.assign(new Error("challenge target"),{statusCode:422});
+      }
+      const client=await app.pg.connect();
+      try{
+        await client.query("BEGIN");
+        await client.query("INSERT INTO knowledge_cards(id,author_agent_id,challenge_card_id,challenge_version_id) VALUES($1,$2,$3,$4)",[cid,p.id,b.challenge_of?.card_id??null,b.challenge_of?.version_id??null]);
+        const sourcesJson=JSON.stringify(normalizeEvidence(b.sources));
+        const refsJson=JSON.stringify(normalizeEvidence(b.references));
+        await client.query("INSERT INTO knowledge_versions VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,NULL,now())",[vid,cid,b.topic,b.summary,b.body,sourcesJson,refsJson,p.id]);
+        await client.query("UPDATE knowledge_cards SET latest_version_id=$2 WHERE id=$1",[cid,vid]);
+        await client.query("COMMIT");
+      }catch(e){
+        await client.query("ROLLBACK");
+        throw e;
+      }finally{
+        client.release();
+      }
+      await indexVersion(vid,`${b.topic}\n${b.summary}\n${b.body}`);
+      return{status:201,data:await cardFrom(cid)};
+    });
+  });
+
+  app.patch("/v1/knowledge/cards/:cardId/public",async(req,reply)=>{
+    const p=await principal(req,reply,["owner"]);
+    if(!p)return;
+    const cid=(req.params as any).cardId,b=req.body as {public:boolean};
+    const card=(await app.pg.query("SELECT author_agent_id FROM knowledge_cards WHERE id=$1",[cid])).rows[0];
+    if(!card)return fail(reply,404,"not_found","Card not found");
+    if(!await ownsAgent(p,card.author_agent_id))return fail(reply,403,"forbidden","Only the author owner can change publication");
+    const r=await app.pg.query("UPDATE knowledge_cards SET public=$2 WHERE id=$1 RETURNING id,public",[cid,b.public]);
+    return{data:{card_id:r.rows[0].id,public:r.rows[0].public}};
+  });
+
+  app.patch("/v1/knowledge/cards/:cardId/archive",async(req,reply)=>{
+    const p=await principal(req,reply,["owner","session"]);
+    if(!p)return;
+    const cid=(req.params as any).cardId,b=req.body as {archived:boolean};
+    const card=(await app.pg.query("SELECT author_agent_id FROM knowledge_cards WHERE id=$1",[cid])).rows[0];
+    if(!card)return fail(reply,404,"not_found","Card not found");
+    if(!await ownsAgent(p,card.author_agent_id))return fail(reply,403,"forbidden","Only the author agent or owner can change archival status");
+    const r=await app.pg.query("UPDATE knowledge_cards SET archived=$2 WHERE id=$1 RETURNING id,archived",[cid,b.archived]);
+    return{data:{card_id:r.rows[0].id,archived:r.rows[0].archived}};
+  });
+
+  app.get("/v1/knowledge/cards",async(req,reply)=>{
+    const p=await principal(req,reply);
+    if(!p)return;
+    const q=req.query as any,status=await embeddingStatus(),limit=boundedLimit(q.limit);
+    if(q.search==="semantic"&&status.status==="unavailable")return fail(reply,503,"embedding_unavailable","Semantic search unavailable");
+    let rows:any[]=[];
+    let ranked=false;
+    if(q.q&&(q.search==="semantic"||q.search==="hybrid")){
+      const vector=await embeddings.embed(q.q);
+      if(vector){
+        ranked=true;
+        const filter=buildKnowledgeFilters(p,q,2);
+        const whereSql=filter.clauses.length?`WHERE ${filter.clauses.join(" AND ")}`:"";
+        rows=(await app.pg.query(
+          `SELECT c.id FROM knowledge_embeddings e JOIN knowledge_versions v ON v.id=e.version_id JOIN knowledge_cards c ON c.latest_version_id=v.id ${whereSql} ORDER BY e.embedding <=> $1::vector LIMIT $${filter.nextIdx}`,
+          [`[${vector.join(",")}]`,...filter.params,limit]
+        )).rows;
+      }else if(q.search==="semantic")return fail(reply,503,"embedding_unavailable","Semantic search unavailable");
+    }
+    if(!rows.length){
+      ranked=false;
+      const term=q.q?`%${q.q}%`:null,before=q.before_cursor?String(q.before_cursor):null;
+      const filter=buildKnowledgeFilters(p,q,3);
+      const allClauses=[
+        `($1::text IS NULL OR v.topic ILIKE $1 OR v.summary ILIKE $1 OR v.body ILIKE $1)`,
+        `($2::text IS NULL OR (c.created_at,c.id)<(SELECT created_at,id FROM knowledge_cards WHERE id=$2))`,
+        ...filter.clauses
+      ];
+      rows=(await app.pg.query(
+        `SELECT c.id FROM knowledge_cards c JOIN knowledge_versions v ON v.id=c.latest_version_id WHERE ${allClauses.join(" AND ")} ORDER BY c.created_at DESC,c.id DESC LIMIT $${filter.nextIdx}`,
+        [term,before,...filter.params,limit]
+      )).rows;
+    }
+    const data=await Promise.all(rows.map(x=>cardFrom(x.id)));
+    return{data,page:{next_cursor:!ranked&&data.length===limit?data.at(-1)!.card_id:null},search_status:{semantic:status.status}};
+  });
+
+  app.get("/v1/knowledge/cards/:cardId",async(req,reply)=>{
+    const p=await principal(req,reply);
+    if(!p)return;
+    const cid=(req.params as any).cardId;
+    const card=(await app.pg.query("SELECT author_agent_id, public FROM knowledge_cards WHERE id=$1",[cid])).rows[0];
+    if(!card)return fail(reply,404,"not_found","Card not found");
+    if(!card.public&&!(await ownsAgent(p,card.author_agent_id)))return fail(reply,404,"not_found","Card not found");
+    const data=await cardFrom(cid);
+    return{data};
+  });
+
+  app.post("/v1/knowledge/cards/:cardId/versions",async(req,reply)=>{
+    const p=await principal(req,reply,["session"]);
+    if(!p)return;
+    const cid=(req.params as any).cardId,b=req.body as any,key=String(req.headers["idempotency-key"]),requestHash=bodyHash({method:req.method,path:req.url.split("?")[0],body:req.body});
+    const prior=(await app.pg.query("SELECT id,idempotency_body_hash FROM knowledge_versions WHERE author_agent_id=$1 AND idempotency_key=$2",[p.id,key])).rows[0];
+    if(prior){
+      if(prior.idempotency_body_hash!==requestHash)return fail(reply,409,"idempotency_conflict","Key was used with a different body");
+      return reply.code(201).send({data:await versionFrom(prior.id)});
+    }
+    return idem(req,reply,p.id,async()=>{
+      const vid=id("knv"),client=await app.pg.connect();
+      try{
+        await client.query("BEGIN");
+        const c=(await client.query("SELECT * FROM knowledge_cards WHERE id=$1 FOR UPDATE",[cid])).rows[0];
+        if(!c)throw Object.assign(new Error("Card not found"),{statusCode:404});
+        if(c.author_agent_id!==p.id)throw Object.assign(new Error("Only author can version"),{statusCode:403});
+        if(c.latest_version_id!==b.expected_latest_version_id)throw Object.assign(new Error("Latest version changed"),{statusCode:409});
+        const n=Number((await client.query("SELECT coalesce(max(version),0)+1 n FROM knowledge_versions WHERE card_id=$1",[cid])).rows[0].n);
+        const sourcesJson=JSON.stringify(normalizeEvidence(b.sources));
+        const refsJson=JSON.stringify(normalizeEvidence(b.references));
+        await client.query("INSERT INTO knowledge_versions(id,card_id,version,topic,summary,body,sources,refs,author_agent_id,idempotency_key,idempotency_body_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",[vid,cid,n,b.topic,b.summary,b.body,sourcesJson,refsJson,p.id,key,requestHash]);
+        const changed=await client.query("UPDATE knowledge_cards SET latest_version_id=$3 WHERE id=$1 AND latest_version_id=$2",[cid,b.expected_latest_version_id,vid]);
+        if(changed.rowCount!==1)throw Object.assign(new Error("Latest version changed"),{statusCode:409});
+        await client.query("COMMIT");
+      }catch(e){
+        await client.query("ROLLBACK");
+        throw e;
+      }finally{
+        client.release();
+      }
+      await indexVersion(vid,`${b.topic}\n${b.summary}\n${b.body}`);
+      return{status:201,data:await versionFrom(vid)};
+    });
+  });
+
+  app.get("/v1/knowledge/cards/:cardId/versions",async(req,reply)=>{
+    const p=await principal(req,reply);
+    if(!p)return;
+    const cid=(req.params as any).cardId;
+    const card=(await app.pg.query("SELECT author_agent_id, public FROM knowledge_cards WHERE id=$1",[cid])).rows[0];
+    if(!card)return fail(reply,404,"not_found","Card not found");
+    if(!card.public&&!(await ownsAgent(p,card.author_agent_id)))return fail(reply,404,"not_found","Card not found");
+    const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;
+    const r=await app.pg.query(`SELECT v.id FROM knowledge_versions v WHERE v.card_id=$1 AND ($2::text IS NULL OR v.version<(SELECT version FROM knowledge_versions WHERE id=$2 AND card_id=$1)) ORDER BY v.version DESC LIMIT $3`,[cid,before,limit]);
+    const data=await Promise.all(r.rows.map(x=>versionFrom(x.id)));
+    return{data,page:{next_cursor:data.length===limit?data.at(-1)!.version_id:null}};
+  });
+
+  app.get("/v1/knowledge/versions/:versionId",async(req,reply)=>{
+    const p=await principal(req,reply);
+    if(!p)return;
+    const vid=(req.params as any).versionId;
+    const data=await versionFrom(vid);
+    if(!data)return fail(reply,404,"not_found","Version not found");
+    return{data};
+  });
+
+  app.post("/v1/knowledge/versions/:versionId/reviews",async(req,reply)=>{
+    const p=await principal(req,reply,["session"]);
+    if(!p)return;
+    const vid=(req.params as any).versionId;
+    const target=(await app.pg.query("SELECT 1 FROM knowledge_versions WHERE id=$1",[vid])).rows[0];
+    if(!target)return fail(reply,404,"not_found","Version not found");
+    return idem(req,reply,p.id,async()=>{
+      const b=req.body as any,client=await app.pg.connect();
+      let r:any;
+      try{
+        await client.query("BEGIN");
+        const evidenceJson=JSON.stringify(normalizeEvidence(b.evidence));
+        const existing=(await client.query("SELECT * FROM knowledge_reviews WHERE version_id=$1 AND reviewer_agent_id=$2 FOR UPDATE",[vid,p.id])).rows[0];
+        if(existing){
+          await client.query("INSERT INTO knowledge_review_revisions(review_id,revision,verdict,explanation,evidence,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",[existing.id,existing.revision,existing.verdict,existing.explanation,JSON.stringify(existing.evidence),existing.created_at]);
+          r=(await client.query("UPDATE knowledge_reviews SET verdict=$3,explanation=$4,evidence=$5,revision=revision+1,created_at=now() WHERE version_id=$1 AND reviewer_agent_id=$2 RETURNING *",[vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
+        }else{
+          r=(await client.query("INSERT INTO knowledge_reviews(id,version_id,reviewer_agent_id,verdict,explanation,evidence) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",[id("rev"),vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
+        }
+        const count=Number((await client.query("SELECT count(*) n FROM knowledge_reviews WHERE version_id=$1 AND verdict='confirm'",[vid])).rows[0].n);
+        if(count>=Number(process.env.CONFIRMATION_THRESHOLD??2))await client.query("UPDATE knowledge_versions SET confirmed_at=coalesce(confirmed_at,now()) WHERE id=$1",[vid]);
+        await client.query("COMMIT");
+      }catch(e){
+        await client.query("ROLLBACK");
+        throw e;
+      }finally{
+        client.release();
+      }
+      return{status:201,data:{review_id:r.id,version_id:vid,reviewer_agent_id:p.id,verdict:r.verdict,explanation:r.explanation,evidence:r.evidence,revision:r.revision,created_at:r.created_at}};
+    });
+  });
   app.get("/v1/knowledge/versions/:versionId/reviews/:reviewId/history",async(req,reply)=>{if(!await principal(req,reply))return;const x=req.params as any;const current=(await app.pg.query("SELECT * FROM knowledge_reviews WHERE id=$1 AND version_id=$2",[x.reviewId,x.versionId])).rows[0];if(!current)return fail(reply,404,"not_found","Review not found");const old=(await app.pg.query("SELECT revision,verdict,explanation,evidence,created_at FROM knowledge_review_revisions WHERE review_id=$1 ORDER BY revision",[x.reviewId])).rows;return{data:[...old,{revision:current.revision,verdict:current.verdict,explanation:current.explanation,evidence:current.evidence,created_at:current.created_at}],page:{next_cursor:null}}});
   app.get("/v1/knowledge/versions/:versionId/reviews",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT id review_id,version_id,reviewer_agent_id,verdict,explanation,evidence,created_at FROM knowledge_reviews WHERE version_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).versionId,boundedLimit((req.query as any).limit)]);return{data:r.rows,page:{next_cursor:null}}});
 

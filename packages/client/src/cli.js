@@ -46,6 +46,20 @@ async function mutation(client, method, path, body, explicitKey) {
   return result;
 }
 
+async function parseJsonOrList(value) {
+  if (!value) return [];
+  if (typeof value !== 'string') return Array.isArray(value) ? value : [value];
+  if (value.startsWith('@') || value.startsWith('[') || value.startsWith('{')) {
+    try {
+      const parsed = await jsonInput(value);
+      return Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      // fallback
+    }
+  }
+  return value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
 async function main() {
   if (command === 'configure') {
     const serverUrl = option('server'); if (!serverUrl) throw new Error('--server URL is required');
@@ -100,7 +114,91 @@ async function main() {
   if (command === 'bootstrap') { const { client } = await activeClient(option('caller-id')); output(await client.bootstrap()); return; }
   if (command === 'rooms') { const q = option('q'); const { client } = await activeClient(option('caller-id')); output(await client.rooms(q ? new URLSearchParams({ q }).toString() : '')); return; }
   if (command === 'inbox') { const { client } = await activeClient(option('caller-id')); output(await client.inbox()); return; }
-  if (command === 'knowledge') { const q = option('q'); const { client } = await activeClient(option('caller-id')); output(await client.knowledge(q ? new URLSearchParams({ q }).toString() : '')); return; }
+  if (command === 'knowledge') {
+    const sub = args[0] && !args[0].startsWith('--') ? args.shift() : null;
+    if (sub === 'card') {
+      const callerId = option('caller-id');
+      const topic = option('topic');
+      const summary = option('summary');
+      const body = option('body') || (option('body-stdin') ? await stdin() : null);
+      if (!topic || !summary || !body) throw new Error('--topic, --summary, and --body (or --body-stdin) are required');
+      const sources = await parseJsonOrList(option('sources'));
+      const references = await parseJsonOrList(option('references'));
+      const challengeCard = option('challenge-card');
+      const challengeVersion = option('challenge-version');
+      const explicitKey = option('idempotency-key');
+      const { client } = await activeClient(callerId);
+      const payload = {
+        topic, summary, body, sources, references,
+        ...(challengeCard && challengeVersion ? { challenge_of: { card_id: challengeCard, version_id: challengeVersion } } : {})
+      };
+      output(await mutation(client, 'POST', '/v1/knowledge/cards', payload, explicitKey));
+      return;
+    }
+    if (sub === 'review') {
+      const callerId = option('caller-id');
+      const versionId = option('version');
+      const verdict = option('verdict');
+      const explanation = option('explanation') || (option('explanation-stdin') ? await stdin() : null);
+      if (!versionId || !verdict || !explanation) throw new Error('--version, --verdict, and --explanation are required');
+      if (!['confirm', 'refute', 'comment'].includes(verdict)) throw new Error('--verdict must be confirm, refute, or comment');
+      const evidence = await parseJsonOrList(option('evidence'));
+      const explicitKey = option('idempotency-key');
+      const { client } = await activeClient(callerId);
+      const path = `/v1/knowledge/versions/${encodeURIComponent(versionId)}/reviews`;
+      const payload = { verdict, explanation, evidence };
+      output(await mutation(client, 'POST', path, payload, explicitKey));
+      return;
+    }
+    if (sub === 'publish') {
+      const cardId = option('card');
+      if (!cardId) throw new Error('--card is required');
+      const isPublic = option('unpublish') ? false : true;
+      const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
+      const client = await configuredClient(ownerToken);
+      output(await client.setCardPublication(cardId, isPublic));
+      return;
+    }
+    if (sub === 'archive') {
+      const cardId = option('card');
+      if (!cardId) throw new Error('--card is required');
+      const isArchived = option('unarchive') ? false : true;
+      const callerId = option('caller-id');
+      let client;
+      if (callerId) {
+        const active = await activeClient(callerId);
+        client = active.client;
+      } else {
+        const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
+        client = await configuredClient(ownerToken);
+      }
+      output(await client.setCardArchived(cardId, isArchived));
+      return;
+    }
+    if (!sub || sub === 'list' || sub === 'search') {
+      const q = option('q');
+      const scope = option('scope');
+      const includeArchived = option('include-archived');
+      const includeRefuted = option('include-refuted');
+      const callerId = option('caller-id');
+      let client;
+      if (callerId) {
+        const active = await activeClient(callerId);
+        client = active.client;
+      } else {
+        client = await configuredClient();
+      }
+      const params = new URLSearchParams();
+      if (q) params.set('q', q);
+      if (scope) params.set('scope', scope);
+      if (includeArchived) params.set('include_archived', 'true');
+      if (includeRefuted) params.set('include_refuted', 'true');
+      const qs = params.toString();
+      output(await client.knowledge(qs));
+      return;
+    }
+    throw new Error('knowledge subcommands: card | review | publish | archive | list');
+  }
   if (command === 'message') { const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null); const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key'); if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required'); const { client } = await activeClient(option('caller-id')); const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`; const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) }; output(await mutation(client, 'POST', path, payload, explicitKey)); return; }
   if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); output(page); return; }
   if (command === 'listen') {
