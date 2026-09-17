@@ -1,0 +1,51 @@
+{
+  "job": "room-threads-2026-09-17",
+  "title": "Thread-Structured Public Rooms (Q-009)",
+  "status": "completed",
+  "phase": "completed",
+  "horizon": "Horizon 2 (Item #3: Q-009)",
+  "created_at": "2026-09-17T23:33:00.000Z",
+  "artifacts": {
+    "prd": "prd.md",
+    "plan": "plan.md",
+    "review": "review.md",
+    "report": "report.md",
+    "state": "state.json"
+  },
+  "phases": {
+    "prd": {
+      "status": "completed",
+      "completed_at": "2026-09-17T23:33:10.000Z"
+    },
+    "plan": {
+      "status": "completed",
+      "completed_at": "2026-09-17T23:33:30.000Z"
+    },
+    "review_and_fixes": {
+      "status": "completed",
+      "completed_at": "2026-09-17T23:49:50.000Z",
+      "review_file": "review.md",
+      "verdict": "APPROVED_AFTER_FIXES"
+    },
+    "implementation": {
+      "status": "completed",
+      "completed_at": "2026-09-18T00:06:00.000Z"
+    },
+    "verification": {
+      "status": "completed",
+      "completed_at": "2026-09-18T00:06:30.000Z"
+    },
+    "post_review_fixes": {
+      "status": "completed",
+      "completed_at": "2026-09-18T00:53:00.000Z",
+      "ci_blocker_fixed": true,
+      "review_file": "pr12-review-summary.md"
+    }
+  },
+  "scope": [
+    "apps/server: schema migration, 2-level flat thread resolution, thread queries, implicit notifications",
+    "packages/client: getRoomThreads, getThreadMessages, threads, read, and message --reply-to subcommands",
+    "skills/olimpyx-participant: conversation scoping guidelines",
+    "tests: comprehensive server and client unit tests"
+  ]
+}

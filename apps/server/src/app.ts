@@ -37,6 +37,8 @@ export async function migrate(databaseUrl: string) {
     CREATE TABLE IF NOT EXISTS sessions (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id), token_hash text UNIQUE NOT NULL, host jsonb NOT NULL, persona_revision integer NOT NULL, expires_at timestamptz NOT NULL, last_heartbeat_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS rooms (id text PRIMARY KEY, slug text UNIQUE NOT NULL, title text NOT NULL, description text NOT NULL DEFAULT '', creator_type text NOT NULL, creator_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS messages (id text PRIMARY KEY, room_id text NOT NULL REFERENCES rooms(id), sender_type text NOT NULL, sender_id text NOT NULL, sender_name text NOT NULL, recipient_agent_id text REFERENCES agents(id), reply_to_message_id text REFERENCES messages(id), body text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS root_message_id text REFERENCES messages(id);
+    CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(room_id, root_message_id, created_at);
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_actor text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_key text;
     CREATE UNIQUE INDEX IF NOT EXISTS messages_idempotency_unique ON messages(idempotency_actor,idempotency_key) WHERE idempotency_key IS NOT NULL;
@@ -236,10 +238,181 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async()=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;const r=await app.pg.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,now(),now()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
   app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
   app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}}});
-  app.get("/v1/rooms/:roomId/messages",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor||q.before?String(q.before_cursor??q.before):null;const r=await app.pg.query(`SELECT m.* FROM messages m WHERE m.room_id=$1 AND ($2::text IS NULL OR (m.created_at,m.id)<(SELECT created_at,id FROM messages WHERE id=$2)) ORDER BY m.created_at DESC,m.id DESC LIMIT $3`,[(req.params as any).roomId,before,limit]);const data=r.rows.map(messageFrom);return{data,page:{next_cursor:data.length===limit?data.at(-1)!.message_id:null}}});
-  function messageFrom(x:any){return{message_id:x.id,room_id:x.room_id,sender:{actor_type:x.sender_type,actor_id:x.sender_id,display_name:x.sender_name},recipient_agent_id:x.recipient_agent_id,reply_to_message_id:x.reply_to_message_id,body:x.body,created_at:x.created_at}}
+  app.get("/v1/rooms/:roomId/messages",async(req,reply)=>{
+    if(!await principal(req,reply))return;
+    const q=req.query as any,limit=boundedLimit(q.limit),roomId=(req.params as any).roomId;
+    const isRootOnly = q.root_only === "true" || q.root_only === true;
+    const threadId = q.thread_id ? String(q.thread_id) : null;
+    const before = q.before_cursor || q.before || q.after_cursor || q.after ? String(q.before_cursor ?? q.before ?? q.after_cursor ?? q.after) : null;
+
+    if (isRootOnly && threadId) {
+      return fail(reply, 400, "bad_request", "Cannot specify both root_only and thread_id");
+    }
+
+    if (threadId) {
+      let resolvedThreadId = threadId;
+      const targetCheck = await app.pg.query(
+        "SELECT id, root_message_id FROM messages WHERE id = $1 AND room_id = $2",
+        [threadId, roomId]
+      );
+      if (!targetCheck.rowCount) return fail(reply, 404, "not_found", "Thread root not found in room");
+      if (targetCheck.rows[0].root_message_id !== null) {
+        resolvedThreadId = targetCheck.rows[0].root_message_id;
+      }
+
+      if (before) {
+        const cursorCheck = await app.pg.query(
+          "SELECT id FROM messages WHERE id = $1 AND room_id = $2 AND (id = $3 OR root_message_id = $3)",
+          [before, roomId, resolvedThreadId]
+        );
+        if (!cursorCheck.rowCount) return fail(reply, 400, "bad_request", "Cursor does not belong to the specified thread");
+      }
+
+      const r = await app.pg.query(
+        `SELECT m.* FROM messages m
+         WHERE m.room_id = $1 AND (m.id = $2 OR m.root_message_id = $2)
+           AND ($3::text IS NULL OR (m.created_at, m.id) > (SELECT created_at, id FROM messages WHERE id = $3))
+         ORDER BY m.created_at ASC, m.id ASC
+         LIMIT $4`,
+        [roomId, resolvedThreadId, before, limit]
+      );
+      const data = r.rows.map(messageFrom);
+      return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };
+    }
+
+    if (isRootOnly) {
+      const r = await app.pg.query(
+        `SELECT m.*, COALESCE(rep.reply_count, 0) AS reply_count, rep.last_reply_at
+         FROM messages m
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*)::int AS reply_count, MAX(created_at) AS last_reply_at
+           FROM messages r WHERE r.root_message_id = m.id
+         ) rep ON true
+         WHERE m.room_id = $1 AND m.root_message_id IS NULL
+           AND ($2::text IS NULL OR (m.created_at, m.id) < (SELECT created_at, id FROM messages WHERE id = $2))
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT $3`,
+        [roomId, before, limit]
+      );
+      const data = r.rows.map(messageFrom);
+      return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };
+    }
+
+    const r = await app.pg.query(
+      `SELECT m.* FROM messages m
+       WHERE m.room_id = $1 AND ($2::text IS NULL OR (m.created_at, m.id) < (SELECT created_at, id FROM messages WHERE id = $2))
+       ORDER BY m.created_at DESC, m.id DESC
+       LIMIT $3`,
+      [roomId, before, limit]
+    );
+    const data = r.rows.map(messageFrom);
+    return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };
+  });
+  function messageFrom(x:any){
+    return {
+      message_id: x.id,
+      room_id: x.room_id,
+      sender: { actor_type: x.sender_type, actor_id: x.sender_id, display_name: x.sender_name },
+      recipient_agent_id: x.recipient_agent_id,
+      reply_to_message_id: x.reply_to_message_id,
+      root_message_id: x.root_message_id ?? null,
+      ...(x.reply_count !== undefined ? { reply_count: Number(x.reply_count) } : {}),
+      ...(x.last_reply_at !== undefined ? { last_reply_at: x.last_reply_at } : {}),
+      body: x.body,
+      created_at: x.created_at
+    };
+  }
   app.get("/v1/messages/:messageId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM messages WHERE id=$1",[(req.params as any).messageId]);if(!r.rowCount)return fail(reply,404,"not_found","Message not found");return{data:messageFrom(r.rows[0])}});
-  app.post("/v1/rooms/:roomId/messages",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const actorKey=`${p.type}:${p.id}`;return idem(req,reply,actorKey,async()=>{const b=req.body as any,mid=id("msg"),rid=(req.params as any).roomId,idemKey=String(req.headers["idempotency-key"]),client=await app.pg.connect();try{await client.query("BEGIN");if(p.type==="agent")await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`spam:${p.id}`]);const r=await client.query("INSERT INTO messages(id,room_id,sender_type,sender_id,sender_name,recipient_agent_id,reply_to_message_id,body,idempotency_actor,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(idempotency_actor,idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET id=messages.id RETURNING *",[mid,rid,p.type,p.id,p.name,b.recipient_agent_id??null,b.reply_to_message_id??null,b.body,actorKey,idemKey]);const inserted=r.rows[0].id===mid;if(inserted&&b.recipient_agent_id)await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)",[id("evt"),b.recipient_agent_id,mid]);if(inserted&&p.type==="agent"){const repeats=Number((await client.query("SELECT count(*) n FROM messages WHERE sender_type='agent' AND sender_id=$1 AND body=$2 AND created_at>now()-interval '60 seconds'",[p.id,b.body])).rows[0].n);if(repeats===Number(process.env.SPAM_REPEAT_THRESHOLD??5)){const reportId=id("rpt"),incidentId=id("inc");await client.query("INSERT INTO reports VALUES($1,'platform','moderation_watcher','message',$2,'spam',$3,'escalated',now(),now())",[reportId,mid,`Repeated identical message ${repeats} times within 60 seconds`]);await client.query("INSERT INTO incidents(id,report_id,owner_id,agent_id) VALUES($1,$2,$3,$4)",[incidentId,reportId,p.ownerId,p.id]);await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'moderation.updated','incident',$3)",[id("evt"),p.ownerId,incidentId])}}await client.query("UPDATE rooms SET updated_at=now() WHERE id=$1",[rid]);await client.query("COMMIT");return{status:201,data:messageFrom(r.rows[0])}}catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}})});
+  app.post("/v1/rooms/:roomId/messages",async(req,reply)=>{
+    const p=await principal(req,reply);if(!p)return;
+    const actorKey=`${p.type}:${p.id}`;
+    return idem(req,reply,actorKey,async()=>{
+      const b=req.body as any,mid=id("msg"),rid=(req.params as any).roomId,idemKey=String(req.headers["idempotency-key"]),client=await app.pg.connect();
+      try{
+        await client.query("BEGIN");
+        if(p.type==="agent")await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`spam:${p.id}`]);
+
+        let rootMessageId: string | null = null;
+        let rootAuthor: { type: string; id: string } | null = null;
+
+        if (b.reply_to_message_id) {
+          const parentRes = await client.query(
+            "SELECT id, room_id, root_message_id, sender_type, sender_id FROM messages WHERE id = $1",
+            [b.reply_to_message_id]
+          );
+          if (!parentRes.rowCount) {
+            await client.query("ROLLBACK");
+            return fail(reply, 404, "not_found", "Parent message not found");
+          }
+          const parent = parentRes.rows[0];
+          if (parent.room_id !== rid) {
+            await client.query("ROLLBACK");
+            return fail(reply, 400, "bad_request", "Cannot reply to a message in a different room");
+          }
+
+          if (parent.root_message_id === null) {
+            rootMessageId = parent.id;
+            rootAuthor = { type: parent.sender_type, id: parent.sender_id };
+          } else {
+            rootMessageId = parent.root_message_id;
+            const rootRes = await client.query(
+              "SELECT sender_type, sender_id FROM messages WHERE id = $1",
+              [rootMessageId]
+            );
+            if (!rootRes.rowCount) {
+              await client.query("ROLLBACK");
+              return fail(reply, 404, "not_found", "Thread root message not found");
+            }
+            rootAuthor = { type: rootRes.rows[0].sender_type, id: rootRes.rows[0].sender_id };
+          }
+        }
+
+        const r = await client.query(
+          `INSERT INTO messages(id, room_id, sender_type, sender_id, sender_name, recipient_agent_id, reply_to_message_id, root_message_id, body, idempotency_actor, idempotency_key)
+           VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           ON CONFLICT(idempotency_actor, idempotency_key) WHERE idempotency_key IS NOT NULL
+           DO UPDATE SET id=messages.id
+           WHERE messages.reply_to_message_id IS NOT DISTINCT FROM EXCLUDED.reply_to_message_id
+             AND messages.recipient_agent_id IS NOT DISTINCT FROM EXCLUDED.recipient_agent_id
+             AND messages.body = EXCLUDED.body
+           RETURNING *`,
+          [mid, rid, p.type, p.id, p.name, b.recipient_agent_id ?? null, b.reply_to_message_id ?? null, rootMessageId, b.body, actorKey, idemKey]
+        );
+        if (!r.rowCount) {
+          await client.query("ROLLBACK");
+          return fail(reply, 409, "idempotency_conflict", "Idempotency key was used with a different message body, reply_to, or recipient");
+        }
+
+        const inserted = r.rows[0].id === mid;
+        if (inserted) {
+          if (b.recipient_agent_id) {
+            await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), b.recipient_agent_id, mid]);
+          } else if (rootAuthor && rootAuthor.id !== p.id) {
+            const col = rootAuthor.type === "agent" ? "agent_id" : "owner_id";
+            await client.query(`INSERT INTO inbox_events(id,${col},type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)`, [id("evt"), rootAuthor.id, mid]);
+          }
+        }
+
+        if(inserted&&p.type==="agent"){
+          const repeats=Number((await client.query("SELECT count(*) n FROM messages WHERE sender_type='agent' AND sender_id=$1 AND body=$2 AND created_at>now()-interval '60 seconds'",[p.id,b.body])).rows[0].n);
+          if(repeats===Number(process.env.SPAM_REPEAT_THRESHOLD??5)){
+            const reportId=id("rpt"),incidentId=id("inc");
+            await client.query("INSERT INTO reports VALUES($1,'platform','moderation_watcher','message',$2,'spam',$3,'escalated',now(),now())",[reportId,mid,`Repeated identical message ${repeats} times within 60 seconds`]);
+            await client.query("INSERT INTO incidents(id,report_id,owner_id,agent_id) VALUES($1,$2,$3,$4)",[incidentId,reportId,p.ownerId,p.id]);
+            await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'moderation.updated','incident',$3)",[id("evt"),p.ownerId,incidentId]);
+          }
+        }
+        await client.query("UPDATE rooms SET updated_at=now() WHERE id=$1",[rid]);
+        await client.query("COMMIT");
+        return{status:201,data:messageFrom(r.rows[0])};
+      }catch(e){
+        await client.query("ROLLBACK");
+        throw e;
+      }finally{
+        client.release();
+      }
+    });
+  });
   async function eventsFor(p:Principal,after:number,limit:number){const col=p.type==="agent"?"agent_id":"owner_id";const r=await app.pg.query(`SELECT * FROM inbox_events WHERE ${col}=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`,[p.id,after,limit]);return r.rows.map(x=>({event_id:x.id,cursor:cursorOf(x.sequence),type:x.type,occurred_at:x.occurred_at,resource:{kind:x.resource_kind,id:x.resource_id}}))}
   app.get("/v1/inbox/events",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const q=req.query as any,data=await eventsFor(p,cursorFrom(q.after_cursor),boundedLimit(q.limit));return{data,page:{next_cursor:data.length?data.at(-1)!.cursor:null}}});
   app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed").length,moderation:pending.filter(x=>x.type==="moderation.updated").length},latest}}});

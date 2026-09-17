@@ -1,0 +1,116 @@
+{
+  "reviewer": "verifier",
+  "scope_mode": "diff",
+  "pr_number": 12,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/12",
+  "verdict": "FAIL",
+  "summary": "PR #12 accurately implements the 2-level flat thread model and correctly addresses the three major pre-implementation findings (M1-M3): SQL idempotency conflict WHERE clause plus bodyHash defense-in-depth (M1), inbox_events INSERT shape matches /v1/inbox/events listener contract (resource_kind, resource_id, occurred_at all populated via DEFAULT now()) (M2), and Mode C pre-flight cursor-in-thread validation (M3). Schema migration, three query modes, nested flatten, cross-room 400, and implicit notification routing are all implemented and statically correct. HOWEVER, the CI run on commit 31f26e6 FAILED (check job FAILURE 2026-09-17T20:07:53Z): the new server test threads.test.ts uses password 'password123' (11 chars) which fails the password min(12) Zod validation in apps/server/src/validation.ts, returning HTTP 400 on /v1/owners/register, so the test crashes at line 62 trying to read .data.access_token on undefined. PR body claims '0 errors / all tests passing' but the server suite reports '# tests 17 # fail 1' in this CI run. This is a blocker that must be fixed before merge. Secondary concerns: non-CONCURRENTLY CREATE INDEX on messages will take ACCESS EXCLUSIVE and risk the 120s --wait-timeout in deploy/deploy-geekom.sh on a non-empty production table; ROADMAP.md not updated to Resolved by PR #12; state.json claims verification.status=completed but server tests fail.",
+  "findings": [
+    {
+      "severity": "blocker",
+      "location": "apps/server/test/threads.test.ts:60",
+      "problem": "Test payload uses password 'password123' (11 chars) which fails the owner registration Zod schema (password min(12) in apps/server/src/validation.ts), so the new server test crashes before any thread logic runs and CI fails.",
+      "evidence": "threads.test.ts:60 payload contains password: 'password123'. validation.ts:11 defines password: z.string().min(12).max(256). Existing mvp.test.ts:35,38 uses 'very secure password' (19 chars). CI run 35268837963 confirms req-1 url /v1/owners/register statusCode 400 (pid 2775, threads.test.ts); not ok 16 - thread hierarchy flattening queries and notification routing; error: Cannot read properties of undefined (reading access_token); stack: TestContext.<anonymous> (threads.test.ts:62:27). PR body and report.md claim 0 errors and 41/41 client tests passing but server side reports tests 17 fail 1.",
+      "suggested_fix": "Change password to 'very secure password' (or any string >= 12 chars) in threads.test.ts:60. Then re-run CI."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:43",
+      "problem": "Migration creates idx_messages_root WITHOUT CONCURRENTLY, so it takes ACCESS EXCLUSIVE on the messages table and risks the production deploy --wait-timeout 120s on a non-empty table.",
+      "evidence": "app.ts:43 CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(room_id, root_message_id, created_at). deploy/deploy-geekom.sh runs compose up -d --wait --wait-timeout 120 db api web; the server boots only after migrate() returns. If the messages table already contains rows, index creation can hold ACCESS EXCLUSIVE for many seconds-minutes, exceeding the 120s wait window and failing the rollout.",
+      "suggested_fix": "Use CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_root ON messages(room_id, root_message_id, created_at) and ensure each statement runs as a separate autocommit (pg-pool.query, not a multi-statement transaction)."
+    },
+    {
+      "severity": "major",
+      "location": "docs/ROADMAP.md:40",
+      "problem": "Q-009 status remains In progress even though PR #12 closes it; readers of the roadmap cannot tell the Q is resolved.",
+      "evidence": "ROADMAP.md:40 'In progress (jobs/room-threads-2026-09-17)'. Compare Q-001/Q-002 entries on lines 38-39 which read 'Resolved by PR #11 ...'.",
+      "suggested_fix": "Update line 40 to mark Q-009 Resolved by PR #12."
+    },
+    {
+      "severity": "major",
+      "location": "jobs/room-threads-2026-09-17/state.json",
+      "problem": "state.json claims verification.status=completed but server threads.test.ts currently fails CI, so the verification record is out of sync with reality.",
+      "evidence": "state.json verification.status=completed, passing=true. CI run 35268837963 reports tests 17 fail 1 for the server package.",
+      "suggested_fix": "Set verification.status to blocked (or pending) and passing=false with notes referencing the CI failure until the threads.test.ts password bug is fixed and CI is green."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/test/threads.test.ts (entire file)",
+      "problem": "Reviewer-suggested Test 12b (nonexistent reply_to_message_id -> HTTP 404) is not exercised even though the implementation returns 404 in that case.",
+      "evidence": "grep for 404 or nonexistent in threads.test.ts returns 0 matches. apps/server/src/app.ts:322 if (!parent.rowCount) return fail(reply, 404, not_found, Parent message not found). plan.md test_plan and review.md m3 explicitly requested Test 12b.",
+      "suggested_fix": "Add a sub-case after Test 3 that POSTs a message with reply_to_message_id=<bogus id> and asserts statusCode===400 (or 404) and error.message matches /not found/i."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/test/threads.test.ts (Test 10/10b only)",
+      "problem": "Nested-implicit case Bob-replies-to-Bob's-reply inside Alice's thread is not covered; only Alice's self-reply is checked. The interesting case (notification must go to ROOT author Alice, not parent author Bob) is untested.",
+      "evidence": "threads.test.ts:152-171 reply2 is Alice -> Bob's reply; assertion only checks that Alice has no event for reply2 (trivial self-exclusion). review.md m7 requested Test 10b for nested self-reply specifically. No scenario posts a third message by Bob with reply_to_message_id=reply1Id.",
+      "suggested_fix": "Add a sub-case: Bob posts reply3 (reply_to_message_id=reply1Id), then assert that Alice has a new message.created event with resource.id===reply3Id."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:309 (messageFrom) + line 285 (Mode A SELECT)",
+      "problem": "Default Mode A responses now include root_message_id on every message (null for roots, root id for replies), so the JSON schema is additive but not strictly identical to the previous one as plan section 4 promises.",
+      "evidence": "messageFrom is called by the Mode A handler and now maps root_message_id: x.root_message_id (always emitted, never omitted). plan.md section 4 promises default mode identical SQL and 100% same row shape; in practice JSON has a new key.",
+      "suggested_fix": "Either document the additive key in report.md as a backward-compatible extension, or drop root_message_id from messageFrom when it is NULL so the field is only present on replies."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:345",
+      "problem": "SQL ON CONFLICT DO UPDATE WHERE clause checks reply_to_message_id and body but does not include recipient_agent_id in the comparison; the application-layer idem() catches this in practice because recipient_agent_id is part of bodyHash, so the omission is benign but the SQL WHERE is not fully defensive.",
+      "evidence": "app.ts:345 WHERE messages.reply_to_message_id IS NOT DISTINCT FROM EXCLUDED.reply_to_message_id AND messages.body = EXCLUDED.body. idem() at app.ts:115-128 hashes method/path/body (recipient_agent_id is in body), so bodyHash differs and 409 is returned before INSERT.",
+      "suggested_fix": "Optional defense in depth: add AND messages.recipient_agent_id IS NOT DISTINCT FROM EXCLUDED.recipient_agent_id to the SQL WHERE."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:259-268 (Mode C before-cursor handling)",
+      "problem": "When the cursor id is a valid message but not in the room or not in the thread, the response code is 400 regardless of cause; an invalid cursor (no row) is indistinguishable from a cross-thread cursor.",
+      "evidence": "app.ts:263-268 cursorCheck is SELECT id FROM messages WHERE id=$1 AND room_id=$2 AND (id=$3 OR root_message_id=$3); if !cursorCheck.rowCount -> 400 Cursor does not belong to the specified thread.",
+      "suggested_fix": "Optional: branch on a separate existence query to return 404 Cursor message not found vs 400 Cursor not in this thread. Acceptable as-is for v1."
+    },
+    {
+      "severity": "nit",
+      "location": "jobs/room-threads-2026-09-17/{prd.md, plan.md, review.md, report.md, state.json}",
+      "problem": "Workflow artifacts (PRD, plan, prior review, implementation report, state) are bundled into the PR diff. These are useful for traceability but pollute the commit history with ~1389 LOC of doc churn and can leak review history into public history.",
+      "evidence": "git diff --stat jobs/room-threads-2026-09-17/{plan.md 417, prd.md 406, report.md 70, review.md 451, state.json 45} = 1389 LOC of pure doc additions. The jobs/ tree itself is not gitignored.",
+      "suggested_fix": "Either add jobs/**/ to .gitignore and keep workflow artifacts out of git, or at minimum drop the 451-line review.md and the 406-line prd.md / 417-line plan.md from the PR diff, retaining only report.md + state.json."
+    }
+  ],
+  "checks_performed": [
+    "git diff origin/main..origin/feat/room-threads-q-009 --stat (12 files, +2082/-7)",
+    "Full read of apps/server/src/app.ts (migration 37-44, messageFrom, POST /v1/rooms/:roomId/messages 304-407, GET /v1/rooms/:roomId/messages 250-298, eventsFor, before/after_cursor handling)",
+    "Full read of apps/server/src/validation.ts to confirm password min(12) and reply_to_message_id / recipient_agent_id schema additions",
+    "Full read of apps/server/test/threads.test.ts (249 lines, single big test body covering Tests 2-10)",
+    "Full read of packages/client/src/client.js (sendMessage new option support, getRoomThreads, getThreadMessages)",
+    "Full read of packages/client/src/cli.js (threads/read/message --reply-to commands and usage string line 239)",
+    "Full read of packages/client/test/threads.test.js (5 tests, all spawn-based with mocked preload.mjs)",
+    "Full read of jobs/room-threads-2026-09-17/review.md (M1-M3, m1-m7 from prior review)",
+    "Read jobs/room-threads-2026-09-17/plan.md (Tasks 1.2, 1.3, 2.1, 2.2 and ON CONFLICT clause)",
+    "Read jobs/room-threads-2026-09-17/prd.md sections 3.4, 5.1, 5.2 for AC matching",
+    "Read jobs/room-threads-2026-09-17/report.md, state.json for claim verification",
+    "Read docs/ROADMAP.md, skills/olimpyx-participant/SKILL.md for documentation consistency",
+    "gh pr checks 12 and gh run view 35268837963 --log-failed -- confirmed CI check job FAILED on commit 31f26e6 with server threads.test.ts not ok 16, stack trace pointing at threads.test.ts:62:27 reading access_token on undefined, and 41/41 client tests passing",
+    "Cross-checked CI log req-1 pid 2775 POST /v1/owners/register -> statusCode 400 (vs the 201 for mvp.test.ts req-1 pid 2724)",
+    "Diffed Mode A SQL against pre-change handler (whitespace only; behavior unchanged); verified additive root_message_id key in messageFrom()",
+    "Diffed inbox_events INSERT statement against /v1/inbox/events SELECT + mapping -- event_id (id), cursor (sequence via bigserial), type, occurred_at (DEFAULT now()), resource.kind (resource_kind), resource.id (resource_id) all populated; owner_id correctly null",
+    "Traced implicit notification logic for 5 cases: author root no event; Bob->Alice's root event for Alice; Alice->her own root no event; Alice->Bob's reply (nested) no event (root author == Alice == sender); explicit --recipient wins over implicit",
+    "Verified m1 (migration ordering): ALTER TABLE ADD COLUMN IF NOT EXISTS root_message_id comes AFTER CREATE TABLE IF NOT EXISTS messages",
+    "Verified m2 (Mode C reply_count) -- not aggregated but reply_count was only required for Mode B (PRD section 3.2): Mode B uses LEFT JOIN LATERAL",
+    "Verified m3 (Test 12b) -- missing, see minor finding",
+    "Verified m4 (line-213 reference obsolete) -- usage string is now line 239 and includes threads|read",
+    "Verified m5 (SKILL.md edge cases) -- SKILL.md adds guidance on threads --room and read --room --thread but does not mention pagination tokens or empty-results behavior",
+    "Verified m6 (thread-muting limitation) -- not in scope; documented in PRD Out of Scope",
+    "Verified m7 (Test 10b nested self-reply) -- present as nested Alice->Bob's reply, but not the more interesting Bob->Bob's reply (root author == Alice) case",
+    "Verified backward compatibility: default GET handler SQL is whitespace-identical to pre-change (Mode A path unchanged); existing mvp.test.ts:35,38 still passes (CI log tests 17 total vs pre-change tests 16 = exactly +1 new server test = threads.test.ts)",
+    "Verified TypeScript compilation: Run npm run typecheck step PASS in CI log",
+    "Read deploy/deploy-geekom.sh to confirm 120s --wait-timeout relevance for non-CONCURRENTLY CREATE INDEX"
+  ],
+  "assumptions": [
+    "The CI run 35268837963 is the most recent check on this PR (last commit 31f26e6 2026-09-17T20:06:14Z, CI run started 20:06:47Z and finished 20:07:53Z) -- its failure reflects the current code state at PR head.",
+    "Local Postgres at 127.0.0.1:55432 is not available in this sandbox; full local re-execution of the test suite was not possible. CI log evidence is used instead and is authoritative for the 'is the new test passing' question.",
+    "The reviewer's M1-M3 + m1-m7 list from review.md is the ground-truth for what the author was expected to address; plan.md Task 1.2 ON CONFLICT clause is the reference SQL for M1.",
+    "The prior verifier-review.json in this jobs/ directory was from an earlier wave (verdict PARTIAL) before the fixes were implemented; this review supersedes it for the current commit 31f26e6.",
+    "Production data volume on the messages table is unknown. CREATE INDEX (without CONCURRENTLY) on a small table (<100k rows) completes well under 120s, so this finding is a latent risk only and is rated major, not blocker."
+  ]
+}

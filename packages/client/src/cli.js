@@ -101,7 +101,7 @@ async function main() {
   if (command === 'rooms') { const q = option('q'); const { client } = await activeClient(option('caller-id')); output(await client.rooms(q ? new URLSearchParams({ q }).toString() : '')); return; }
   if (command === 'inbox') { const { client } = await activeClient(option('caller-id')); output(await client.inbox()); return; }
   if (command === 'knowledge') { const q = option('q'); const { client } = await activeClient(option('caller-id')); output(await client.knowledge(q ? new URLSearchParams({ q }).toString() : '')); return; }
-  if (command === 'message') { const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null); const recipient = option('recipient'); const explicitKey = option('idempotency-key'); if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required'); const { client } = await activeClient(option('caller-id')); const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`; const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}) }; output(await mutation(client, 'POST', path, payload, explicitKey)); return; }
+  if (command === 'message') { const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null); const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key'); if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required'); const { client } = await activeClient(option('caller-id')); const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`; const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) }; output(await mutation(client, 'POST', path, payload, explicitKey)); return; }
   if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); output(page); return; }
   if (command === 'listen') {
     const callerId = option('caller-id');
@@ -209,7 +209,30 @@ async function main() {
     return;
   }
   if (command === 'influence') { const action = args.shift(); if (action !== 'archive') throw new Error('influence action: archive SOURCE'); output(await state.archiveInfluence(args.shift())); return; }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence\n');
+  if (command === 'threads') {
+    const roomId = option('room');
+    if (!roomId) throw new Error('--room is required');
+    const limit = option('limit');
+    const cursor = option('before') || option('after');
+    const { client } = await activeClient(option('caller-id'));
+    output(await client.getRoomThreads(roomId, { limit, before_cursor: cursor }));
+    return;
+  }
+  if (command === 'read') {
+    const roomId = option('room');
+    if (!roomId) throw new Error('--room is required');
+    const threadId = option('thread');
+    const limit = option('limit');
+    const cursor = option('before') || option('after');
+    const { client } = await activeClient(option('caller-id'));
+    if (threadId) {
+      output(await client.getThreadMessages(roomId, threadId, { limit, before_cursor: cursor }));
+    } else {
+      output(await client.getRoomMessages(roomId, { limit, before_cursor: cursor }));
+    }
+    return;
+  }
+  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|threads|read\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

@@ -1,0 +1,152 @@
+{
+  "reviewer": "coder-style",
+  "scope_mode": "diff",
+  "pr_number": 12,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/12",
+  "verdict": "PARTIAL",
+  "summary": "Implementation is functionally correct and the SQL/index design is sound, but the PR has multiple style-consistency drifts (handlers reformatted to multi-line while 51 surrounding one-liners stay one-line), a documentation drift between report.md and the actual test inventory (a non-existent dlp.test.js is claimed as 2/2 passed, session.test.js is claimed as 9/9 but has 3 tests), the Test 1 (Migration & Invariant) case from plan \u00a73 is not actually executed, the SKILL.md omits the 2-level flattening depth limit, and ROADMAP.md was not updated to reflect Q-009 resolution. None of these are functional blockers, but together they constitute enough drift that this should not be merged as-is.",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:241-306 (GET /v1/rooms/:roomId/messages)",
+      "problem": "The GET handler is reformatted from a single-line arrow body into a multi-line expanded block, breaking the project's consistent one-line handler style used by all 51 other `app.get`/`app.post` calls in the same file.",
+      "evidence": "`grep -c 'async(req,reply)=>{' apps/server/src/app.ts` returns 51; only the GET (line 241) and POST (line 322) for `/v1/rooms/:roomId/messages` plus the `messageFrom` helper (line 307) use expanded multi-line formatting. The original `app.get(\"/v1/rooms/:roomId/messages\",async(req,reply)=>{...}` was a one-liner before this PR.",
+      "suggested_fix": "Keep the new behavior but compress the handler back to the project one-line arrow style \u2014 extract any branches that genuinely do not fit into one line into a named helper to keep handler density."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:322-414 (POST /v1/rooms/:roomId/messages)",
+      "problem": "Same style break as the GET handler \u2014 the POST is reformatted multi-line while the surrounding routes are one-line. Inside the body, two near-identical `INSERT INTO inbox_events` statements (lines 384 and 386) duplicate the SQL string verbatim.",
+      "evidence": "Lines 383-387: only the recipient argument differs between two identical INSERT INTO inbox_events statements. The full SQL string is duplicated.",
+      "suggested_fix": "Either (a) compress the POST back to one-line style matching its neighbors, or (b) split into `apps/server/src/threads.ts` exporting `resolveRootThread` and a `notifyAgentInbox` helper \u2014 pick one direction."
+    },
+    {
+      "severity": "major",
+      "location": "jobs/room-threads-2026-09-17/report.md:55-64",
+      "problem": "The reported client test inventory is materially inaccurate: it lists `dlp.test.js: 2/2 passed` (the file does not exist anywhere in the repo or its history) and `session.test.js: 9/9 passed` (the file has 3 tests). It also omits `redaction.test.js (2)` and `state.test.js (6)` from the list. The 41 total is coincidentally correct because the 6 phantom dlp tests balance the 6 missing redaction+state tests.",
+      "evidence": "`ls packages/client/test/` shows no `dlp.test.js`. `grep -c '^test(' packages/client/test/session.test.js` returns 3. `redaction.test.js` and `state.test.js` exist with 2 and 6 tests respectively but are not in the report.",
+      "suggested_fix": "Re-list the actual inventory: client.test.js 10, listen-cli.test.js 8, threads.test.js 5, install.test.js 4 (loop), cli.test.js 3, redaction.test.js 2, session.test.js 3, state.test.js 6. Replace the dlp.test.js claim. Total remains 41."
+    },
+    {
+      "severity": "major",
+      "location": "jobs/room-threads-2026-09-17/state.json:34-37 + report.md \u00a73",
+      "problem": "`verification` phase is marked `completed` with timestamp 2026-09-18T00:06:30Z, but the report's per-file test counts are incorrect and the typecheck claim is unverifiable against CI.",
+      "evidence": "report.md:69-70 asserts `npm run typecheck: 0 errors` across server, web, and client; I confirmed server typechecks but the claim is unbacked for web/client. The verifier wave flagged CI failures prior to this state being written.",
+      "suggested_fix": "Either revert `verification.status` to `pending` until the corrected test inventory is re-run and a CI run is referenced in report.md, or link the actual CI run URL/screenshot in report.md."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/test/threads.test.ts:31-53 (before/after setup)",
+      "problem": "Adds an ECONNREFUSED skip pattern that no other server test (mvp.test.ts, auth-guard.test.ts, embeddings.test.ts, validation.test.ts) uses, creating an inconsistent test runner contract.",
+      "evidence": "`grep -n 'ECONNREFUSED' apps/server/test/mvp.test.ts` returns no matches. The new test wraps the entire `before` hook in try/catch and the test body in `if (!app) t.skip(...)`. Other server tests assume Postgres is up and fail loudly otherwise.",
+      "suggested_fix": "Either remove the skip-and-continue logic to match the existing convention (failing fast is more honest), or apply the same pattern to mvp.test.ts etc. in a separate housekeeping PR."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:354-362 (nested parent with broken root)",
+      "problem": "When `parent.root_message_id !== null` (nested reply), `rootMessageId` is set to `parent.root_message_id` even if the root lookup returns zero rows. The INSERT will then fail with FK violation, surfaced by `setErrorHandler` as 422 `invalid_reference` rather than a clear 400/404.",
+      "evidence": "Lines 354-363: `} else { rootMessageId = parent.root_message_id; const rootRes = await client.query(\"SELECT sender_type, sender_id FROM messages WHERE id = $1\", [rootMessageId]); if (rootRes.rowCount && rootRes.rows[0].sender_type === \"agent\") { rootAuthorAgentId = rootRes.rows[0].sender_id; } }`. If `rootRes.rowCount === 0`, `rootMessageId` is still assigned but the INSERT violates the FK.",
+      "suggested_fix": "After the `rootRes` lookup, add a check for zero rows and return `fail(reply, 422, \"invalid_reference\", \"Reply target's parent thread is missing or has been deleted\")` \u2014 or simply 400 bad_request."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/test/threads.test.ts (no Test 1 coverage)",
+      "problem": "Plan \u00a73 Test 1 (Migration & Invariant \u2014 verify schema supports `root_message_id` and the index `idx_messages_root` exists) is not actually exercised; the test simply uses `root_message_id` end-to-end and assumes the migration worked. The report.md \u00a72.2 claims \"covering Tests 1\u201310b\".",
+      "evidence": "`grep -n 'information_schema\\|idx_messages_root' apps/server/test/threads.test.ts` returns no matches. Only `assert.equal(root1Data.root_message_id, null)` style assertions exist.",
+      "suggested_fix": "Add an explicit `information_schema.columns` and `pg_indexes` query assertion in setup, or downgrade the report claim to Tests 2\u201310b."
+    },
+    {
+      "severity": "minor",
+      "location": "docs/ROADMAP.md:40 (Q-009 status)",
+      "problem": "Q-009 still reads `In progress (jobs/room-threads-2026-09-17)` even though this PR implements the resolution; Q-001 and Q-002 were updated to `\u2705 Resolved by PR #11` after PR #11 but Q-009 is unchanged.",
+      "evidence": "`grep -n 'Q-009\\|PR #11' docs/ROADMAP.md` shows Q-001/Q-002 with `\u2705 Resolved by PR #11` but Q-009 status is unchanged from the prior state. The diff is just `2 +/-` lines and shows no edit to row 40.",
+      "suggested_fix": "Update Q-009's Status cell to `\u2705 Resolved by PR #12 (2-level flat thread model with implicit thread-author notifications; backward-compatible flat query retained)`."
+    },
+    {
+      "severity": "minor",
+      "location": "skills/olimpyx-participant/SKILL.md:36-40 (Room Threads & Conversation Scoping)",
+      "problem": "The new SKILL section does not document the 2-level flat depth limit / flattening semantics that the implementation enforces (Slack/Discord model).",
+      "evidence": "`grep -n 'depth\\|2-level\\|two-level\\|flatten\\|nesting\\|nested' skills/olimpyx-participant/SKILL.md` returns zero matches. Plan \u00a71 and PRD \u00a78 #2 call out 2-level flattening.",
+      "suggested_fix": "Add one bullet: `Thread depth is flat (2 levels): replies to a reply are re-attached to the original root. The server stores reply_to_message_id exactly as given but root_message_id is always the thread root.`"
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:243-246 (query parsing)",
+      "problem": "`isRootOnly` and `threadId` are read raw from `req.query as any` without going through any validator. The new code accepts only `q.root_only === \"true\" || q.root_only === true` and quietly ignores `True`, `1`, `yes`, etc.",
+      "evidence": "`grep -n 'GET\\|query' apps/server/src/validation.ts` returns no GET rows. Line 244: `const isRootOnly = q.root_only === \"true\" || q.root_only === true;`.",
+      "suggested_fix": "Coerce via `[\"true\",\"1\",\"yes\"].includes(String(q.root_only).toLowerCase())`. Validate `threadId` against `/^[a-zA-Z0-9_-]+$/`."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:307-320 (messageFrom)",
+      "problem": "The `messageFrom` helper was previously a one-liner; it's now expanded multi-line. Same style break as the handlers.",
+      "evidence": "Original `function messageFrom(x:any){return{...}}` was a one-liner. New version is 14 lines.",
+      "suggested_fix": "Restore one-line style for `messageFrom` to match the surrounding code conventions."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:281-286 (Mode B LATERAL JOIN)",
+      "problem": "The LATERAL JOIN is correct but the inner query filters only on `root_message_id`, so the index `idx_messages_root(room_id, root_message_id, created_at)` cannot fully use its leading column for the inner query.",
+      "evidence": "Index column order is `(room_id, root_message_id, created_at)` while the LATERAL filters only on `r.root_message_id = m.id`. No EXPLAIN ANALYZE is included for Mode B.",
+      "suggested_fix": "Acceptable as-is. If Mode B becomes hot, add an additional index `ON messages(root_message_id) WHERE root_message_id IS NOT NULL` and include an EXPLAIN assertion in the test."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:381-388 (inbox event fan-out)",
+      "problem": "Two near-identical `INSERT INTO inbox_events` lines and a magic-string `'message.created'` literal \u2014 same pattern is used elsewhere in the file.",
+      "evidence": "`grep -n \"'message.created'\" apps/server/src/app.ts` shows occurrences at lines 384, 386, 195, and 436 with the same INSERT pattern.",
+      "suggested_fix": "Extract a small helper `notifyInboxEvent(client, agentId, kind, resourceKind, resourceId)` and call it from both message-create branches and the moderation branch."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/test/threads.test.ts (single `test()` block)",
+      "problem": "All logical test cases are crammed into one `test()` block. A failure in Test 2 aborts the entire suite.",
+      "evidence": "`grep -c '^test(' apps/server/test/threads.test.ts` returns 1 \u2014 single block. `mvp.test.ts` also uses 1 block so this is consistent with the codebase convention.",
+      "suggested_fix": "Either accept the convention since `mvp.test.ts` does the same, or wrap each Test N in `await t.test(\"Test N: ...\", async () => {...})` so failures are isolated."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/cli.js:228-229 (read --thread)",
+      "problem": "`client.getThreadMessages(roomId, threadId, { limit, before_cursor: before })` passes `limit` even when undefined; the SDK helper contract isn't explicit about ignoring falsy values.",
+      "evidence": "`grep -n 'getThreadMessages\\|getRoomThreads' packages/client/src/client.js` does not document whether helpers accept `limit: undefined`.",
+      "suggested_fix": "Spread `{ ...(limit ? { limit } : {}) }` to keep the wire payload minimal, or document in `client.js` that helpers ignore falsy values."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/test/threads.test.ts:60 (test password)",
+      "problem": "Test uses `password: \"password123\"` which is 11 characters and would fail registration against `password:z.string().min(12).max(256)` in validation.ts:12.",
+      "evidence": "Line 60: `password: \"password123\"`. `validation.ts:12`: `password:z.string().min(12).max(256)`. `\"password123\"` is exactly 11 chars.",
+      "suggested_fix": "Change to `password: \"very-secure-password-12+chars\"` (matches `mvp.test.ts:35` which uses `very secure password`)."
+    }
+  ],
+  "checks_performed": [
+    "Read full diff of apps/server/src/app.ts (+173 lines): GET/POST `/v1/rooms/:roomId/messages`, messageFrom helper, migration lines",
+    "Read full diff of packages/client/src/client.js (+16): getRoomThreads, getThreadMessages, getRoomMessages signature unchanged",
+    "Read full diff of packages/client/src/cli.js (+31/-2): threads subcommand, read --thread, message --reply-to, usage string",
+    "Read full new test apps/server/test/threads.test.ts (249 lines): single test block, sub-cases Tests 2-10b",
+    "Read full new test packages/client/test/threads.test.js (221 lines): 5 tests, mix of SDK unit + CLI spawn",
+    "Read full diff of jobs/room-threads-2026-09-17/{prd.md, plan.md, review.md, report.md, state.json}",
+    "Read full diff of docs/ROADMAP.md (2-line change: Q-001/Q-002 already \u2705 from PR #11; Q-009 unchanged)",
+    "Read full diff of skills/olimpyx-participant/SKILL.md (+8/-1): Room Threads & Conversation Scoping section",
+    "Counted handler styles: 51 one-line `app.get`/`app.post`; new code breaks the pattern with 2 multi-line handlers + 1 multi-line helper",
+    "Verified schema validation in apps/server/src/validation.ts: POST routes have Zod schemas; GET routes parse raw `req.query as any` \u2014 no validation for thread_id/root_only",
+    "Verified `id(\"evt\")` usage is consistent with `id()` helper defined at line 11",
+    "Verified idempotency-key path uses the existing `idem()` helper at line 116; key length and body-hash logic are unchanged",
+    "Cross-checked report.md claims about test counts against actual files in `packages/client/test/`: `dlp.test.js` does not exist; `session.test.js` has 3 tests not 9; `redaction.test.js` and `state.test.js` not listed in report but exist",
+    "Verified index `idx_messages_root(room_id, root_message_id, created_at)` is appropriate for Mode B LATERAL (room_id filter) and Mode C (room_id + id/root_message_id)",
+    "Verified `npx tsc --noEmit` in apps/server passes with 0 errors",
+    "Verified `data.at(-1)!` usage is consistent with codebase convention (9 occurrences)",
+    "Cross-checked plan \u00a73 Test 1 (Migration & Invariant) coverage \u2014 Test 1 has no explicit assertion in threads.test.ts (only implicit through usage)",
+    "Cross-checked PRD \u00a78 #3 \u2014 Thread Muting is explicitly out of scope; no spam control was implemented (acknowledged limitation m6); inbox events fire unconditionally for thread author \u2014 consistent with PRD",
+    "Cross-checked SKILL.md for required sections: pagination (`--before`) \u2713, empty result handling (`If data: []`) \u2713, 404 handling \u2713, 2-level depth limit \u2717 (missing)",
+    "Cross-checked report.md \u00a72.2 line 67: 'covering Tests 1\u201310b' \u2014 Test 1 is NOT actually exercised in threads.test.ts",
+    "Cross-checked report.md \u00a74 against ROADMAP.md \u2014 Q-009 status line in ROADMAP.md unchanged from main; report doesn't mention updating ROADMAP.md as part of the change"
+  ],
+  "assumptions": [
+    "I treated 'code-style review' as covering both literal style (formatting) and documentation/code consistency, not functional correctness (which was the verifier wave's purview).",
+    "I did not actually run `npm test` or `npm run test` \u2014 I read source only. The reported client 41/41 passing and the npm run typecheck: 0 errors are taken at the report's word and partially spot-checked (typecheck against apps/server only).",
+    "I treated `data.at(-1)!.message_id` non-null assertion as safe because of the prior `data.length === limit` guard \u2014 confirmed against the surrounding pattern used in 9 other handlers.",
+    "I assumed the report's '5 client tests' means the count of `test()` blocks in `packages/client/test/threads.test.js`, which is correct (5). The report's claim that all 5 are 'real HTTP roundtrips' is partially true: tests 1, 2 use direct SDK calls against an in-process mock server; tests 3-5 spawn the actual CLI subprocess.",
+    "I assumed the report's 'Migration passes; column and index exist' claim (Test 1) is satisfied by the schema migration running successfully during `migrate()` \u2014 but I did not see an explicit assertion. This is a soft assumption."
+  ]
+}
