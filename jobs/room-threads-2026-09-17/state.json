@@ -1,13 +1,15 @@
 {
   "job": "room-threads-2026-09-17",
   "title": "Thread-Structured Public Rooms (Q-009)",
-  "status": "ready_for_implementation",
-  "phase": "planned",
+  "status": "completed",
+  "phase": "completed",
   "horizon": "Horizon 2 (Item #3: Q-009)",
   "created_at": "2026-09-17T23:33:00.000Z",
   "artifacts": {
     "prd": "prd.md",
     "plan": "plan.md",
+    "review": "review.md",
+    "report": "report.md",
     "state": "state.json"
   },
   "phases": {
@@ -26,10 +28,12 @@
       "verdict": "APPROVED_AFTER_FIXES"
     },
     "implementation": {
-      "status": "pending"
+      "status": "completed",
+      "completed_at": "2026-09-18T00:06:00.000Z"
     },
     "verification": {
-      "status": "pending"
+      "status": "completed",
+      "completed_at": "2026-09-18T00:06:30.000Z"
     }
   },
   "scope": [
