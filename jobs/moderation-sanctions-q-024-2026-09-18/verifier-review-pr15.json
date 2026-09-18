@@ -1,0 +1,110 @@
+{
+  "reviewer": "verifier",
+  "scope_mode": "diff",
+  "pr_number": 15,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/15",
+  "branch": "feat/moderation-sanctions-q-024",
+  "head_sha": "6916b65",
+  "verdict": "PARTIAL",
+  "summary": "Implementation is functionally correct and addresses 6 of 8 prior-review majors fully (M2, M3, M5, M6, M7, M8). Two majors remain unresolved (M1 and M4) because the schema/index migrations do not use CREATE INDEX CONCURRENTLY as explicitly required. Two follow-up commits (8765a8b, 6916b65) restore MVP-test compatibility by removing the self-report guard — a deliberate deviation from the original PRD that is now enforced by mvp.test.ts. Typecheck passes (npm run typecheck in apps/server). Test execution was NOT performed in this verification — Docker daemon unavailable, so the test suite could not be run live; conclusions rest on code reading.",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:68-69, 78 (migrate function lines 30-83)",
+      "problem": "M1/M4 majors not resolved: the three required indexes are created without CONCURRENTLY despite the prior review's explicit ask.",
+      "evidence": "Lines 68-69: `CREATE INDEX IF NOT EXISTS idx_agents_restricted_expiry ON agents(restricted, restricted_until) WHERE restricted = true;` and `... idx_owners_restricted_expiry ...` are non-concurrent. Line 78: `CREATE INDEX IF NOT EXISTS idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status = 'pending';` is non-concurrent. grep for `CONCURRENTLY` in apps/server/src returns 0 matches — the codebase has never used it. The migration runs at process startup via migrate() (apps/server/src/app.ts:30), so writes to agents/owners/incidents will be locked for the duration of the index build on any non-empty production database.",
+      "suggested_fix": "Either (a) move index creation to a one-shot background job using `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...` outside the transaction; or (b) document an explicit operational acceptance that the migration window blocks writes and is acceptable for this service's deployment cadence."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:249 (isModerator function)",
+      "problem": "M2 deviation: implementation uses MODERATOR_TOKEN, not MODERATOR_SECRET as the prior review recommended. Naming only — security properties preserved.",
+      "evidence": "Line 249: `const configured=process.env.MODERATOR_TOKEN,raw=req.headers.authorization?.replace(/^Bearer\\s+/i,\"\")`. The function does not log the secret (verified by grep — only this single reference exists in apps/server/src/app.ts). Uses `crypto.timingSafeEqual` with `hashToken()` on both sides, which is sound.",
+      "suggested_fix": "If the env-var name is intentional, update review.md and PRD references; otherwise rename to MODERATOR_SECRET for consistency with the documented M2 ask. No security fix needed."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:249 (isModerator function)",
+      "problem": "M2 deviation: missing/unset/wrong MODERATOR_TOKEN all return identical 401 'Moderator authentication required'. The prior review explicitly asked whether missing env var should be 503 vs silent skip vs 500; implementation chooses 401 — which is the most security-consistent choice (no enumeration) but does not surface operational misconfiguration.",
+      "evidence": "Line 249: `if(!configured||!raw||!crypto.timingSafeEqual(...)){fail(reply,401,\"unauthorized\",\"Moderator authentication required\");return false}`. The `!configured` short-circuit collapses missing-env-var with wrong-secret to the same response.",
+      "suggested_fix": "Optionally emit a structured startup-time warning when MODERATOR_TOKEN is unset so operators notice in logs (do NOT change the 401 response shape — that is correct)."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:1047-1101 (POST /v1/reports) and PR commits 8765a8b + 6916b65",
+      "problem": "Self-report guard has been REMOVED. The PRD called for a 422 self-report check; the implementation permits owner→own-agent reports. This was done intentionally to keep mvp.test.ts passing, but it is a documented behavioral regression vs. PRD §2.3 / review.md M-series expectations.",
+      "evidence": "git show 8765a8b removes the self-report branch from the implementation; git show 6916b65 removes the corresponding test assertion `assert.equal(targetSelfReport.statusCode, 422, ...)`. Currently POST /v1/reports (apps/server/src/app.ts:1047) has no self-report check — only restricted-reporter, quota, and dedup. mvp.test.ts:206 uses ownerToken to report `target.kind=profile, id=agentId` where `agentId` belongs to `ownerToken`'s owner, demonstrating that self-report must succeed for the MVP test.",
+      "suggested_fix": "Decide and document: either (a) accept the regression and update the PRD to remove the self-report prohibition (with rationale: self-reporting a misbehaving agent is a legitimate owner workflow), or (b) restore the guard and amend mvp.test.ts to use a distinct owner for the report. The current state is ambiguous because the code comment in the PR removes the assertion without updating PRD.md."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1215-1237 (grant_appeal action)",
+      "problem": "M6 matrix slightly inelegant: the owner-cascade branch uses `(!incident.agent_id && incident.owner_id)` as a fallback, but never inspects the previously-stored `incident.sanction_kind`. A warning sanction has no agent_id and no owner_id cascade target, which is handled correctly, but the logic could be made more explicit by reading `incident.action` or `incident.sanction_kind`.",
+      "evidence": "Line 1221: `if (incident.action === \"restrict_owner\" || incident.action === \"restrict_owner_temporary\" || (!incident.agent_id && incident.owner_id))` — three OR-ed predicates. Test coverage exists (AC-3 test 'grant_appeal lifts sanction' covers owner-cascade), so behavior is correct.",
+      "suggested_fix": "Refactor the condition to use `incident.action` only — it is already recorded and unambiguous. This is a code-clarity nit, not a correctness bug."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:112-120 (evaluateMaliciousReportPenalty)",
+      "problem": "M7 partial: implementation has only 2 levels (warning, 24h-temporary). The prior review recommended 3 levels (warning → 24h → 7d).",
+      "evidence": "Lines 112-120: `if (priorDismissedMaliciousCount === 0) { return { penalty: \"warning\" }; } return { penalty: \"temporary_restriction\", durationSec: 86400 };`. Test (line 93 of test file) confirms only two outcomes. The function signature does not accept escalation beyond the second offense.",
+      "suggested_fix": "Extend the function to support a 7-day tier when priorCount >= 2, e.g. `if (count >= 2) return { penalty: 'temporary_restriction', durationSec: 604800 }`. Not a blocker — the 2-level scheme is still a graduated penalty."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1064-1084 (POST /v1/reports dedup) vs. apps/server/src/app.ts:122-130 (isDuplicateOpenReport helper)",
+      "problem": "Duplicate-detection helper exists (`isDuplicateOpenReport`) but the handler inlines a SQL re-implementation of the same logic. Same for quota (`isReportQuotaExceeded`).",
+      "evidence": "The handler at line 1072 runs a custom SQL `SELECT 1 FROM reports r JOIN incidents i ...` instead of using the exported `isDuplicateOpenReport` helper. The helper signature accepts already-fetched rows, which would force a second query; therefore the inline SQL is a deliberate optimization, but it duplicates the rule and makes future invariant changes risky.",
+      "suggested_fix": "Add a unit test that exercises the inline SQL path so the dedup rule has the same coverage in both places, or refactor the helper to accept a Pool and do the SQL internally."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1282-1301 (dismiss_malicious reporter-penalty branch)",
+      "problem": "When applying the reporter's temporary restriction, the code does NOT emit an inbox event targeted at the owner's existing session(s) — only a single inbox_events row. This is correct (the event surfaces via bootstrap/inbox queries), but if the affected owner's agents have long-lived heartbeats (>90s) they will keep heartbeating until expiry. Sessions are explicitly terminated (line 1293-1296), so this is fine.",
+      "evidence": "Lines 1283-1300 restrict owner + agents, terminate sessions, then emit a single inbox event. No double-emit.",
+      "suggested_fix": "No fix needed. Documented for awareness."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1114 (PATCH /v1/moderation/incidents/:incidentId)",
+      "problem": "expected_revision check is `!==` (strict) which is correct, but the validator at validation.ts:42 makes expected_revision required (`.positive()`), so the handler's undefined-vs-number check is double-protected. This is fine but slightly redundant.",
+      "evidence": "validation.ts:42 defines `expected_revision:z.number().int().positive()` (required); app.ts:1114 then `if (incident.revision !== b.expected_revision) return 409`. If the validator runs first, the handler branch is dead code.",
+      "suggested_fix": "No fix needed — defense in depth is acceptable here."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1297-1300 vs. 1332-1337 (inbox_events for dismiss_malicious)",
+      "problem": "When dismiss_malicious triggers the reporter-penalty path, TWO inbox_events are inserted within the same transaction: one for the reporter (line 1297-1300) and one for the reported owner (line 1332-1336, always executed if `incident.owner_id` is set). For the case where reporter == reported owner (self-report, now permitted after the guard removal), this would emit two inbox events for the same owner.",
+      "evidence": "Line 1262 sets `reporterOwnerId`; line 1286/1289 restricts the reporter owner + agents; line 1297-1300 inserts event for `reporterOwnerId`; line 1332-1336 unconditionally inserts an event for `incident.owner_id` if set. If reporterOwnerId === incident.owner_id (self-report), two events fire.",
+      "suggested_fix": "Guard line 1332 with `if (incident.owner_id && incident.owner_id !== reporterOwnerId)` to avoid duplicate events on self-reports. Minor — no test exercises this edge case currently."
+    }
+  ],
+  "checks_performed": [
+    "Read all 12 PR files end-to-end (git diff main..feat/moderation-sanctions-q-024 --stat = +2685 / -21 across 12 files).",
+    "Inspected migrate() block (apps/server/src/app.ts:30-83): verified all 4 columns (restricted_until, restriction_kind for owners AND agents), all 6 appeal columns, sanction_kind, sanction_expires_at; checked every CREATE INDEX for CONCURRENTLY keyword — none used.",
+    "Inspected principal() function (apps/server/src/app.ts:220-248): confirmed pure SQL condition `(restricted = true AND (restricted_until IS NULL OR restricted_until > now()))` — no write-on-read.",
+    "Inspected isModerator (apps/server/src/app.ts:249): confirmed MODERATOR_TOKEN env, timing-safe equality on hashed tokens, no log emission of secret, uniform 401 across missing/empty/wrong inputs.",
+    "Inspected GET /v1/owners/me/incidents (lines 359-381): confirmed owner_id scope, status filter, before_cursor pagination, all incident fields returned (SELECT *).",
+    "Inspected POST /v1/owners/me/incidents/:incidentId/appeal (lines 391-441): confirmed ownership check, appeal_status !== 'none' guard, sanction/escalation check, status → 'appeal_pending', appeal_reason/evidence/submitted_at, inbox_events emission.",
+    "Inspected PATCH /v1/moderation/incidents/:incidentId (lines 1104-1346): confirmed all 9 PRD actions implemented (warn, restrict_agent_temporary, restrict_agent, restrict_owner_temporary, restrict_owner, grant_appeal, deny_appeal, dismiss, dismiss_malicious).",
+    "Verified M5 cascade in restrict_owner_temporary (lines 1178-1188) and restrict_owner (lines 1199-1209): UPDATE owners + UPDATE agents WHERE owner_id + UPDATE sessions WHERE agent_id IN (SELECT id FROM agents WHERE owner_id).",
+    "Verified M6 grant_appeal matrix (lines 1221-1237): owner-actions cascade-clear owner + owned agents; agent-actions clear only the agent; warning/no-action produces no DB write.",
+    "Verified M7 dismiss_malicious graduated penalty (lines 1248-1303): 1st offense = inbox event for reporter; 2nd+ = 24h temporary restriction on owner + owned agents + session termination.",
+    "Verified M8 rate limiting on POST /v1/reports (lines 1050-1084): reporter-restricted check (403), per-hour quota (429 >=10), per-(reporter, target) dedup on unresolved incidents (409).",
+    "Read apps/server/test/moderation-sanctions.test.ts end-to-end: 643 lines, 4 AC-test blocks (AC-1..AC-4) plus 7 unit tests for pure helpers. Covers warning/temp/permanent, owner transparency, appeals lifecycle, malicious-penalty escalation.",
+    "Read packages/client/test/moderation.test.js: 255 lines; verified tests stub process.exit/crypto.randomUUID and call the CLI commands — they exercise real command parsing and credential redaction but do not perform HTTP roundtrips (they mock stdout).",
+    "Read skills/olimpyx-participant/SKILL.md diff: documents graduated sanctions spectrum, owner incident transparency commands (`incidents`), appeal workflow (`appeal`), reporting rules (`report`) with anti-spam guidance (D-042).",
+    "Read packages/client/src/cli.js diff: confirms new commands `incidents`, `appeal`, `report` are added to the usage string (line 494) and use `output()` for credential redaction.",
+    "Read apps/server/src/validation.ts diff: confirmed schema for moderator PATCH covers all 10 actions (incl. 'none') and appeal schema requires reason (text(5000)) + evidence array (max 50).",
+    "Read prior review.md, prd.md, report.md to reconcile original M1-M8 asks against current implementation.",
+    "Ran git show 8765a8b and git show 6916b65 to confirm both follow-up commits and the exact lines removed.",
+    "Ran `npm run typecheck` in apps/server — 0 errors.",
+    "Attempted to run test suite — Docker daemon unavailable in this environment (`docker ps` fails with `Cannot connect to the Docker daemon`). Test execution is therefore not in this verification; conclusions are based on code reading and structural analysis."
+  ],
+  "assumptions": [
+    "I could not run the test suite live because the Docker daemon is unavailable on this verification host. Static analysis and structural inspection of the 643-line moderation-sanctions test file are used in lieu of execution. The PR author's report.md claims all suites pass; this verifier cannot independently confirm.",
+    "I treat the self-report guard removal as a major finding because it is a documented PRD deviation, but I recognize that the alternative (amending mvp.test.ts) would also have ripple effects on the MVP contract. The current implementation is internally consistent.",
+    "The 'major' severity for the missing CONCURRENTLY indexes follows the explicit text of review.md M1/M4 — the prior reviewer flagged this exact risk. I note that this is consistent with the project-wide pattern (no CREATE INDEX in the codebase has ever used CONCURRENTLY), so the issue is systemic, not new. Mitigation is a deployment-time decision the maintainers must make.",
+    "I treat 'PARTIAL' verdict (not 'FAIL') because (a) the prior M1-M4 majors are partially addressed — columns present, indexes added, just not CONCURRENTLY; (b) the functional code is correct on inspection; (c) the two follow-up commits resolve an inconsistency that would otherwise break mvp.test.ts. The major findings are deployment-process issues, not logical bugs."
+  ]
+}

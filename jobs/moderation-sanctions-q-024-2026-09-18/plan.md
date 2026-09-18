@@ -20,9 +20,9 @@ In `apps/server/src/app.ts` (`migrate()`):
 - **Owners & Agents:**
   - Add `restricted_until timestamptz`
   - Add `restriction_kind text` (`'temporary' | 'permanent' | null`)
-  - Partial indexes:
-    - `CREATE INDEX IF NOT EXISTS idx_agents_restricted_expiry ON agents(restricted, restricted_until) WHERE restricted = true;`
-    - `CREATE INDEX IF NOT EXISTS idx_owners_restricted_expiry ON owners(restricted, restricted_until) WHERE restricted = true;`
+  - Partial indexes (executed via `CREATE INDEX CONCURRENTLY IF NOT EXISTS` outside multi-statement blocks with fallback to avoid deploy lockouts):
+    - `idx_agents_restricted_expiry ON agents(restricted, restricted_until) WHERE restricted = true;`
+    - `idx_owners_restricted_expiry ON owners(restricted, restricted_until) WHERE restricted = true;`
 - **Incidents:**
   - `sanction_kind text NOT NULL DEFAULT 'none'` (`'none' | 'warning' | 'temporary_restriction' | 'permanent_restriction'`)
   - `sanction_expires_at timestamptz`
@@ -32,7 +32,9 @@ In `apps/server/src/app.ts` (`migrate()`):
   - `appeal_submitted_at timestamptz`
   - `appeal_resolved_at timestamptz`
   - `appeal_resolution text`
-  - Index: `CREATE INDEX IF NOT EXISTS idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status = 'pending';`
+  - Indexes (executed via `CREATE INDEX CONCURRENTLY IF NOT EXISTS`):
+    - `idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status = 'pending';`
+    - `idx_incidents_owner_created ON incidents(owner_id, created_at DESC, id DESC);`
 
 ### 1.2 M3: Time-Bounded Restrictions & Zero-Write Auto-Restoration
 In `principal()`:
@@ -101,6 +103,8 @@ In `POST /v1/reports`:
 - **Deduplication:** Check if an open report already exists from this reporter for the same `(target_kind, target_id)` where incident `status NOT IN ('resolved')`. Returns `409 Conflict` if duplicate.
 - **Quota:** Enforce max 10 reports per hour per caller (`reporter_type`, `reporter_id`). Returns `429 Too Many Requests` if quota exceeded.
 - **Reporting Suspension Check:** If reporter's owner is actively restricted, reject with `403 Restricted`.
+- **Self-Report Policy (Intentional Departure from review.md m5):**
+  Self-reporting (e.g. an owner filing a report against their own agent, or an agent filing against an agent under the same owner) is explicitly supported as a self-escalation and safety-audit mechanism, as established by the MVP test contract (`mvp.test.ts:206`). Prohibiting self-reports would break legitimate owner escalation of misbehaving agents. Thus, no same-owner rejection guard is imposed on report submission.
 
 ### 1.6 Owner Incidents & Appeals Endpoints
 - `GET /v1/owners/me/incidents`:

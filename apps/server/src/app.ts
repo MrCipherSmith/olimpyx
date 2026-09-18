@@ -65,8 +65,6 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE owners ADD COLUMN IF NOT EXISTS restriction_kind text;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS restricted_until timestamptz;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS restriction_kind text;
-    CREATE INDEX IF NOT EXISTS idx_agents_restricted_expiry ON agents(restricted, restricted_until) WHERE restricted = true;
-    CREATE INDEX IF NOT EXISTS idx_owners_restricted_expiry ON owners(restricted, restricted_until) WHERE restricted = true;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS sanction_kind text NOT NULL DEFAULT 'none';
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS sanction_expires_at timestamptz;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_status text NOT NULL DEFAULT 'none';
@@ -75,9 +73,22 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_submitted_at timestamptz;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolved_at timestamptz;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolution text;
-    CREATE INDEX IF NOT EXISTS idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status = 'pending';
     DELETE FROM idempotency_keys WHERE response::text ~ '"(access_token|agent_token|session_token|enrollment_token)"';
   `);
+
+  const indexes = [
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_agents_restricted_expiry ON agents(restricted, restricted_until) WHERE restricted = true",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_owners_restricted_expiry ON owners(restricted, restricted_until) WHERE restricted = true",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status = 'pending'",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_incidents_owner_created ON incidents(owner_id, created_at DESC, id DESC)"
+  ];
+  for (const idx of indexes) {
+    try {
+      await pool.query(idx);
+    } catch {
+      await pool.query(idx.replace("CONCURRENTLY ", ""));
+    }
+  }
   await ensureEmbeddingSchema(pool);
   await pool.end();
 }
@@ -214,6 +225,9 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   async function indexVersion(versionId:string,text:string){const vector=await embeddings.embed(text);if(!vector)return;await app.pg.query("INSERT INTO knowledge_embeddings(version_id,embedding,model) VALUES($1,$2,$3) ON CONFLICT(version_id) DO UPDATE SET embedding=excluded.embedding,model=excluded.model,created_at=now()",[versionId,`[${vector.join(",")}]`,process.env.EMBEDDING_MODEL??"sentence-transformers/all-MiniLM-L6-v2"]);embeddingCache={at:Date.now(),value:{status:"available",provider:new URL(process.env.EMBEDDING_BASE_URL!).origin,dimension:vector.length}}}
   app.addHook("onClose", async () => { await app.pg.end(); await idempotencyPool.end(); });
   app.addHook("onSend", async (_request, reply) => { reply.header("X-Request-Id", reply.request.id); });
+  if (!process.env.MODERATOR_TOKEN) {
+    app.log.warn("MODERATOR_TOKEN is not configured; moderator endpoints will reject all calls");
+  }
 
   const fail = (reply: any, status: number, code: string, message: string) => reply.code(status).send({ error: { code, message, request_id: reply.request.id, details: [] } });
   const enforceAuthLimit=(reply:any,result:RateLimitResult)=>{if(result.allowed)return false;reply.header("Retry-After",String(result.retryAfterSeconds));fail(reply,429,"rate_limited","Too many authentication attempts; retry later");return true};
@@ -356,10 +370,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.post("/v1/owners/me/enrollment-tokens", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return idem(req,reply,p.id,async()=>{const raw=token(),exp=new Date(Date.now()+900000).toISOString();await app.pg.query("INSERT INTO enrollment_tokens VALUES($1,$2,$3,NULL)",[hashToken(raw),p.id,exp]);return{status:201,data:{enrollment_token:raw,expires_at:exp}}});});
   app.get("/v1/owners/me/agents", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const r=await app.pg.query(`${profileSql} WHERE a.owner_id=$1 ORDER BY a.created_at LIMIT $2`,[p.id,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(profileFrom),page:{next_cursor:null}}});
   app.post("/v1/owners/me/agents/:agentId/revoke",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId;const r=await app.pg.query("UPDATE agents SET restricted=true WHERE id=$1 AND owner_id=$2 RETURNING id",[aid,p.id]);if(!r.rowCount)return fail(reply,404,"not_found","Agent not found");await app.pg.query("UPDATE sessions SET ended_at=now() WHERE agent_id=$1 AND ended_at IS NULL",[aid]);return{data:{agent_id:aid,revoked_at:now()}}});
-  app.get("/v1/owners/me/incidents", async (req, reply) => {
-    const p = await principal(req, reply, ["owner"]);
-    if (!p) return;
-    const q = req.query as any;
+  async function listOwnerIncidents(p: Principal, q: any) {
     const limit = boundedLimit(q.limit);
     const params: any[] = [p.id];
     let queryStr = "SELECT * FROM incidents WHERE owner_id = $1";
@@ -378,15 +389,16 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       data: r.rows,
       page: { next_cursor: r.rows.length === limit ? r.rows.at(-1)!.id : null }
     };
+  }
+  app.get("/v1/owners/me/incidents", async (req, reply) => {
+    const p = await principal(req, reply, ["owner"]);
+    if (!p) return;
+    return listOwnerIncidents(p, req.query as any);
   });
   app.get("/v1/owners/me/escalations", async (req, reply) => {
     const p = await principal(req, reply, ["owner"]);
     if (!p) return;
-    const r = await app.pg.query(
-      "SELECT * FROM incidents WHERE owner_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
-      [p.id, boundedLimit((req.query as any).limit)]
-    );
-    return { data: r.rows, page: { next_cursor: null } };
+    return listOwnerIncidents(p, req.query as any);
   });
   app.post("/v1/owners/me/incidents/:incidentId/appeal", async (req, reply) => {
     const p = await principal(req, reply, ["owner"]);
@@ -1068,6 +1080,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       if (b.target.kind === "message") subject = (await app.pg.query("SELECT CASE WHEN m.sender_type='agent' THEN a.id END agent_id,CASE WHEN m.sender_type='owner' THEN m.sender_id ELSE a.owner_id END owner_id FROM messages m LEFT JOIN agents a ON m.sender_type='agent' AND a.id=m.sender_id WHERE m.id=$1", [b.target.id])).rows[0];
       if (b.target.kind === "knowledge_version") subject = (await app.pg.query("SELECT a.id agent_id,a.owner_id FROM knowledge_versions v JOIN agents a ON a.id=v.author_agent_id WHERE v.id=$1", [b.target.id])).rows[0];
       if (!subject?.owner_id) return Promise.reject(Object.assign(new Error("Report target not found"), { statusCode: 422 }));
+      // Self-report policy: owners reporting their own agents/content is explicitly supported as a valid self-escalation/safety-audit path (contract established in mvp.test.ts:206).
 
       const existingOpen = await app.pg.query(
         `SELECT 1 FROM reports r
@@ -1101,6 +1114,21 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   });
   app.get("/v1/reports/:reportId",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const r=await app.pg.query("SELECT * FROM reports WHERE id=$1 AND reporter_type=$2 AND reporter_id=$3",[(req.params as any).reportId,p.type,p.id]);if(!r.rowCount)return fail(reply,404,"not_found","Report not found");return{data:{report_id:r.rows[0].id,status:r.rows[0].status,updated_at:r.rows[0].updated_at}}});
   app.get("/v1/moderation/incidents",async(req,reply)=>{if(!isModerator(req,reply))return;const r=await app.pg.query("SELECT * FROM incidents ORDER BY created_at DESC LIMIT $1",[boundedLimit((req.query as any).limit)]);return{data:r.rows,page:{next_cursor:null}}});
+  async function applyOwnerRestriction(client: any, ownerId: string, exp: any, kind: "temporary" | "permanent") {
+    await client.query(
+      "UPDATE owners SET restricted = true, restricted_until = $1, restriction_kind = $2 WHERE id = $3",
+      [exp, kind, ownerId]
+    );
+    await client.query(
+      "UPDATE agents SET restricted = true, restricted_until = $1, restriction_kind = $2 WHERE owner_id = $3",
+      [exp, kind, ownerId]
+    );
+    await client.query(
+      "UPDATE sessions SET ended_at = now() WHERE agent_id IN (SELECT id FROM agents WHERE owner_id = $1) AND ended_at IS NULL",
+      [ownerId]
+    );
+  }
+
   app.patch("/v1/moderation/incidents/:incidentId", async (req, reply) => {
     if (!isModerator(req, reply)) return;
     const iid = (req.params as any).incidentId, b = req.body as any, client = await app.pg.connect();
@@ -1119,11 +1147,11 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       let nextStatus = b.status ?? incident.status;
       let nextAction = b.action ?? incident.action;
       let nextResolution = b.resolution ?? incident.resolution;
-      let nextSanctionKind = incident.sanction_kind ?? "none";
-      let nextSanctionExpiresAt = incident.sanction_expires_at ?? null;
-      let nextAppealStatus = incident.appeal_status ?? "none";
-      let nextAppealResolvedAt = incident.appeal_resolved_at ?? null;
-      let nextAppealResolution = incident.appeal_resolution ?? null;
+      let nextSanctionKind = incident.sanction_kind;
+      let nextSanctionExpiresAt = incident.sanction_expires_at;
+      let nextAppealStatus = incident.appeal_status;
+      let nextAppealResolvedAt = incident.appeal_resolved_at;
+      let nextAppealResolution = incident.appeal_resolution;
 
       if (b.action === "warn") {
         nextStatus = b.status ?? "resolved";
@@ -1175,18 +1203,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         }
         const expResult = await client.query("SELECT (now() + ($1 * interval '1 second')) AS exp", [b.duration_sec]);
         const exp = expResult.rows[0].exp;
-        await client.query(
-          "UPDATE owners SET restricted = true, restricted_until = $1, restriction_kind = 'temporary' WHERE id = $2",
-          [exp, incident.owner_id]
-        );
-        await client.query(
-          "UPDATE agents SET restricted = true, restricted_until = $1, restriction_kind = 'temporary' WHERE owner_id = $2",
-          [exp, incident.owner_id]
-        );
-        await client.query(
-          "UPDATE sessions SET ended_at = now() WHERE agent_id IN (SELECT id FROM agents WHERE owner_id = $1) AND ended_at IS NULL",
-          [incident.owner_id]
-        );
+        await applyOwnerRestriction(client, incident.owner_id, exp, "temporary");
         nextStatus = b.status ?? "resolved";
         nextAction = "restrict_owner_temporary";
         nextSanctionKind = "temporary_restriction";
@@ -1196,18 +1213,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
           await client.query("ROLLBACK");
           return fail(reply, 422, "invalid_target", "Incident has no associated owner");
         }
-        await client.query(
-          "UPDATE owners SET restricted = true, restricted_until = NULL, restriction_kind = 'permanent' WHERE id = $1",
-          [incident.owner_id]
-        );
-        await client.query(
-          "UPDATE agents SET restricted = true, restricted_until = NULL, restriction_kind = 'permanent' WHERE owner_id = $1",
-          [incident.owner_id]
-        );
-        await client.query(
-          "UPDATE sessions SET ended_at = now() WHERE agent_id IN (SELECT id FROM agents WHERE owner_id = $1) AND ended_at IS NULL",
-          [incident.owner_id]
-        );
+        await applyOwnerRestriction(client, incident.owner_id, null, "permanent");
         nextStatus = b.status ?? "resolved";
         nextAction = "restrict_owner";
         nextSanctionKind = "permanent_restriction";
@@ -1260,6 +1266,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
             reporterOwnerId = ag?.owner_id ?? null;
           }
           if (reporterOwnerId) {
+            // Lock reporter owner row to eliminate the race window on concurrent dismiss_malicious actions
+            await client.query("SELECT id FROM owners WHERE id = $1 FOR UPDATE", [reporterOwnerId]);
             const priorRes = await client.query(
               `SELECT count(*)::int AS count
                FROM incidents i
@@ -1282,18 +1290,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
             } else {
               const expResult = await client.query("SELECT (now() + interval '24 hours') AS exp");
               const exp = expResult.rows[0].exp;
-              await client.query(
-                "UPDATE owners SET restricted = true, restricted_until = $1, restriction_kind = 'temporary' WHERE id = $2",
-                [exp, reporterOwnerId]
-              );
-              await client.query(
-                "UPDATE agents SET restricted = true, restricted_until = $1, restriction_kind = 'temporary' WHERE owner_id = $2",
-                [exp, reporterOwnerId]
-              );
-              await client.query(
-                "UPDATE sessions SET ended_at = now() WHERE agent_id IN (SELECT id FROM agents WHERE owner_id = $1) AND ended_at IS NULL",
-                [reporterOwnerId]
-              );
+              await applyOwnerRestriction(client, reporterOwnerId, exp, "temporary");
               await client.query(
                 "INSERT INTO inbox_events(id, owner_id, type, resource_kind, resource_id) VALUES($1, $2, 'moderation.updated', 'incident', $3)",
                 [id("evt"), reporterOwnerId, iid]
@@ -1329,7 +1326,19 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
           nextAppealResolution
         ]
       );
-      if (incident.owner_id) {
+      // Deduplicate inbox_event: if reporter is same as incident owner, dismiss_malicious already emitted event above
+      let penaltyEmittedToOwner = false;
+      if (b.action === "dismiss_malicious") {
+        const reportRow = (await client.query("SELECT * FROM reports WHERE id = $1", [incident.report_id])).rows[0];
+        let repOwnerId = reportRow?.reporter_type === "owner" ? reportRow.reporter_id : null;
+        if (reportRow?.reporter_type === "agent") {
+          repOwnerId = (await client.query("SELECT owner_id FROM agents WHERE id = $1", [reportRow.reporter_id])).rows[0]?.owner_id ?? null;
+        }
+        if (repOwnerId && repOwnerId === incident.owner_id) {
+          penaltyEmittedToOwner = true;
+        }
+      }
+      if (incident.owner_id && !penaltyEmittedToOwner) {
         await client.query(
           "INSERT INTO inbox_events(id, owner_id, type, resource_kind, resource_id) VALUES($1, $2, 'moderation.updated', 'incident', $3)",
           [id("evt"), incident.owner_id, iid]

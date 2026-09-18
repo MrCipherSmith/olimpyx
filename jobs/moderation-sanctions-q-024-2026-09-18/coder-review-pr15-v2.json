@@ -1,0 +1,161 @@
+{
+  "reviewer": "coder-style",
+  "scope_mode": "diff-recheck",
+  "pr_number": 15,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/15",
+  "pr_state": "Open, head 6916b65 on feat/moderation-sanctions-q-024 (3 commits since main)",
+  "verdict": "FAIL",
+  "prior_review_status": "PARTIAL — 8 majors, all present in the PR; this re-review confirms 5 still present and corrects 3 prior claims that were overstated or based on misreads",
+  "summary": "Same 3 commits since prior review (1d417f4, 8765a8b, 6916b65); no code touched in response to prior review. 4 of 8 prior majors are still present and materially unchanged. 3 prior claims were found to be inaccurate on re-read (multi-value Authorization is not actually exploitable; report.md has no M1-M8 table; 'every other test file uses top-level test()' was wrong because knowledge-quorum.test.ts uses describe). New findings: zero action-kind/sanction-kind constants defined; pure constants would prevent drift; plan.md/implementation drift on /escalations alias (not a redirect); CLI inconsistencies on --reason/--explanation aliases and missing enum validation on --kind/--category.",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:1104-1346 (handler); 1128-1304 (9-way if-else)",
+      "problem": "PATCH /v1/moderation/incidents/:id is still a single 246-line function with a 9-way if/else-if chain on `b.action`.",
+      "evidence": "Lines 1128-1304 enumerate `warn`, `restrict_agent_temporary`, `restrict_agent`, `restrict_owner_temporary`, `restrict_owner`, `grant_appeal`, `deny_appeal`, `dismiss`, `dismiss_malicious` as separate `if (b.action === \"X\") { ... } else if (...)` blocks. Each branch owns its own validation (duration_sec, agent_id, owner_id presence), its own `client.query` UPDATEs, and its own status/sanction field assignments. The function is 246 lines including BEGIN/COMMIT/ROLLBACK plumbing — still the most complex handler in the codebase by a wide margin.",
+      "suggested_fix": "Refactor to either (a) a `Map<string, ActionHandler>` dispatch table, (b) one named function per action (`applyWarn`, `applyRestrictAgentTemporary`, ..., `applyDismissMalicious`) called from the handler, or (c) extract to `apps/server/src/moderation.ts` so the route handler shrinks to ~30 lines. Best long-term: (c) + (a).",
+      "is_regression_from_prior_review": true
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts (migration block, line 63-79) — no index on incidents(owner_id, created_at DESC, id DESC)",
+      "problem": "GET /v1/owners/me/incidents filters by `owner_id` and orders by `created_at DESC, id DESC` but the migration does not create a supporting index.",
+      "evidence": "Line 365: `let queryStr = \"SELECT * FROM incidents WHERE owner_id = $1\";` plus `ORDER BY created_at DESC, id DESC LIMIT $N` at line 375. Only index on incidents in the migration is `idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status = 'pending'` (line 78). `grep -nE \"CREATE INDEX.*incidents\"` confirms this. plan.md §1.1 also does not list an `incidents(owner_id)` index. Without it, the owner incidents list is a sequential scan that grows unbounded with platform usage.",
+      "suggested_fix": "Add `CREATE INDEX IF NOT EXISTS idx_incidents_owner_created ON incidents(owner_id, created_at DESC, id DESC);` next to line 78. Update plan.md §1.1 to record the index.",
+      "is_regression_from_prior_review": true
+    },
+    {
+      "severity": "major",
+      "location": "jobs/moderation-sanctions-q-024-2026-09-18/state.json (phases object, lines 16-38)",
+      "problem": "state.json does not have a `review_and_fixes` phase, so the CONDITIONAL_APPROVE verdict from `phases.review.verdict` (line 24) is never formally closed out.",
+      "evidence": "Phases present: `prd`, `review`, `plan`, `implementation`, `verification`. `review.verdict = \"CONDITIONAL_APPROVE\"` (line 24) but no later phase marks it accepted/rejected/closed. The implementation phase (lines 30-33) and verification phase (lines 34-37) complete without referencing the conditional verdict.",
+      "suggested_fix": "Either (a) add `phases.review_and_fixes: { status: \"completed\", verdict: \"APPROVE\", findings_closed: [...] }`, or (b) downgrade `review.verdict` to \"APPROVE\" in state.json and document which M1-M8 findings were closed (and by which commit) in the verification artifact. (a) preserves the audit trail of CONDITIONAL_APPROVE → review_and_fixes → implementation.",
+      "is_regression_from_prior_review": true
+    },
+    {
+      "severity": "major",
+      "location": "jobs/moderation-sanctions-q-024-2026-09-18/report.md §2 (lines 81-98) and §4 (lines 116-126)",
+      "problem": "report.md's per-finding traceability is unverifiable — the 4 \"Code Review Findings & Fixes\" items describe what was fixed but do not cite commit hashes, line numbers, or commit ranges; and the prior review's cited location (lines 117-122 \"Review Feedback\" table) is incorrect — those lines are the \"Modified & Created Files\" list.",
+      "evidence": "report.md §2 contains 4 items at lines 83, 87, 91, 95. Item 1 references \"M3\" (line 83), item 2 references \"M3 / User Directive\" (line 87), item 3 references \"M6\" (line 91), item 4 references \"M7\" (line 95). M1, M2, M4, M5, M8 are not mentioned anywhere in report.md. None of the 4 items cites a commit hash or line number where the fix can be verified. Prior review cited \"report.md lines 117-122 'Review Feedback' table\" — but lines 117-122 in the current report.md are the file list. The report.md has no such table; only a 4-item prose list.",
+      "suggested_fix": "Add a per-finding table mapping each M1-M8 to (a) commit hash, (b) file:line where fixed, and (c) status (closed / deferred / wontfix). Include M1, M2, M4, M5, M8 even if they map to \"deferred — see architecture note\" so the audit is complete.",
+      "is_regression_from_prior_review": true
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1122-1126 (PATCH handler defensive defaults)",
+      "problem": "Dead defensive defaults: `incident.sanction_kind ?? \"none\"`, `incident.appeal_status ?? \"none\"`, and three `?? null` tautologies.",
+      "evidence": "Migration lines 70-77: `sanction_kind text NOT NULL DEFAULT 'none'` (line 70), `appeal_status text NOT NULL DEFAULT 'none'` (line 72), `sanction_expires_at timestamptz` (line 71, nullable), `appeal_resolved_at timestamptz` (line 76, nullable), `appeal_resolution text` (line 77, nullable). So the `?? \"none\"` fallbacks for sanction_kind/appeal_status never trigger (DB-level guarantee) and the `?? null` fallbacks for nullable columns are tautological. Confirmed with `grep -nE \"ADD COLUMN.*incidents\"`.",
+      "suggested_fix": "Replace the six lines with the existing column defaults: `let nextSanctionKind = incident.sanction_kind; let nextSanctionExpiresAt = incident.sanction_expires_at; ...`. The defaults are enforced by the migration; JS re-defaulting adds noise.",
+      "is_regression_from_prior_review": true
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1128-1304 (PATCH handler) and report.md §1.6 (action list)",
+      "problem": "Action kinds (`warn`, `restrict_agent_temporary`, ..., `dismiss_malicious`) and sanction kinds (`warning`, `temporary_restriction`, `permanent_restriction`) are string literals scattered through 9 branches; no shared constants.",
+      "evidence": "Line 1128: `if (b.action === \"warn\")`; line 1133: `else if (b.action === \"restrict_agent_temporary\")`; ... line 1248: `else if (b.action === \"dismiss_malicious\")`. Sanction kinds at lines 1131 (`\"warning\"`), 1151 (`\"temporary_restriction\"`), 1165 (`\"permanent_restriction\"`), etc. `grep -nE \"const\\s+[A-Z_]{3,}\" apps/server/src/app.ts` returns zero action/sanction constants. Same magic strings appear in report.md, SKILL.md, prd.md, plan.md, and tests — risk of drift if any one changes.",
+      "suggested_fix": "Define `const ACTIONS = { WARN: \"warn\", RESTRICT_AGENT_TEMPORARY: \"restrict_agent_temporary\", ... }` and `const SANCTIONS = { WARNING: \"warning\", TEMPORARY: \"temporary_restriction\", PERMANENT: \"permanent_restriction\" }` at module level (or in `apps/server/src/moderation.ts` once extracted). Use them in app.ts, the validation schema (validation.ts), report.md, and tests.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:382-390 (GET /v1/owners/me/escalations) vs plan.md §1.6",
+      "problem": "Plan calls `/v1/owners/me/escalations` a 'backwards-compatible alias' that 'forwards to the same logic', but the implementation is a duplicated handler with its own query, not an alias or redirect.",
+      "evidence": "plan.md lines 105-109: 'Backwards-compatible alias: `/v1/owners/me/escalations` forwards to the same logic.' app.ts has both `/incidents` (line 359, with `status` filter and `before_cursor`) and `/escalations` (line 382, no filter, no cursor). The two handlers are independent — drift is now possible if one is updated and not the other.",
+      "suggested_fix": "Either (a) register `/v1/owners/me/escalations` as a redirect/forward to `/v1/owners/me/incidents`, or (b) extract a shared handler `listOwnerIncidents(req, reply, { status, before_cursor, limit })` that both routes call. (b) is the safer choice and matches the plan's intent.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1047-1100 (POST /v1/reports) vs review.md §3.4.5 m5",
+      "problem": "Self-report guard is intentionally absent (per mvp.test.ts:206 which expects 201 on owner-reporting-own-agent) but this deliberate scope decision is not documented in plan.md, prd.md, or report.md.",
+      "evidence": "Lines 1047-1100: no `subject.owner_id !== p.ownerId` check. mvp.test.ts:206 reports `target: { kind: \"profile\", id: agentId }` where agentId is owned by the same owner as the caller and asserts `statusCode === 201`. review.md m5 (line 465) explicitly recommends the guard. plan.md §1.5 (lines 99-103) mentions only deduplication, quota, and reporter-restriction checks — self-report is silent. report.md §1 (lines 56-66) removed the line about self-report guard between commits 1d417f4 and 8765a8b (visible in the commit diff: `- Self-report guard: returns 422 Unprocessable Entity if an owner attempts to report themselves or their own agents.`) but no justification was added.",
+      "suggested_fix": "Add a one-paragraph ADR in prd.md §5 / plan.md §1.5 explaining: 'Self-reporting is allowed by design in MVP. Owners must be able to escalate their own agents when, e.g., they detect the agent has been compromised. The 422 guard from review.md m5 is deferred to a later horizon.' This closes the open m5 finding.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/cli.js:442-493 (incidents, appeal, report commands)",
+      "problem": "Three small CLI inconsistencies that hurt discoverability.",
+      "evidence": "(1) `incidents` silently swallows the `list` subcommand at line 443 (`if (args[0] === 'list') args.shift();`) — undocumented and inconsistent with `knowledge` (which has explicit `card | review | publish | ...` subcommands at lines 117-160). (2) `report --reason` and `--explanation` are aliases at line 474 (`option('reason') || option('explanation')`) — pick one. The server field is `explanation` (validation.ts line 56) and the SDK passes `explanation: reason` (cli.js line 491). (3) `report --kind` is required but not validated against `{profile, message, knowledge_version}` on the client — the CLI help text at line 469 lists the values but does not reject invalid input before the network call.",
+      "suggested_fix": "(1) Drop the `list` swallow and either drop or document the `list` subcommand. (2) Pick `--reason` as the canonical flag (matches CLI surface used in `message --body`) and document the server field as `explanation`. (3) Add an `if (!['profile', 'message', 'knowledge_version'].includes(kind)) throw new Error(...)` and similarly for category.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts (overall — file is now 1350 lines, +470 in this PR)",
+      "problem": "The PR adds 470 lines to app.ts (now 1350 total). The new code is well-contained but mixes schema migration, SQL helpers, route handlers, and dispatch logic in a single 1350-line file.",
+      "evidence": "`wc -l apps/server/src/app.ts` returns 1350 lines. The diff (`git diff --stat origin/main..origin/feat/moderation-sanctions-q-024`) shows +470 / -21 in app.ts only. The new code spans lines 41-79 (migration), 93-110 (helpers), 220-248 (principal/isModerator), 359-435 (owner incidents/appeal endpoints), 1047-1100 (POST /v1/reports), 1103-1346 (moderation PATCH + GET). Existing `apps/server/src/auth-guard.ts`, `apps/server/src/embeddings.ts`, `apps/server/src/validation.ts` show that extracting modules is an established pattern in this repo.",
+      "suggested_fix": "Extract to `apps/server/src/moderation.ts`: migration additions, `isRestricted`, `isRestrictedOwnerExemptPath`, `evaluateMaliciousReportPenalty`, the four `fail(reply, N, code, msg)` helpers (or keep them in app.ts and re-export). Leave route registration in app.ts. This makes the PATCH handler refactor (finding #1) substantially easier.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1248-1303 (dismiss_malicious branch)",
+      "problem": "The dismiss_malicious cascade is 56 lines inline (lines 1248-1303), making the if-else chain (finding #1) harder to read.",
+      "evidence": "Lines 1248-1303 contain: setting next fields, looking up the report row, resolving reporterOwnerId via two branches (owner vs agent), counting prior dismissed_malicious incidents via a 3-way JOIN, then either inserting one inbox_event (warning) or running the full restrict cascade + inbox_event (temporary 24h). Mixed with the outer dispatch and the transaction.",
+      "suggested_fix": "Extract to `async function applyDismissMaliciousPenalty(client, incident, iid): Promise<{ status, action, resolution }>` returning the next fields. Call from the dispatch.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "nit",
+      "location": "jobs/moderation-sanctions-q-024-2026-09-18/review.md:166, 175, 195 (MODERATOR_SECRET references) vs app.ts:249 (MODERATOR_TOKEN)",
+      "problem": "review.md uses `MODERATOR_SECRET` in three places while prd.md, plan.md, report.md, and app.ts use `MODERATOR_TOKEN`. Implementation is consistent with prd/plan/report but review.md's recommendation is stale.",
+      "evidence": "review.md line 166: 'Adding ad-hoc check like `if (req.headers['x-moderator-secret'] === process.env.MODERATOR_SECRET)`'; line 175: `const moderatorSecret = process.env.MODERATOR_SECRET;`; line 195: 'Keep `MODERATOR_SECRET` env-only'. app.ts:249 uses `process.env.MODERATOR_TOKEN`. prd.md line 90, plan.md line 55, report.md line 50 all use MODERATOR_TOKEN.",
+      "suggested_fix": "In review.md, replace the three MODERATOR_SECRET references with MODERATOR_TOKEN so the review document does not contradict the implementation it approved.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:249 (isModerator)",
+      "problem": "Multi-value Authorization header attack claim from prior review is overstated — current implementation is robust.",
+      "evidence": "`req.headers.authorization?.replace(/^Bearer\\s+/i, \"\")` produces a string. `hashToken` always returns 32-byte SHA-256. `crypto.timingSafeEqual` compares 32-byte buffers of equal length. Even if Fastify exposed `authorization` as an array (it does not for the standard single-value Authorization header), the `.replace(...)` optional chain would throw TypeError before timingSafeEqual runs. A `Bearer X, Bearer Y` joined value hashes to a single string that does not equal hash(\"X\") or hash(\"Y\"). No bypass path.",
+      "suggested_fix": "No change required. The prior review's F-4 should be downgraded to non-finding.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/test/moderation-sanctions.test.ts (test structure)",
+      "problem": "Prior review's claim that 'every other test file uses top-level test() exclusively' was inaccurate; the new file is consistent with the analogous knowledge-quorum.test.ts.",
+      "evidence": "`grep -lE \"^describe\\(\" apps/server/test/*.ts` returns knowledge-quorum.test.ts and moderation-sanctions.test.ts. knowledge-quorum.test.ts has 9 tests in 2 describe blocks; moderation-sanctions.test.ts has 12 tests in 2 describe blocks. Both have a 'Unit Tests' describe and an 'Integration Tests (API End-to-End)' describe with `AC-N:` test names.",
+      "suggested_fix": "No change required. The prior review's F-5 should be downgraded to non-finding. If desired, add a one-line comment in moderation-sanctions.test.ts header pointing at knowledge-quorum.test.ts as the structural template.",
+      "is_regression_from_prior_review": false
+    },
+    {
+      "severity": "nit",
+      "location": "skills/olimpyx-participant/SKILL.md (new §3 'Reporting Incidents, Sanctions & Appeals')",
+      "problem": "New SKILL.md section covers incidents/appeal/report CLI commands and explicitly states self-report is allowed. D-042 anti-spam rule is documented in spirit ('Avoid retaliatory or coordinated reporting') but not cross-referenced by ID, so traceability is weak.",
+      "evidence": "SKILL.md lines 58-73 cover the new commands and the self-report behavior ('owners may file reports for safety incidents — including against agents they own'). D-042 is the canonical anti-spam decision-anchor (per jobs/moderation-sanctions-q-024-2026-09-18/review.md cross-references) but is not cited. SKILL.md does cite D-041, D-043, Q-024 anchors at line 65 — same convention.",
+      "suggested_fix": "Add `<!-- D-042: anti-spam reporting rule -->` inline anchor next to the retaliatory-reporting sentence, mirroring the existing D-041/D-043/Q-024 anchors at line 65.",
+      "is_regression_from_prior_review": false
+    }
+  ],
+  "checks_performed": [
+    "A.1 PATCH endpoint structure: read apps/server/src/app.ts:1104-1346 in full; confirmed 246-line function containing a 9-way if/else-if chain (lines 1128-1304). No switch, no dispatch, no per-action helper functions.",
+    "A.2 Missing index on incidents(owner_id): grep CREATE INDEX in app.ts (only idx_incidents_appeal_pending at line 78); grep owner_id usages (line 365 has WHERE owner_id = $1 ORDER BY created_at DESC).",
+    "A.3 Dead defensive defaults: read lines 1122-1126 in full; cross-checked against migration lines 70-77 (sanction_kind NOT NULL DEFAULT 'none', appeal_status NOT NULL DEFAULT 'none', three nullable columns).",
+    "A.4 Multi-value Authorization: analyzed isModerator at line 249; verified hashToken returns 32-byte hex, timingSafeEqual is well-defined, no array-bypass possible.",
+    "A.5 state.json phases: read state.json in full; confirmed phases = prd, review, plan, implementation, verification; no review_and_fixes.",
+    "A.6 report.md traceability: grep for M1-M8 in report.md and review.md; report.md §2 has 4 items referencing M3, M3, M6, M7 only; §4 (lines 117-122) is the 'Modified & Created Files' list, not a Review Feedback table; the prior review cited a table that does not exist.",
+    "B.1 Refactor opportunity: counted 1350 lines total in app.ts (470 added), confirmed 4 separate logical clusters (migration, helpers, endpoints, PATCH handler).",
+    "B.2 Magic strings: grep for top-level const enums; zero matches. Action kinds at 9 sites in PATCH handler, sanction kinds at 3 sites.",
+    "B.3 Error codes: extracted all fail(reply, status, code, msg) call sites; new codes are invalid_duration, invalid_state, invalid_target, appeal_conflict — consistent with existing naming.",
+    "B.4 Cascade SQL: PATCH handler wraps all branches in single BEGIN/COMMIT/ROLLBACK via app.pg.connect(); dismiss_malicious uses the same client, so 24h reporter-penalty cascade is atomic.",
+    "B.5 Test structure: compared moderation-sanctions.test.ts (12 tests, 2 describe blocks) against knowledge-quorum.test.ts (9 tests, 2 describe blocks); style is consistent. Compared against threads.test.ts, mvp.test.ts, auth-guard.test.ts, validation.test.ts, embeddings.test.ts (all flat test()). The describe-vs-flat split correlates with whether the file mixes unit + integration suites.",
+    "B.6 SKILL.md: read the new §3 section; covers incidents/appeal/report CLI, self-report behavior, anti-spam in spirit but not by D-042 ID.",
+    "B.7 CLI commands: read cli.js:442-493; identified inconsistencies on `incidents list` swallow, --reason/--explanation alias, missing --kind/--category enum validation.",
+    "B.8 plan.md vs implementation; §1.6 says /escalations 'forwards to the same logic' but implementation has two separate handlers (§1.6 drift). §1.5 silent on self-report (matches implementation).",
+    "C.1 Test counts: report.md line 123 says '6 SDK & CLI tests with credential redaction'; verified by grep test(/it( in packages/client/test/moderation.test.js — 6 matches. report.md line 109 says 'Moderation Sanctions Tests Passed' but does not claim a count; 12 tests verified in apps/server/test/moderation-sanctions.test.ts.",
+    "C.2 PRD drift: report.md 'Created' references prd.md at 160 lines (up from 118 in the prior review's review).",
+    "C.3 prd.md structure: verified Acceptance Criteria section at line 142, Schema migration (M1/M4) covered, all 9 moderator actions listed at line 124-126, self-report behavior silent — covered by minor finding.",
+    "D PR description: PR title is the conventional commit; no body claims 'All M1-M8 addressed' explicitly.",
+    "E Style: counted new occurrences of --reason/--explanation, plan-vs-impl drift on /escalations, lack of action-kind constants, dismiss_malicious inline cascade."
+  ],
+  "assumptions": [
+    "The PR body text (PR description) is the title only; the in-PR documentation suite (prd.md/plan.md/report.md/review.md/state.json) is what reviewers rely on for claims.",
+    "state.json's lack of review_and_fixes phase is a process gap, not a code blocker — implementation can ship without it, but the CONDITIONAL_APPROVE audit trail is incomplete.",
+    "The 9-way if/else chain in PATCH handler is the dominant maintainability risk in this PR and supersedes the smaller findings in priority.",
+    "Test structure (describe vs flat) correlates with whether a file mixes unit + integration suites — knowledge-quorum.test.ts and moderation-sanctions.test.ts both use describe for that reason; the flat-style files (auth-guard, validation, embeddings, threads, mvp) are single-suite.",
+    "I did not run the project test suite, typecheck, or build; this is a static analysis against requirements and convention.",
+    "The 'GitHub API Not Found' response confirms I could not pull the PR body, so I treated report.md and the commit messages as authoritative for any claim verification."
+  ]
+}

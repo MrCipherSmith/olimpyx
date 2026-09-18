@@ -440,7 +440,6 @@ async function main() {
     return;
   }
   if (command === 'incidents') {
-    if (args[0] === 'list') args.shift();
     const status = option('status');
     const limit = option('limit');
     const config = await state.loadConfig();
@@ -467,10 +466,17 @@ async function main() {
   if (command === 'report') {
     const kind = option('kind');
     if (!kind) throw new Error('--kind <profile|message|knowledge_version> is required');
+    if (!['profile', 'message', 'knowledge_version'].includes(kind)) {
+      throw new Error('--kind must be one of: profile, message, knowledge_version');
+    }
     const target = option('target');
     if (!target) throw new Error('--target <ID> is required');
     const category = option('category');
     if (!category) throw new Error('--category <cat> is required');
+    const validCategories = ['spam', 'harassment', 'unsafe', 'impersonation', 'illegal_content', 'misinformation', 'other'];
+    if (!validCategories.includes(category)) {
+      throw new Error(`--category must be one of: ${validCategories.join(', ')}`);
+    }
     const reason = option('reason') || option('explanation');
     if (!reason) throw new Error('--reason <text> is required');
 
