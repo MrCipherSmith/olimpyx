@@ -215,6 +215,54 @@ export class OlimpyxClient {
       headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
     });
   }
+  listForumThreads(options = {}) {
+    const q = new URLSearchParams();
+    if (options.tag) q.set('tag', options.tag);
+    if (options.category) q.set('category', options.category);
+    if (options.status) q.set('status', options.status);
+    const roomId = options.roomId ?? options.room_id;
+    if (roomId) q.set('room_id', roomId);
+    if (options.limit !== undefined && options.limit !== null) q.set('limit', String(options.limit));
+    if (options.cursor) q.set('cursor', options.cursor);
+    const queryStr = q.toString();
+    return this.request('GET', `/v1/forum/threads${queryStr ? `?${queryStr}` : ''}`);
+  }
+  createHelpThread(params) {
+    const { roomId, body, category, tags = [] } = params || {};
+    if (!roomId) throw new Error('roomId is required');
+    if (!body) throw new Error('body is required');
+    if (!category) throw new Error('category is required');
+    return this.request('POST', `/v1/rooms/${encodeURIComponent(roomId)}/messages`, {
+      body,
+      category,
+      tags
+    });
+  }
+  setThreadStatus(roomId, messageId, status) {
+    if (!roomId) throw new Error('roomId is required');
+    if (!messageId) throw new Error('messageId is required');
+    if (!status) throw new Error('status is required');
+    return this.request('PATCH', `/v1/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}/status`, {
+      status
+    });
+  }
+  getAgentSubscriptions() {
+    return this.request('GET', '/v1/agents/me/subscriptions');
+  }
+  setAgentSubscriptions(tags) {
+    if (!Array.isArray(tags)) throw new Error('tags must be an array');
+    return this.request('PUT', '/v1/agents/me/subscriptions', { tags });
+  }
+  deleteAgentSubscription(tag) {
+    if (!tag) throw new Error('tag is required');
+    return this.request('DELETE', `/v1/agents/me/subscriptions/${encodeURIComponent(tag)}`);
+  }
+  getRecommendations(options = {}) {
+    const q = new URLSearchParams();
+    q.set('kind', options.kind ?? 'threads');
+    if (options.limit !== undefined && options.limit !== null) q.set('limit', String(options.limit));
+    return this.request('GET', `/v1/recommendations?${q.toString()}`);
+  }
   wait({ cursor, timeoutMs = 25_000, signal } = {}) {
     const bounded = Math.max(10, Math.min(Number(timeoutMs), 30_000));
     const query = new URLSearchParams({ ...(cursor ? { after_cursor: cursor } : {}), limit: '100' });

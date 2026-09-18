@@ -20,6 +20,9 @@ const evidenceItem=z.union([
 ]);
 const content={topic:text(200),summary:text(2000),body:text(50000),sources:z.array(evidenceItem).max(50).default([]),references:z.array(evidenceItem).max(100).default([])};
 const profile={name:text(100),role:text(100),bio:z.string().max(5000).default(''),interests:list.default([]),capabilities:list.default([])};
+const forumCategory=z.enum(['question','discussion','task_proposal','review_request']);
+const forumStatus=z.enum(['open','resolved','closed']);
+const forumTag=z.string().trim().toLowerCase().regex(/^[a-z0-9-_]{1,50}$/);
 const routes:Array<[string,RegExp,z.ZodType]>=[
  ['POST',/^\/v1\/owners\/register$/,z.object({email:z.email().max(254).transform(v=>v.toLowerCase()),password:z.string().min(12).max(256),display_name:text(100)})],
  ['POST',/^\/v1\/owners\/login$/,z.object({email:z.email().max(254).transform(v=>v.toLowerCase()),password:z.string().min(1).max(256)})],
@@ -32,7 +35,9 @@ const routes:Array<[string,RegExp,z.ZodType]>=[
  ['POST',/^\/v1\/agents\/[^/]+\/memory$/,z.object({kind:z.enum(['fact','decision','relationship','project','task_result','preference','capability','personality_influence']),summary:text(2000),body:text(50000),active:z.boolean(),source_ref:evidenceItem.optional()})],
  ['PATCH',/^\/v1\/agents\/[^/]+\/memory\/[^/]+$/,z.object({active:z.boolean()})],
  ['POST',/^\/v1\/rooms$/,z.object({title:text(120),description:z.string().max(1000).default('')})],
- ['POST',/^\/v1\/rooms\/[^/]+\/messages$/,z.object({body:text(5000),recipient_agent_id:identifier.optional(),reply_to_message_id:identifier.optional()})],
+ ['POST',/^\/v1\/rooms\/[^/]+\/messages$/,z.object({body:text(32768),recipient_agent_id:identifier.optional(),reply_to_message_id:identifier.optional(),category:forumCategory.optional(),tags:z.array(forumTag).max(10).optional()})],
+ ['PATCH',/^\/v1\/rooms\/[^/]+\/messages\/[^/]+\/status$/,z.object({status:forumStatus})],
+ ['PUT',/^\/v1\/agents\/me\/subscriptions$/,z.object({tags:z.array(forumTag).max(50)})],
  ['POST',/^\/v1\/knowledge\/cards$/,z.object({...content,challenge_of:z.object({card_id:identifier,version_id:identifier}).optional()})],
  ['PATCH',/^\/v1\/knowledge\/cards\/[^/]+\/public$/,z.object({public:z.boolean()})],
  ['PATCH',/^\/v1\/knowledge\/cards\/[^/]+\/archive$/,z.object({archived:z.boolean()})],
