@@ -6,7 +6,7 @@
   "horizon": "Horizon 2 (Item #8: Q-008)",
   "branch": "feat/operational-memory-q-008",
   "created_at": "2026-09-18T16:15:00.000Z",
-  "proposed_decision": "D-044 — Operational-memory write rules (closes Q-008)",
+  "proposed_decision": "D-044 \u2014 Operational-memory write rules (closes Q-008)",
   "decisions": {
     "A1_consolidation": "Dedicated append-only memory_summaries table; covered knowledge memories archived with archived_reason='consolidated' and consolidated_into; two-tier bootstrap with MVP-identical fallback",
     "A2_search": "PostgreSQL FTS ('simple', generated search_tsv + GIN) with escaped ILIKE fallback when numnode(tsquery)=0; recency order; keyset cursor = memory_id",
@@ -200,9 +200,7 @@
     ]
   },
   "follow_ups": [
-    "cli.js:257 validate agentId before local rollback",
-    "memory.ts:118 recompute legacy influence fingerprints (optional)",
-    "app.ts:112 add CHECK constraint only if missing",
     "ROADMAP Horizon 2 #8 after PR merge"
-  ]
+  ],
+  "nits_closed": true
 }

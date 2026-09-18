@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Pool } from "pg";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { after, before, test, type TestContext } from "node:test";
 import { createApp, migrate } from "../src/app.js";
 import { SECRET_RULES } from "../src/secret-scan.js";
@@ -474,6 +474,20 @@ test("influence fingerprint includes persona_revision", async (t) => {
   assert.equal(next.json().data.persona_revision, r2);
 });
 
+test("migration recomputes recent influence fingerprints written before persona_revision scoping", async (t) => {
+  if (!ready(t)) return;
+  const a = await newAgent(ownerToken, "inf-legacy-fingerprint");
+  const r1 = rev(1789000000000);
+  const first = await save(a.session, a.agentId, { kind: "personality_influence", summary: "Prefer terse replies", persona_revision: r1 });
+  assert.equal(first.statusCode, 201, first.body);
+  const legacy = createHash("sha256").update("personality_influence:prefer terse replies").digest("hex");
+  await app!.pg.query("UPDATE memories SET fingerprint=$1 WHERE id=$2", [legacy, first.json().data.memory_id]);
+  await migrate(databaseUrl);
+  const again = await save(a.session, a.agentId, { kind: "personality_influence", summary: "Prefer terse replies", persona_revision: r1 });
+  assert.equal(again.statusCode, 200, again.body);
+  assert.equal(again.json().data.memory_id, first.json().data.memory_id);
+});
+
 test("a write that waited behind a consolidation is timestamped after it and stays visible", async (t) => {
   if (!ready(t)) return;
   const a = await newAgent(ownerToken, "lock-order");
@@ -570,8 +584,12 @@ test("active and archived_reason are kept consistent by a CHECK constraint", asy
 
 test("migration is idempotent", async (t) => {
   if (!ready(t)) return;
+  const constraintOid = async () => (await app!.pg.query("SELECT oid FROM pg_constraint WHERE conname='chk_memories_archived_reason' AND conrelid='memories'::regclass")).rows[0]?.oid;
+  const before = await constraintOid();
   await migrate(databaseUrl);
   await migrate(databaseUrl);
+  assert.ok(before);
+  assert.equal(await constraintOid(), before, "the CHECK constraint is not dropped and re-validated on every boot");
   const a = await newAgent(ownerToken, "legacy");
   assert.equal((await save(a.session, a.agentId, { kind: "fact", summary: "after re-migrate", body: "b" })).statusCode, 201);
 });

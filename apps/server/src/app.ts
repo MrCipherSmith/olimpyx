@@ -7,7 +7,7 @@ import { createEmbeddingAdapter, ensureEmbeddingSchema, type EmbeddingStatus } f
 import { AuthRateLimiter, type RateLimitResult } from "./auth-guard.js";
 import { recommendThreads } from "./recommendations.js";
 import type { Principal } from "./types.js";
-import { MemoryError, buildMemoryBootstrap, consolidate, getMemory, listMemories, listMemoryEvents, lockAgentMemory, rollbackInfluences, setActive, writeMemory } from "./memory.js";
+import { MemoryError, buildMemoryBootstrap, computeMemoryFingerprint, consolidate, getMemory, listMemories, listMemoryEvents, lockAgentMemory, rollbackInfluences, setActive, writeMemory } from "./memory.js";
 
 const scrypt = promisify(crypto.scrypt);
 const now = () => new Date().toISOString();
@@ -109,8 +109,11 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS search_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(summary,'') || ' ' || coalesce(body,''))) STORED;
     UPDATE memories SET archived_reason='manual' WHERE active=false AND archived_reason IS NULL;
     UPDATE memories SET archived_reason=NULL WHERE active AND archived_reason IS NOT NULL;
-    ALTER TABLE memories DROP CONSTRAINT IF EXISTS chk_memories_archived_reason;
-    ALTER TABLE memories ADD CONSTRAINT chk_memories_archived_reason CHECK (active = (archived_reason IS NULL));
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chk_memories_archived_reason' AND conrelid='memories'::regclass) THEN
+        ALTER TABLE memories ADD CONSTRAINT chk_memories_archived_reason CHECK (active = (archived_reason IS NULL));
+      END IF;
+    END $$;
     CREATE TABLE IF NOT EXISTS memory_summaries (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, revision integer NOT NULL, summary text NOT NULL, covered_until timestamptz NOT NULL, archived_memory_count integer NOT NULL, created_by_type text NOT NULL, created_by_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(agent_id, revision));
     CREATE TABLE IF NOT EXISTS memory_events (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, type text NOT NULL, actor_type text NOT NULL, actor_id text NOT NULL, memory_ids jsonb NOT NULL DEFAULT '[]'::jsonb, summary_id text, reason text, created_at timestamptz NOT NULL DEFAULT now());
     CREATE INDEX IF NOT EXISTS idx_memories_agent_active_kind ON memories(agent_id, active, kind, created_at DESC, id DESC);
@@ -141,6 +144,11 @@ export async function migrate(databaseUrl: string) {
     } catch {
       await pool.query(idx.replace("CONCURRENTLY ", ""));
     }
+  }
+  // Influences deduplicated within the last 24h must carry the per-revision fingerprint introduced with Q-008.
+  for (const row of (await pool.query("SELECT id,kind,summary,persona_revision,fingerprint FROM memories WHERE kind='personality_influence' AND active AND created_at>now()-interval '24 hours'")).rows) {
+    const fingerprint = computeMemoryFingerprint(row.kind, row.summary, row.persona_revision);
+    if (fingerprint !== row.fingerprint) await pool.query("UPDATE memories SET fingerprint=$1 WHERE id=$2", [fingerprint, row.id]);
   }
   await ensureEmbeddingSchema(pool);
   await pool.end();

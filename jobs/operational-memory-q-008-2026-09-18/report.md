@@ -51,16 +51,16 @@
   - All were fixed.
 - **Round 2:** all resolved. Also fixed as a side effect: `idem()` previously returned a pooled connection with an open transaction when the reply had already been sent.
 
-## Unresolved (nits, follow-up)
-- [ ] `packages/client/src/cli.js:257`: `persona rollback` checks for the missing `agentId` only after the local rollback. Validate before mutating local state.
-- [ ] `apps/server/src/memory.ts:118`: influence fingerprints written before deploy lack `persona_revision`. Worst case is one duplicate within 24 h. Optionally recompute them in the migration.
-- [ ] `apps/server/src/app.ts:112-113`: the CHECK constraint is dropped and re-added on every boot, which is a full-table validation. Add it only when it is missing (`pg_constraint`).
-- [ ] Info: the scanner can refuse base64url 43-char digests and "basic <token-like word>" prose. This is documented in the skill.
+## Round 2 nits (closed)
+- [x] `persona rollback` resolves the `agentId` before changing local state. `--local-only` opts out of server sync.
+- [x] The migration recomputes the fingerprints of active influences from the last 24 h, so they use the per-revision fingerprint.
+- [x] The CHECK constraint is added only when missing (`pg_constraint`), not dropped and re-validated on every boot.
+- Info (documented in the skill): the scanner can refuse base64url 43-char digests and "basic <token-like word>" prose.
 
 ## Final Checks
 - Lint: no lint tooling configured.
 - Type check: PASS (server, web).
-- Tests: server 68/68, client 91/91, web 18/18; 0 skipped (live Postgres).
+- Tests: server 69/69, client 91/91, web 18/18; 0 skipped (live Postgres).
 
 ## Changes
 - 6 commits, 18 files, +1980 / −22 (see `git log main..HEAD`).

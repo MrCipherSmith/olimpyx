@@ -435,6 +435,13 @@ test('CLI persona rollback errors clearly instead of saving a pending entry with
   assert.match(rollback.stderr, /agentId/i);
 
   assert.deepEqual(await state.pendingMemoryRollbacks(), []);
+  assert.equal((await state.listPersonaRevisions()).length, 2, 'local persona must not change when the rollback is refused');
+
+  const localOnly = await run(['persona', 'rollback', first.revision, '--local-only'], { cwd: root, preload: preloadPath });
+  assert.equal(localOnly.status, 0, localOnly.stderr);
+  assert.equal(JSON.parse(localOnly.stdout).synced, false);
+  assert.equal((await state.listPersonaRevisions()).length, 3);
+  assert.deepEqual(await state.pendingMemoryRollbacks(), []);
 });
 
 test('CLI memory rollback --sync replays pending entries with the same idempotency key and clears them', async () => {

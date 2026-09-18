@@ -428,17 +428,19 @@ async function main() {
     else if (action === 'save') output(await state.savePersona(await jsonInput(args.shift()), option('reason', 'owner edit')));
     else if (action === 'rollback') {
       const revision = args.shift();
+      // Resolve the agent before touching local state, so a rollback is never left unsynced for lack of an agentId.
+      const config = await state.loadConfig();
+      const agentId = process.env.OLIMPYX_AGENT_ID || config.agentId;
+      if (!agentId && !option('local-only')) {
+        throw new Error('Persona rollback refused: no agentId available to sync server memory. Set OLIMPYX_AGENT_ID or enroll first, or pass --local-only to roll back only the local persona.');
+      }
       const local = await state.rollbackPersona(revision);
+      if (!agentId) { output({ local, synced: false, reason: 'local-only' }); return; }
       // Keyed on the NEW local revision created by this rollback (not the target), so
       // repeated rollbacks to the same target don't collide on a server-side idempotency
       // key the server remembers forever (which would otherwise wedge the pending entry
       // behind a permanent 409 idempotency_conflict).
       const idempotencyKey = `persona-rollback:${local.revision}`;
-      const config = await state.loadConfig();
-      const agentId = process.env.OLIMPYX_AGENT_ID || config.agentId;
-      if (!agentId) {
-        throw new Error('Local persona rollback succeeded, but memory sync could not be queued: no agentId available. Set OLIMPYX_AGENT_ID or configure one via enroll, then retry with `olimpyx memory rollback --sync`.');
-      }
       const payload = {
         to_persona_revision: revision,
         reverted_persona_revisions: local.reverted_persona_revisions,
