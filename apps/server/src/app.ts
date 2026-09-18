@@ -257,7 +257,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     app.log.warn("MODERATOR_TOKEN is not configured; moderator endpoints will reject all calls");
   }
 
-  const fail = (reply: any, status: number, code: string, message: string) => reply.code(status).send({ error: { code, message, request_id: reply.request.id, details: [] } });
+  const fail = (reply: any, status: number, code: string, message: string, extra?: Record<string, any>) => reply.code(status).send({ error: { code, message, request_id: reply.request.id, details: [], ...extra } });
   const enforceAuthLimit=(reply:any,result:RateLimitResult)=>{if(result.allowed)return false;reply.header("Retry-After",String(result.retryAfterSeconds));fail(reply,429,"rate_limited","Too many authentication attempts; retry later");return true};
   async function principal(req: FastifyRequest, reply: any, allowed: Array<Principal["tokenType"]> = ["owner", "session"]): Promise<Principal | null> {
     const raw = req.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -667,13 +667,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
           if (count >= 10) {
             await client.query("ROLLBACK");
             reply.header("Retry-After", "360");
-            return reply.code(429).send({
-              error: {
-                code: "quota_exceeded",
-                message: "Help-seeking thread quota exceeded: maximum 10 threads per hour. Please wait before asking more questions.",
-                retry_after_sec: 360
-              }
-            });
+            return fail(reply, 429, "quota_exceeded", "Help-seeking thread quota exceeded: maximum 10 threads per hour. Please wait before asking more questions.", { retry_after_sec: 360 });
           }
         }
 
@@ -783,6 +777,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
        JOIN rooms r ON r.id = m.room_id
        LEFT JOIN agents ca ON r.creator_type = 'agent' AND ca.id = r.creator_id
        LEFT JOIN owners co ON (r.creator_type = 'owner' AND co.id = r.creator_id) OR co.id = ca.owner_id
+       LEFT JOIN agents ma ON m.sender_type = 'agent' AND ma.id = m.sender_id
+       LEFT JOIN owners mo ON (m.sender_type = 'owner' AND mo.id = m.sender_id) OR mo.id = ma.owner_id
        LEFT JOIN LATERAL (
          SELECT COUNT(*)::int AS reply_count, MAX(created_at) AS last_reply_at
          FROM messages sub WHERE sub.root_message_id = m.id
@@ -795,6 +791,12 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
            OR
            (r.creator_type = 'agent' AND (ca.restricted = false OR (ca.restricted_until IS NOT NULL AND ca.restricted_until <= now()))
                                      AND (co.restricted = false OR (co.restricted_until IS NOT NULL AND co.restricted_until <= now())))
+         )
+         AND (
+           (m.sender_type = 'owner' AND (mo.restricted = false OR (mo.restricted_until IS NOT NULL AND mo.restricted_until <= now())))
+           OR
+           (m.sender_type = 'agent' AND (ma.restricted = false OR (ma.restricted_until IS NOT NULL AND ma.restricted_until <= now()))
+                                    AND (mo.restricted = false OR (mo.restricted_until IS NOT NULL AND mo.restricted_until <= now())))
          )
          AND ($1::text IS NULL OR m.tags @> jsonb_build_array($1::text))
          AND ($2::text IS NULL OR m.category = $2)

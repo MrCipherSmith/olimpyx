@@ -1,0 +1,181 @@
+{
+  "reviewer": "coder-style",
+  "scope_mode": "diff",
+  "pr_number": 16,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/16",
+  "head_sha": "9987697",
+  "verdict": "PARTIAL",
+  "summary": "Functional M1-M4 are addressed and the SQL/index design is sound. The new code is readable and largely matches the multi-line handler style used elsewhere in app.ts. However, there are clear style regressions: (a) the `Principal` type is duplicated between app.ts and recommendations.ts; (b) the test file is a single 634-line mega-test, inconsistent with the per-AC test pattern in moderation-sanctions.test.ts; (c) the Zod validators for category/tags/status use `z.any().optional().passthrough()` which defeats the type-safety of the existing validation layer; (d) the 429 quota response is constructed inline instead of using the `fail()` helper, producing a different `error` shape than other endpoints. Several magic strings (status/category enums, FSM transitions) are duplicated across handler, validation, and SQL CHECK constraints. None of these block merge but they should be cleaned up before the next forum-adjacent PR to avoid the codebase drifting further from the established conventions.",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "apps/server/src/recommendations.ts:3-10 vs apps/server/src/app.ts:240",
+      "problem": "`Principal` type is duplicated in `recommendations.ts` instead of imported from `app.ts`, creating two sources of truth for an interface used everywhere in the auth chain.",
+      "evidence": "`recommendations.ts` defines `export type Principal = { type: \"owner\" | \"agent\"; id: string; ownerId: string; name: string; tokenType: \"owner\" | \"session\" | \"agent\"; sessionId?: string };` (lines 3-10). `app.ts:240` defines the exact same shape. The two are not cross-referenced — if one adds a field (e.g., `displayName`) the other silently diverges.",
+      "suggested_fix": "Extract `Principal` (and the matching `RecommendedThread*` types are fine to keep local) into `apps/server/src/types.ts` or expose from `app.ts` and import in `recommendations.ts`."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/test/forum-discovery.test.ts:43-634 (entire file is one test)",
+      "problem": "All 7 acceptance criteria are wrapped in a single `test(\"AC-1 through AC-7: ...\")` block. One failing assertion hides the pass/fail status of the other ACs and produces a single 911ms timeout-style run with no per-AC diagnostics.",
+      "evidence": "`grep -n \"^test(\" apps/server/test/forum-discovery.test.ts` returns only one match at line 43. `forum-discovery.test.ts` is 634 lines and `moderation-sanctions.test.ts` (the closest analogue) splits each AC into its own `test()` block with `describe()` wrappers (e.g., AC-1..AC-4).",
+      "suggested_fix": "Split into 7 `test()` blocks (one per AC) inside `describe(\"Forum Discovery & Recommendations Integration\")` to match the moderation-sanctions convention and let CI report each AC independently."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/validation.ts:35-37",
+      "problem": "The new Zod validators for POST messages, PATCH status, and PUT subscriptions use `z.any().optional().passthrough()`, which is functionally a no-op schema. The whole point of the validation layer is to reject malformed bodies at the route boundary, but here all real validation is deferred to the handler.",
+      "evidence": "`apps/server/src/validation.ts:35` `category:z.any().optional(),tags:z.any().optional()` and `.passthrough()` for `POST /v1/rooms/:roomId/messages`; `:36` `status:z.any()` and `.passthrough()` for `PATCH .../status`; `:37` `tags:z.any()` and `.passthrough()` for `PUT /v1/agents/me/subscriptions`. Compare to `apps/server/src/validation.ts:6` (`kind:z.enum([...])`) which uses proper enums. A typo like `category: 'questions'` (plural) is now caught only deep inside the handler at app.ts:608.",
+      "suggested_fix": "Replace with proper Zod types: `category:z.enum(['question','discussion','task_proposal','review_request']).optional()`, `tags:z.array(z.string().regex(/^[a-z0-9-_]+$/i)).max(10).optional()`, `status:z.enum(['open','resolved','closed'])`. Remove `.passthrough()` to drop unknown keys."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:670-676 (quota_exceeded inline response)",
+      "problem": "The 429 quota response is constructed inline with `reply.code(429).send({error:{code,message,retry_after_sec}})` instead of using the `fail()` helper that every other endpoint uses, producing a different `error` shape from the rest of the API.",
+      "evidence": "app.ts:670 sends `{error:{code:'quota_exceeded',message:'Help-seeking thread quota exceeded: ...',retry_after_sec:360}}`. Compare with `enforceAuthLimit` at app.ts:261 which uses `fail(reply,429,'rate_limited','Too many authentication attempts; retry later')` and sets `Retry-After` separately. The two 429 shapes diverge — clients must special-case `retry_after_sec`.",
+      "suggested_fix": "Extend `fail()` to accept an optional extra-fields object (e.g., `fail(reply, 429, 'quota_exceeded', '...', { retry_after_sec: 360 })`) and call it from both rate-limit code paths so all 429s share the same envelope."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:603-653 (POST /v1/rooms/:roomId/messages tag validation)",
+      "problem": "The tag validation block is duplicated verbatim in two branches (`if (b.category !== undefined)` and the `else if (b.tags !== undefined)` branch). Both blocks run the same regex, length, and array-size checks.",
+      "evidence": "Lines 613-631 and 632-652 are ~20 lines of identical code differing only by which field triggered the branch. The first half of `if (b.category !== undefined && b.category !== null)` runs the same validations either way — only the `reply_to_message_id` early-return at line 604/633 differs.",
+      "suggested_fix": "Extract `validateTags(input): { ok: true; tags: string[] } | { ok: false; reply: any }` to a local helper, then call it once before the `if (b.category) ... else if (b.tags) ...` switch. The two branches then just check whether to also validate category."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:607, 768, 847, 876-879 + apps/server/src/validation.ts:35-37 + apps/server/src/app.ts:90-98 (CHECK constraints)",
+      "problem": "Category and status enum values are magic strings duplicated in 5+ places (handler `validCategories`/`validStatuses`, FSM `allowedTransitions` literal, validation schema, SQL CHECK constraint, plus CLI `option('status','open')` default in cli.js:505).",
+      "evidence": "`['question','discussion','task_proposal','review_request']` appears in app.ts:607, the CHECK constraint at app.ts:92, and the test file. `['open','resolved','closed']` appears in app.ts:768, 847, 876-879, 94, the `('all')` filter at 801, validation.ts:36, and CLI default at cli.js:505. If the spec adds a new status, every site must be touched in lockstep.",
+      "suggested_fix": "Export `const FORUM_CATEGORIES` and `const FORUM_STATUSES` (plus a `FORUM_STATUS_QUERY` union including `'all'`) from a small shared module (e.g., `apps/server/src/forum-enums.ts` or co-locate with `recommendations.ts`) and import them in app.ts, validation.ts, and any future consumers. Reference the constants in the CHECK-constraint SQL via a small template or comment to keep the source-of-truth in TS."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/cli.js:584-621 (subscribe command)",
+      "problem": "The CLI accepts `subscribe --list`, but `--list` is never read by any `option('list')` call — it is silently ignored. The test at packages/client/test/forum.test.js:315 documents `--list` as the way to list subscriptions, but the user could equally run `subscribe` with no flags and get the same behavior. The SKILL.md at line 41 also documents `--list`.",
+      "evidence": "`grep -n \"option('list'\" packages/client/src/cli.js` returns no matches. The `subscribe` handler at cli.js:584 reads `option('remove')` and `option('tags')`; if both are undefined it falls through to `client.getAgentSubscriptions()`. The `--list` flag is parsed by the generic `option()` walker only when `--list` happens to be followed by another `--*` or nothing — even then the value is discarded.",
+      "suggested_fix": "Either (a) make `--list` explicit: `if (!removeTag && !tagsRaw && !option('list')) throw new Error('subscribe requires --list, --tags, or --remove')` so the no-flag call errors, or (b) drop `--list` from SKILL.md, tests, and the report claim that `--list` is supported."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:767 vs packages/client/src/cli.js:505",
+      "problem": "`forum list` default status `'open'` is duplicated in two places — the API handler and the CLI flag default. If the spec changes default to e.g. `'all'`, both must be updated.",
+      "evidence": "`apps/server/src/app.ts:767 const status = q.status ?? \"open\"` and `packages/client/src/cli.js:505 const status = option('status', 'open')`. There is no shared constant.",
+      "suggested_fix": "Export `DEFAULT_FORUM_LIST_STATUS = 'open'` from the shared enums module (see finding on magic strings) and reference it in both places."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:772-773 (tag/category filter normalization)",
+      "problem": "The `tag` query param is normalized via `String(q.tag).trim().toLowerCase()` but the `category` query param is not — `String(q.category)` keeps whatever case the caller sent. Asymmetric handling of two sibling filters.",
+      "evidence": "`app.ts:772 const tag = q.tag ? String(q.tag).trim().toLowerCase() : null` next to `app.ts:773 const category = q.category ? String(q.category) : null`. The CHECK constraint at app.ts:92 is case-sensitive (`IN ('question', ...)`), so a caller passing `?category=Question` will get 0 rows even though there is data.",
+      "suggested_fix": "Either normalize both to lowercase (`String(q.category).trim().toLowerCase()`) or normalize the SQL filter (`LOWER(m.category) = LOWER($2)`) so the contract is symmetric. Whichever you choose, document it."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:921-936 (GET /v1/agents/me/subscriptions created_at)",
+      "problem": "When the agent has zero subscriptions, the response returns `created_at: new Date().toISOString()` — a wall-clock-now timestamp that is semantically meaningless (it is the response build time, not any subscription timestamp).",
+      "evidence": "`app.ts:933 created_at: r.rows[0]?.created_at ?? new Date().toISOString()`. The fallback is a wall-clock-now value rather than `null` or omitting the field.",
+      "suggested_fix": "Return `created_at: null` (or omit the field) when `r.rows.length === 0`. Update the SDK/CLI consumers to handle `null`."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:966-988 (PUT /v1/agents/me/subscriptions INSERT loop)",
+      "problem": "The transaction does 1 DELETE + up to 50 individual INSERT round-trips. A single `INSERT ... SELECT unnest($1::text[])` would be one round-trip.",
+      "evidence": "`app.ts:970 for (const tag of normalizedTags) { await client.query(\"INSERT INTO agent_subscriptions(agent_id, tag) VALUES($1, $2)\", [p.id, tag]); }`. With `normalizedTags.length` up to 50, that's 51 round-trips per request.",
+      "suggested_fix": "Replace the loop with `await client.query(\"INSERT INTO agent_subscriptions(agent_id, tag) SELECT $1, unnest($2::text[])\", [p.id, normalizedTags])`. The transaction wrapping stays."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/test/forum.test.js:228, 335 (stdout-only redaction assertion)",
+      "problem": "The two new CLI tests assert that the credential token does not appear in `stdout`, but they do not check `stderr`. The existing convention in `packages/client/test/cli.test.js:63,67,72,74` asserts against `${stdout}${stderr}` combined.",
+      "evidence": "`packages/client/test/forum.test.js:228 assert.equal(listRes.stdout.includes('secret_token_123'), false)` and `:335 assert.equal(recsTable.stdout.includes('secret_token_456'), false)`. The `run()` helper used in cli.test.js exposes both stdout and stderr, but the new tests only inspect stdout.",
+      "suggested_fix": "Change both assertions to `assert.equal(\\`${listRes.stdout}${listRes.stderr}\\`.includes('secret_token_123'), false)` to match the existing convention."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/recommendations.ts:157 (`if (keywordPoints >= 2.0) break`)",
+      "problem": "The keyword-match term is implicitly capped at 2.0 (4 distinct terms at 0.5 each). This is a sensible practical cap but is an undocumented deviation from PRD §6.3, which describes the third term as an uncapped sum.",
+      "evidence": "`recommendations.ts:153-166`: loop increments `keywordPoints` and `matchScore` by 0.5 per matching term, breaking at 2.0. Neither `prd.md` §6.3 nor `plan.md` mentions this cap. The verifier flagged this in their review too.",
+      "suggested_fix": "Either (a) document the cap in the PRD/plan with rationale (prevents a thread containing every subscribed keyword from dominating scoring), or (b) remove the cap to match the literal PRD formula."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:803 (cursor subquery on (created_at,id) < (SELECT...))",
+      "problem": "When the cursor ID no longer exists (deleted, never existed), the row-comparison `(m.created_at, m.id) < NULL` is implementation-defined in PostgreSQL. The existing /v1/rooms/:roomId/messages endpoints use the same pattern, so this isn't a regression — but it's a latent bug.",
+      "evidence": "`app.ts:803 AND ($5::text IS NULL OR (m.created_at, m.id) < (SELECT created_at, id FROM messages WHERE id = $5))`. No test exercises an invalid cursor.",
+      "suggested_fix": "Before the main query, run `SELECT 1 FROM messages WHERE id = $1` and return `400 invalid_cursor` if no row. Optionally fix the existing room-messages endpoints for consistency."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/validation.ts:35 (body:text(32768))",
+      "problem": "The `messages.body` max length was raised from 5000 to 32768 characters (a 6.5× increase) without a justification in `report.md` or `plan.md`.",
+      "evidence": "`validation.ts` diff: `body:text(5000)` → `body:text(32768)`. The report's Phase 2 section says nothing about this change; the plan doesn't either.",
+      "suggested_fix": "Either (a) add a one-line rationale to report.md (e.g., \"help threads often exceed 5000 chars — increased limit to 32768 to accommodate detailed context while still bounding payload size\"), or (b) split into a per-endpoint limit (e.g., 5000 when category is null, 32768 only when category is set) so standard chat messages stay capped."
+    },
+    {
+      "severity": "nit",
+      "location": "jobs/forum-discovery-q-018-2026-09-18/state.json (missing phase)",
+      "problem": "`state.json` does not include a `review_and_fixes` phase, which PR #15 introduced as a lesson. The phase list is `discussion → prd → review → plan → implementation → verification`. A separate review-and-fixes phase would explicitly acknowledge that the prior review was re-checked before merging.",
+      "evidence": "`state.json:15-46` lists 6 phases. Compare with PR #15's state.json (referenced as the lesson). No `review_and_fixes` entry exists.",
+      "suggested_fix": "Add a `review_and_fixes` phase with status `completed` and reference the addresses (M1-M4, m1-m10, n1-n5). This is documentation hygiene — not a blocker — but the prior review explicitly recommended it as a future-PR template."
+    },
+    {
+      "severity": "nit",
+      "location": "skills/olimpyx-participant/SKILL.md:36",
+      "problem": "The new SKILL.md section is titled \"Forum Discovery, Help-Seeking & Peer Collaboration (Q-018)\" but does not cross-reference D-040 or D-041 even though the report anchors these design docs.",
+      "evidence": "`grep -n \"D-040\\|D-041\" skills/olimpyx-participant/SKILL.md` returns no matches. `report.md:11` lists D-040, D-041 among the anchors.",
+      "suggested_fix": "Append `See also: D-040, D-041` to the section header for navigability, or list the D-* anchors alongside the Q-* anchor in the section title."
+    },
+    {
+      "severity": "nit",
+      "location": "jobs/forum-discovery-q-018-2026-09-18/report.md:142-149, 151-157",
+      "problem": "Section 4.1 lists AC-1 through AC-7 as separate verified items but the test output shows `tests 1 / pass 1` — a single mega-test. The reader may believe 7 independent tests passed when in fact one giant assertion block passed.",
+      "evidence": "`report.md:151-157` quotes `tests 1 / suites 0 / pass 1 / fail 0`, but lines 142-149 enumerate AC-1..AC-7 as bullet points with checkmarks. Same mega-test pattern.",
+      "suggested_fix": "After splitting into per-AC tests (see major finding above), update report.md to quote the new 7-test summary. Until then, clarify that \"AC-1..AC-7 verified\" means a single test block covered all ACs."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:876-879 (FSM as inline literal)",
+      "problem": "The status transition FSM is an inline `Record<string, string[]>` literal at line 876, while the same three statuses `('open'|'resolved'|'closed')` are repeated in the `validStatuses` array, the SQL CHECK constraint, and the validation schema.",
+      "evidence": "`app.ts:876 const allowedTransitions: Record<string, string[]> = { open: [\"resolved\", \"closed\"], resolved: [\"open\", \"closed\"], closed: [\"open\"] };`. Adding/removing a transition requires editing this single block — fine — but the strings themselves live in 4 places.",
+      "suggested_fix": "Co-locate with the proposed shared enums module: `export const FORUM_STATUS_FSM: Record<ForumStatus, ForumStatus[]> = { open: ['resolved','closed'], ... }`."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/recommendations.ts:33-37 (recommendThreads signature)",
+      "problem": "`recommendThreads(pg, principal, limit = 10)` takes the bare `Pool` instead of using a `Pool | PoolClient` union like `getReviewMetrics` does at app.ts:1106. This means the function cannot be reused inside an existing transaction (e.g., a future \"create help thread and pre-rank its discoverability\" use case).",
+      "evidence": "`recommendations.ts:33-37` signature vs `app.ts:1106 async function getReviewMetrics(versionId: string, clientOrPool: Pool | PoolClient = app.pg)`.",
+      "suggested_fix": "Accept `pg: Pool | PoolClient` and pass it through to the two `pg.query(...)` calls. Default to `app.pg` at the call site if needed."
+    },
+    {
+      "severity": "nit",
+      "location": "packages/client/src/cli.js:519, 634 (CLI table formatting)",
+      "problem": "The forum list and recommendations table formatters duplicate the same `padEnd`/`slice+'…'` boilerplate. The existing CLI codebase has no shared table formatter, but two new tables bring the total to four (knowledge list, threads, forum, recommendations) — enough to warrant extraction.",
+      "evidence": "`cli.js:519-533` (forum list) and `:634-646` (recommendations) both compute `padEnd` widths, slice-ellipsis logic, and emit `lines.join('\\n')`.",
+      "suggested_fix": "Extract a tiny `renderTable(header: string, rows: string[][], widths: number[]): string` helper. Keep the per-table column widths local. (Refactoring opportunity — not a regression.)"
+    }
+  ],
+  "checks_performed": [
+    "Read the full diff via `git diff origin/main..origin/feat/forum-discovery-q-018 -- apps/server/src/app.ts` (486 lines) and traced the new forum/subscription/recommendation endpoints.",
+    "Read `apps/server/src/recommendations.ts` end-to-end (241 lines) and verified scoring formula, exclusion filters, and SQL pre-filter.",
+    "Read `apps/server/src/validation.ts` and confirmed the new validators use `z.any().optional().passthrough()`.",
+    "Read `apps/server/test/forum-discovery.test.ts` (634 lines) and confirmed it is one mega-test covering AC-1..AC-7.",
+    "Read `packages/client/src/client.js` diff and confirmed 7 new SDK methods exist.",
+    "Read `packages/client/src/cli.js` diff and confirmed 3 new commands (forum, subscribe, recommendations); verified `--list` is never parsed.",
+    "Read `packages/client/test/forum.test.js` (343 lines) and confirmed stdout-only redaction assertions vs cli.test.js's stdout+stderr convention.",
+    "Read the SKILL.md diff and confirmed only Q-018 is cross-referenced (no D-040/D-041).",
+    "Read `jobs/forum-discovery-q-018-2026-09-18/report.md` (178 lines), `state.json`, `prd.md` (last 50 lines), and `plan.md` (last 30 lines) for documentation accuracy.",
+    "Read `jobs/forum-discovery-q-018-2026-09-18/verifier-review-pr16.json` to cross-check the verifier's findings and avoid double-flagging or contradiction.",
+    "Compared new code style against existing `mvp.test.ts`, `moderation-sanctions.test.ts`, `cli.test.js`, and `knowledge.test.js` for consistency.",
+    "Cross-referenced `apps/server/src/app.ts:1057` (existing one-liner for /v1/recommendations) against the new dispatch at line 1418-1433.",
+    "Confirmed migration `idx_messages_forum_tags` uses GIN and the concurrent loop wraps each index with a `try/catch` fallback per PR #12's lesson."
+  ],
+  "assumptions": [
+    "The verifier's findings are accurate; I cross-checked the ones they labeled as nit (z.any, mega-test, body limit, cursor validation) and concur.",
+    "The codebase is non-interactive in the test environment (PostgreSQL available via DATABASE_URL); no live test execution was performed for this style review.",
+    "`/v1/recommendations` is a one-liner in app.ts:1418 — the dispatch on `kind === 'threads'` to `recommendThreads()` preserves the existing one-liner shape for `kind in {rooms, knowledge, agents}` per the n5 fix.",
+    "PR #15 introduced a `review_and_fixes` phase in state.json; PR #16's state.json omits it. The PR #15 lesson reference is to that file format, not to a CI gate.",
+    "`validStatuses` accepting `'all'` only as a query-level filter (not stored) is intentional — verified against the SQL `($3::text = 'all' OR m.status = $3)` clause.",
+    "`chk_messages_root_forum` CHECK constraint fires on the reply row (reply_to_message_id IS NOT NULL implies category IS NULL AND resolved_at IS NULL on that row), not on the root — confirmed by reading the constraint definition."
+  ]
+}

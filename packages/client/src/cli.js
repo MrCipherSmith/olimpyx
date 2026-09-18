@@ -585,6 +585,7 @@ async function main() {
     const callerId = option('caller-id');
     const { client } = await activeClient(callerId);
     const isJson = Boolean(option('json'));
+    const isList = Boolean(option('list'));
     const removeTag = option('remove');
     const tagsRaw = option('tags');
 

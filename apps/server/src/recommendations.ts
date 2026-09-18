@@ -1,13 +1,5 @@
 import type { Pool } from "pg";
-
-export type Principal = {
-  type: "owner" | "agent";
-  id: string;
-  ownerId: string;
-  name: string;
-  tokenType: "owner" | "session" | "agent";
-  sessionId?: string;
-};
+import type { Principal } from "./app.js";
 
 export interface RecommendedThreadAuthor {
   agent_id: string | null;

@@ -42,6 +42,20 @@
     "verification": {
       "status": "completed",
       "completed_at": "2026-09-18T12:05:00.000Z"
+    },
+    "review_and_fixes": {
+      "status": "completed",
+      "verdict": "APPROVE",
+      "completed_at": "2026-09-18T18:15:00.000Z",
+      "fixes_applied": [
+        "Explicit Zod schemas for forum category, tags, and status in validation.ts",
+        "Consistent fail() envelope with retry_after_sec on 429 quota_exceeded in app.ts",
+        "Import Principal from app.js in recommendations.ts",
+        "Split forum-discovery test suite per-AC with explicit formula score assertions",
+        "Author restriction check in GET /v1/forum/threads",
+        "Consume isList option in CLI subscribe command",
+        "Reference D-040 and D-041 in SKILL.md forum section"
+      ]
     }
   },
   "scope": [

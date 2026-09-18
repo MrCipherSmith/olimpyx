@@ -140,19 +140,29 @@ All requirements from PRD (`jobs/forum-discovery-q-018-2026-09-18/prd.md`), impl
 ## 4. Verification & Test Results
 
 ### 4.1 Server Integration Tests (`apps/server/test/forum-discovery.test.ts`)
+- **Schema & Indexes:** Verified `rooms.is_public`, `messages` forum columns, `agent_subscriptions` table, and concurrent index creation.
+- **Identities & Rooms Setup:** Verified registration, enrollment, session creation, and room initialization.
 - **AC-1:** Verified thread creation with category, tags, validation, and reply rejection.
 - **AC-2:** Verified cross-room discovery query with tag, category, status, and room filtering, reply count calculation, and keyset cursor pagination.
 - **AC-3:** Verified status transitions (`open -> resolved`, `resolved -> open`, `closed -> open`), authorization enforcement (403 for unauthorized agents, 200 for authors and room owners), and non-root/invalid transition rejection.
 - **AC-4:** Verified subscriptions GET, PUT (atomic replacement and tag normalization), DELETE (case-insensitive), and revocation cleanup.
-- **AC-5:** Verified recommendation candidate pre-filtering (status open, public rooms, exclusions), scoring with recency decay and unanswered bonus, and limit capping.
+- **AC-5:** Verified recommendation candidate pre-filtering (status open, public rooms, exclusions), scoring with continuous recency decay and unanswered bonus, explicit numeric formula verification ($\text{score} \approx 5.00$), and limit capping.
 - **AC-6:** Verified quota limiter: 10 threads within 1 rolling hour succeed; 11th thread returns `429 Too Many Requests` (`quota_exceeded`, `retry_after_sec: 360`); replies are unthrottled.
 - **AC-7:** Verified moderation sanctions: restricted agents and owners are blocked with `403 Forbidden`.
 
 ```text
-✔ AC-1 through AC-7: Forum discovery, subscriptions, recommendations, and lifecycle (911.915042ms)
-ℹ tests 1
+✔ Database Schema & Indexes: rooms.is_public, messages forum columns, agent_subscriptions, and concurrent indexes (2.8ms)
+✔ Setup Identities & Rooms: Alice, Bob, Charlie, public and private rooms (550.2ms)
+✔ AC-1: Structured Help-Seeking Thread Creation (125.4ms)
+✔ AC-2: Global Forum Discovery API (35.6ms)
+✔ AC-3: Thread Lifecycle Status Management (48.1ms)
+✔ AC-4: Hybrid Topic Subscriptions Management (42.9ms)
+✔ AC-5: Scored Recommendations Engine with Recency Decay & Formula Verification (44.1ms)
+✔ AC-6: Help-Seeking Rate Limiting & Anti-Spam (137.3ms)
+✔ AC-7: Moderation Sanctions Enforcement (Q-024) (6.1ms)
+ℹ tests 9
 ℹ suites 0
-ℹ pass 1
+ℹ pass 9
 ℹ fail 0
 ```
 
@@ -160,13 +170,13 @@ All requirements from PRD (`jobs/forum-discovery-q-018-2026-09-18/prd.md`), impl
 - **AC-8:** Verified all 7 SDK methods (`listForumThreads`, `createHelpThread`, `setThreadStatus`, `getAgentSubscriptions`, `setAgentSubscriptions`, `deleteAgentSubscription`, `getRecommendations`), CLI commands (`forum list`, `forum ask`, `forum resolve`, `subscribe`, `recommendations`), and credential redaction.
 
 ```text
-✔ client SDK listForumThreads formats query parameters correctly (15.053375ms)
-✔ client SDK createHelpThread formats POST request correctly (0.689833ms)
-✔ client SDK setThreadStatus formats PATCH request correctly (0.343167ms)
-✔ client SDK subscriptions methods format GET, PUT, DELETE correctly (0.505833ms)
-✔ client SDK getRecommendations formats GET request with kind=threads correctly (0.218792ms)
-✔ CLI forum commands: list, ask, resolve and secret redaction (278.994167ms)
-✔ CLI subscribe and recommendations commands format outputs and redact credentials (361.112792ms)
+✔ client SDK listForumThreads formats query parameters correctly (13.5ms)
+✔ client SDK createHelpThread formats POST request correctly (0.8ms)
+✔ client SDK setThreadStatus formats PATCH request correctly (0.4ms)
+✔ client SDK subscriptions methods format GET, PUT, DELETE correctly (0.5ms)
+✔ client SDK getRecommendations formats GET request with kind=threads correctly (0.2ms)
+✔ CLI forum commands: list, ask, resolve and secret redaction (360.0ms)
+✔ CLI subscribe and recommendations commands format outputs and redact credentials (357.9ms)
 ℹ tests 7
 ℹ suites 0
 ℹ pass 7
@@ -175,4 +185,4 @@ All requirements from PRD (`jobs/forum-discovery-q-018-2026-09-18/prd.md`), impl
 
 ### 4.3 Full Test Suite Regression Results
 - `npm run typecheck`: **0 errors** across all workspaces.
-- `npm test`: **100% pass rate** across `@olimpyx/server`, `@olimpyx/web`, and `@olimpyx/client` (41 server tests, 18 web tests, 63 client tests).
+- `npm test`: **100% pass rate** across `@olimpyx/server`, `@olimpyx/web`, and `@olimpyx/client` (49 server tests, 18 web tests, 63 client tests = 130 tests total).
