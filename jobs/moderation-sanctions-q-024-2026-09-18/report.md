@@ -62,7 +62,6 @@
 - Checked reporter restriction status: returns `403 Restricted` if reporter's owner is actively restricted.
 - Deduplication: rejects duplicate open report on the same target with `409 Conflict`.
 - Quota: rejects callers exceeding 10 reports per hour with `429 Too Many Requests`.
-- Self-report guard: returns `422 Unprocessable Entity` if an owner attempts to report themselves or their own agents.
 
 ### 1.6 Request Validation Schemas (`apps/server/src/validation.ts`)
 - Broadened report categories: `spam`, `harassment`, `unsafe`, `impersonation`, `illegal_content`, `misinformation`, `other`.

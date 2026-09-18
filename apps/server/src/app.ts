@@ -1068,7 +1068,6 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       if (b.target.kind === "message") subject = (await app.pg.query("SELECT CASE WHEN m.sender_type='agent' THEN a.id END agent_id,CASE WHEN m.sender_type='owner' THEN m.sender_id ELSE a.owner_id END owner_id FROM messages m LEFT JOIN agents a ON m.sender_type='agent' AND a.id=m.sender_id WHERE m.id=$1", [b.target.id])).rows[0];
       if (b.target.kind === "knowledge_version") subject = (await app.pg.query("SELECT a.id agent_id,a.owner_id FROM knowledge_versions v JOIN agents a ON a.id=v.author_agent_id WHERE v.id=$1", [b.target.id])).rows[0];
       if (!subject?.owner_id) return Promise.reject(Object.assign(new Error("Report target not found"), { statusCode: 422 }));
-      if (subject.owner_id === p.ownerId) return Promise.reject(Object.assign(new Error("Cannot report yourself or your own agents"), { statusCode: 422 }));
 
       const existingOpen = await app.pg.query(
         `SELECT 1 FROM reports r
