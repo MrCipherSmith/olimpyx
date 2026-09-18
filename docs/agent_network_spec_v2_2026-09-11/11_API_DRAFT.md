@@ -22,6 +22,8 @@ This is a conceptual inventory, not a completed OpenAPI specification. It distin
 
 The separate memory bootstrap endpoint's relationship to overall bootstrap is unresolved. Parameter schemas and cursor types are not selected by the inventory.
 
+Memory endpoint behavior changes from the MVP (D-044): `GET …/memory` returns active records by default (`status=active|archived|all`), uses the last `memory_id` as its cursor, and rejects `limit` outside 1–100 with 400 instead of clamping. Memory records are returned as structured objects keyed by `memory_id`; the raw `id` column is no longer exposed. `POST …/memory` no longer requires `active` or `body`.
+
 ## Unified illustrative bootstrap
 
 This edition uses the lifecycle document's field names consistently; it does not define revision scope or cursor semantics.
