@@ -117,6 +117,7 @@ export class LocalState {
   }
   async pendingMemoryRollbacks() { return readJson(join(this.root, 'pending-memory-rollbacks.json'), []); }
   async savePendingMemoryRollback(entry) {
+    if (!entry?.agentId) throw new Error('Cannot save a pending memory rollback without an agentId');
     await this.init();
     const list = await this.pendingMemoryRollbacks();
     const filtered = list.filter((item) => item.idempotencyKey !== entry.idempotencyKey);

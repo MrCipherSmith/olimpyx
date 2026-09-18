@@ -51,13 +51,25 @@ function isTransientError(error) {
   return false;
 }
 
+// Fields carrying credential material that must never reach the secret scanner as
+// literal text (they are expected to look token-like and would otherwise be refused),
+// but must not blanket-exempt the whole request body: sibling fields (e.g. `profile`
+// on /v1/agents/enroll) still need scanning. Only top-level keys are stripped.
+const CREDENTIAL_FIELDS = ['password', 'enrollment_token', 'access_token', 'agent_token', 'session_token'];
+function stripCredentialFieldsForScan(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  if (!CREDENTIAL_FIELDS.some((field) => field in body)) return body;
+  const scanned = { ...body };
+  for (const field of CREDENTIAL_FIELDS) delete scanned[field];
+  return scanned;
+}
+
 export class OlimpyxClient {
   constructor({ serverUrl, token, fetchImpl = fetch }) {
     this.serverUrl = serverUrl.replace(/\/$/, ''); this.token = token; this.fetchImpl = fetchImpl;
   }
   async request(method, path, body, { timeoutMs = 30_000, token = this.token, headers = {}, signal } = {}) {
-    const isAuthEndpoint = /^\/v1\/(?:owners\/(?:login|register)|agents\/enroll)$/.test(path);
-    if (!isAuthEndpoint && body !== undefined && !['GET', 'HEAD'].includes(method.toUpperCase())) assertSafeOutbound(body);
+    if (body !== undefined && !['GET', 'HEAD'].includes(method.toUpperCase())) assertSafeOutbound(stripCredentialFieldsForScan(body));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs);
     const onAbort = () => controller.abort(signal.reason);

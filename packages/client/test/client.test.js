@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { OlimpyxClient } from '../src/client.js';
+
+function olimpyxStyleToken() {
+  for (let i = 0; i < 50; i += 1) {
+    const candidate = randomBytes(32).toString('base64url');
+    if (candidate.length === 43 && /[A-Z]/.test(candidate) && /[a-z]/.test(candidate) && /\d/.test(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error('failed to generate a mixed-case, digit-containing 43-char token in 50 tries');
+}
 
 test('wait uses bounded server long poll and cursor', async () => {
   let called;
@@ -19,6 +30,58 @@ test('outbound writes are scanned before fetch', async () => {
   const client = new OlimpyxClient({ serverUrl: 'https://example.test', token: 't', fetchImpl: async () => { called = true; } });
   await assert.rejects(client.request('POST', '/v1/messages', { body: 'ghp_abcdefghijklmnopqrstuvwxyz1234567890' }));
   assert.equal(called, false);
+});
+
+// ---------------------------------------------------------------------------
+// M3: /v1/agents/enroll and /v1/owners/login are no longer path-exempted from
+// scanning. The client strips only the top-level credential fields it expects
+// (password, enrollment_token, *_token) before scanning, so sibling fields like
+// `profile` are still checked.
+// ---------------------------------------------------------------------------
+
+test('enroll succeeds with a legitimate 43-char base64url enrollment_token (not refused as a leaked secret)', async () => {
+  const token = olimpyxStyleToken();
+  let called = false;
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test',
+    token: 'owner-t',
+    fetchImpl: async () => { called = true; return new Response(JSON.stringify({ data: { agent: { agent_id: 'agt_1' } } }), { headers: { 'content-type': 'application/json' } }); }
+  });
+  await client.request('POST', '/v1/agents/enroll', {
+    enrollment_token: token,
+    installation_id: 'inst_1',
+    profile: { name: 'Nova', bio: 'A helpful assistant.' }
+  }, { token: null });
+  assert.equal(called, true);
+});
+
+test('enroll is refused when a secret is hidden inside profile.bio', async () => {
+  let called = false;
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test',
+    token: 'owner-t',
+    fetchImpl: async () => { called = true; return new Response(JSON.stringify({ data: {} }), { headers: { 'content-type': 'application/json' } }); }
+  });
+  await assert.rejects(
+    client.request('POST', '/v1/agents/enroll', {
+      enrollment_token: olimpyxStyleToken(),
+      installation_id: 'inst_1',
+      profile: { name: 'Nova', bio: 'My key is ghp_abcdefghijklmnopqrstuvwxyz1234567890' }
+    }, { token: null })
+  );
+  assert.equal(called, false);
+});
+
+test('owner login succeeds with a 43-char password (password stripped before scanning)', async () => {
+  const password = olimpyxStyleToken();
+  let called = false;
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test',
+    token: null,
+    fetchImpl: async () => { called = true; return new Response(JSON.stringify({ data: { owner: { id: 'own_1' }, access_token: 'irrelevant-for-this-test', expires_at: '2026-01-01T00:00:00.000Z' } }), { headers: { 'content-type': 'application/json' } }); }
+  });
+  await client.request('POST', '/v1/owners/login', { email: 'owner@example.com', password });
+  assert.equal(called, true);
 });
 
 test('listen returns immediately when events are received', async () => {

@@ -302,6 +302,38 @@ test('CLI memory save attaches the local persona revision for personality_influe
   assert.equal(parsed.data.persona_revision, persona.revision);
 });
 
+test('CLI memory save omits body entirely when --body is not given (no fake default)', async () => {
+  // M2: the server now defaults a missing `body` to '' itself; the client must not send
+  // a fabricated '' body when the caller never supplied --body.
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-memory-save-no-body-'));
+  await setupCliState(root);
+
+  const sentBodyPath = join(root, 'sent-body.json');
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    import { writeFileSync } from 'node:fs';
+    globalThis.fetch = async (url, init = {}) => {
+      const u = String(url);
+      const m = init.method || 'GET';
+      const headers = { 'content-type': 'application/json' };
+      if (u.includes('/heartbeat')) return new Response(JSON.stringify({ data: { ok: true } }), { headers });
+      if (u.includes('/v1/agents/agt_1/memory') && m === 'POST') {
+        const sentBody = JSON.parse(init.body);
+        writeFileSync('${sentBodyPath}', JSON.stringify(sentBody));
+        return new Response(JSON.stringify({ data: { memory_id: 'mem_nb_1', ...sentBody, active: true } }), { headers });
+      }
+      return new Response(JSON.stringify({ error: { message: 'Not found' } }), { status: 404, headers });
+    };
+  `);
+
+  const save = await run(['memory', 'save', '--agent', 'agt_1', '--kind', 'fact', '--summary', 'No body here', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
+  assert.equal(save.status, 0, save.stderr);
+  const sentBody = JSON.parse(await readFile(sentBodyPath, 'utf8'));
+  assert.equal('body' in sentBody, false, 'body key must be entirely absent, not an empty string');
+  const parsed = JSON.parse(save.stdout);
+  assert.equal('body' in parsed.data && parsed.data.body === '', false);
+});
+
 test('CLI persona rollback syncs with the server when an owner credential is available', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-persona-rollback-sync-'));
   await setupCliState(root, { ownerToken: 'owner-token-value' });
@@ -309,14 +341,14 @@ test('CLI persona rollback syncs with the server when an owner credential is ava
   const first = await state.savePersona({ name: 'Nova', phase: 1 }, 'initial');
   await state.savePersona({ name: 'Nova', phase: 2 }, 'drift');
 
-  let rollbackCall = null;
   const preloadPath = join(root, 'preload.mjs');
   await writeFile(preloadPath, `
     globalThis.fetch = async (url, init = {}) => {
       const u = String(url);
       const headers = { 'content-type': 'application/json' };
       if (u.includes('/memory/rollback')) {
-        globalThis.__rollbackCalls = (globalThis.__rollbackCalls || 0) + 1;
+        globalThis.__rollbackHeaders = globalThis.__rollbackHeaders || [];
+        globalThis.__rollbackHeaders.push(init.headers['idempotency-key']);
         return new Response(JSON.stringify({ data: { rolled_back_count: 1, memory_ids: ['mem_1'], to_persona_revision: '${first.revision}' } }), { headers });
       }
       return new Response(JSON.stringify({ error: { message: 'Not found' } }), { status: 404, headers });
@@ -332,6 +364,37 @@ test('CLI persona rollback syncs with the server when an owner credential is ava
 
   const pendingFile = await readFile(join(root, '.olimpyx', 'pending-memory-rollbacks.json'), 'utf8').catch(() => null);
   assert.equal(pendingFile, null, 'no pending entry should remain after a successful sync');
+});
+
+test('CLI persona rollback keys idempotency on the NEW local revision, not the rollback target', async () => {
+  // M1 regression: keying on `${target}` collides across repeated rollbacks to the same
+  // target (the server stores idempotency keys forever, so a second rollback to the same
+  // target would replay/409 against the first one forever). Keying on the freshly created
+  // local revision guarantees a distinct key every time.
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-persona-rollback-key-'));
+  await setupCliState(root); // no owner token -> both rollbacks fall through to pending
+  const state = new LocalState(join(root, '.olimpyx'));
+  const first = await state.savePersona({ name: 'Nova', phase: 1 }, 'initial');
+  await state.savePersona({ name: 'Nova', phase: 2 }, 'drift');
+  await state.savePersona({ name: 'Nova', phase: 3 }, 'drift-more');
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'should not be called' } }), { status: 500 });`);
+
+  const firstRollback = await run(['persona', 'rollback', first.revision], { cwd: root, preload: preloadPath, env: { OLIMPYX_AGENT_ID: 'agt_1' } });
+  assert.equal(firstRollback.status, 0, firstRollback.stderr);
+  const firstPending = await state.pendingMemoryRollbacks();
+  assert.equal(firstPending.length, 1);
+  assert.notEqual(firstPending[0].idempotencyKey, `persona-rollback:${first.revision}`);
+
+  const secondRollback = await run(['persona', 'rollback', first.revision], { cwd: root, preload: preloadPath, env: { OLIMPYX_AGENT_ID: 'agt_1' } });
+  assert.equal(secondRollback.status, 0, secondRollback.stderr);
+  const secondPending = await state.pendingMemoryRollbacks();
+  // Two independent pending entries: same target, two different generated local revisions.
+  assert.equal(secondPending.length, 2);
+  const keys = secondPending.map((entry) => entry.idempotencyKey);
+  assert.notEqual(keys[0], keys[1]);
+  for (const key of keys) assert.match(key, /^persona-rollback:/);
 });
 
 test('CLI persona rollback leaves a retryable pending entry when no owner credential is available', async () => {
@@ -352,7 +415,26 @@ test('CLI persona rollback leaves a retryable pending entry when no owner creden
 
   const pending = await state.pendingMemoryRollbacks();
   assert.equal(pending.length, 1);
-  assert.equal(pending[0].idempotencyKey, `persona-rollback:${first.revision}`);
+  // Keyed on the NEW local revision produced by this rollback, not the rollback target.
+  assert.equal(pending[0].idempotencyKey, `persona-rollback:${parsed.local.revision}`);
+  assert.notEqual(parsed.local.revision, first.revision);
+});
+
+test('CLI persona rollback errors clearly instead of saving a pending entry with no agentId', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-persona-rollback-no-agent-'));
+  await setupCliState(root, { agentId: null });
+  const state = new LocalState(join(root, '.olimpyx'));
+  const first = await state.savePersona({ name: 'Nova', phase: 1 }, 'initial');
+  await state.savePersona({ name: 'Nova', phase: 2 }, 'drift');
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'should not be called' } }), { status: 500 });`);
+
+  const rollback = await run(['persona', 'rollback', first.revision], { cwd: root, preload: preloadPath });
+  assert.notEqual(rollback.status, 0);
+  assert.match(rollback.stderr, /agentId/i);
+
+  assert.deepEqual(await state.pendingMemoryRollbacks(), []);
 });
 
 test('CLI memory rollback --sync replays pending entries with the same idempotency key and clears them', async () => {
@@ -370,13 +452,14 @@ test('CLI memory rollback --sync replays pending entries with the same idempoten
     }
   });
 
-  const seenKeys = [];
   const preloadPath = join(root, 'preload.mjs');
   await writeFile(preloadPath, `
     globalThis.fetch = async (url, init = {}) => {
       const u = String(url);
       const headers = { 'content-type': 'application/json' };
       if (u.includes('/memory/rollback')) {
+        globalThis.__syncKeys = globalThis.__syncKeys || [];
+        globalThis.__syncKeys.push(init.headers['idempotency-key']);
         return new Response(JSON.stringify({ data: { rolled_back_count: 1, memory_ids: ['mem_9'], to_persona_revision: 'rev-1' } }), { headers });
       }
       return new Response(JSON.stringify({ error: { message: 'Not found' } }), { status: 404, headers });
@@ -387,7 +470,136 @@ test('CLI memory rollback --sync replays pending entries with the same idempoten
   assert.equal(sync.status, 0, sync.stderr);
   const parsed = JSON.parse(sync.stdout);
   assert.ok(Array.isArray(parsed));
+  assert.equal(parsed[0].status, 'synced');
+  assert.equal(parsed[0].idempotencyKey, 'persona-rollback:rev-1');
   assert.equal(parsed[0].data.rolled_back_count, 1);
 
   assert.deepEqual(await state.pendingMemoryRollbacks(), []);
+});
+
+test('CLI memory rollback --sync continues past a failing entry and drops non-retryable 4xx failures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-memory-rollback-sync-mixed-'));
+  await setupCliState(root, { ownerToken: 'owner-token-value' });
+  const state = new LocalState(join(root, '.olimpyx'));
+  await state.savePendingMemoryRollback({
+    idempotencyKey: 'persona-rollback:will-conflict',
+    agentId: 'agt_1',
+    payload: { to_persona_revision: 'rev-a', reverted_persona_revisions: [], target_created_at: '2026-01-01T00:00:00.000Z' }
+  });
+  await state.savePendingMemoryRollback({
+    idempotencyKey: 'persona-rollback:will-succeed',
+    agentId: 'agt_1',
+    payload: { to_persona_revision: 'rev-b', reverted_persona_revisions: [], target_created_at: '2026-01-01T00:00:00.000Z' }
+  });
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url, init = {}) => {
+      const headers = { 'content-type': 'application/json' };
+      const key = init.headers['idempotency-key'];
+      if (key === 'persona-rollback:will-conflict') {
+        return new Response(JSON.stringify({ error: { message: 'Idempotency key already used with a different payload', code: 'idempotency_conflict' } }), { status: 409, headers });
+      }
+      if (key === 'persona-rollback:will-succeed') {
+        return new Response(JSON.stringify({ data: { rolled_back_count: 1, memory_ids: ['mem_5'], to_persona_revision: 'rev-b' } }), { headers });
+      }
+      return new Response(JSON.stringify({ error: { message: 'Not found' } }), { status: 404, headers });
+    };
+  `);
+
+  const sync = await run(['memory', 'rollback', '--sync'], { cwd: root, preload: preloadPath });
+  assert.equal(sync.status, 0, sync.stderr);
+  const parsed = JSON.parse(sync.stdout);
+  assert.equal(parsed.length, 2);
+
+  const dropped = parsed.find((r) => r.idempotencyKey === 'persona-rollback:will-conflict');
+  assert.equal(dropped.status, 'dropped');
+  assert.match(dropped.error.message, /Idempotency key already used/);
+
+  const synced = parsed.find((r) => r.idempotencyKey === 'persona-rollback:will-succeed');
+  assert.equal(synced.status, 'synced');
+  assert.equal(synced.data.rolled_back_count, 1);
+
+  // Both are resolved (one dropped as unrecoverable, one synced) so neither stays pending.
+  assert.deepEqual(await state.pendingMemoryRollbacks(), []);
+});
+
+test('CLI memory rollback --sync keeps an entry pending on 5xx/network failure and reports the error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-memory-rollback-sync-5xx-'));
+  await setupCliState(root, { ownerToken: 'owner-token-value' });
+  const state = new LocalState(join(root, '.olimpyx'));
+  await state.savePendingMemoryRollback({
+    idempotencyKey: 'persona-rollback:server-down',
+    agentId: 'agt_1',
+    payload: { to_persona_revision: 'rev-c', reverted_persona_revisions: [], target_created_at: '2026-01-01T00:00:00.000Z' }
+  });
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'Internal error' } }), { status: 503, headers: { 'content-type': 'application/json' } });
+  `);
+
+  const sync = await run(['memory', 'rollback', '--sync'], { cwd: root, preload: preloadPath });
+  assert.equal(sync.status, 0, sync.stderr);
+  const parsed = JSON.parse(sync.stdout);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].status, 'pending');
+  assert.match(parsed[0].error.message, /Internal error/);
+
+  const stillPending = await state.pendingMemoryRollbacks();
+  assert.equal(stillPending.length, 1);
+  assert.equal(stillPending[0].idempotencyKey, 'persona-rollback:server-down');
+});
+
+test('CLI manual memory rollback --to generates a fresh random idempotency key by default (not derived from --to)', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-memory-rollback-manual-'));
+  await setupCliState(root, { ownerToken: 'owner-token-value' });
+
+  const keysPath = join(root, 'keys.json');
+  await writeFile(keysPath, '[]');
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    import { readFileSync, writeFileSync } from 'node:fs';
+    globalThis.fetch = async (url, init = {}) => {
+      const headers = { 'content-type': 'application/json' };
+      const keys = JSON.parse(readFileSync('${keysPath}', 'utf8'));
+      keys.push(init.headers['idempotency-key']);
+      writeFileSync('${keysPath}', JSON.stringify(keys));
+      return new Response(JSON.stringify({ data: { rolled_back_count: 0, memory_ids: [], to_persona_revision: 'rev-x' } }), { headers });
+    };
+  `);
+
+  const args = ['memory', 'rollback', '--agent', 'agt_1', '--to', 'rev-x', '--target-created-at', '2026-01-01T00:00:00.000Z'];
+  const first = await run(args, { cwd: root, preload: preloadPath });
+  assert.equal(first.status, 0, first.stderr);
+  const second = await run(args, { cwd: root, preload: preloadPath });
+  assert.equal(second.status, 0, second.stderr);
+
+  const keys = JSON.parse(await readFile(keysPath, 'utf8'));
+  assert.equal(keys.length, 2);
+  assert.notEqual(keys[0], keys[1]);
+  assert.notEqual(keys[0], 'persona-rollback:rev-x');
+  assert.notEqual(keys[1], 'persona-rollback:rev-x');
+});
+
+test('CLI manual memory rollback --to accepts an explicit --idempotency-key', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-memory-rollback-manual-explicit-'));
+  await setupCliState(root, { ownerToken: 'owner-token-value' });
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url, init = {}) => {
+      const headers = { 'content-type': 'application/json' };
+      globalThis.__seenKey = init.headers['idempotency-key'];
+      return new Response(JSON.stringify({ data: { rolled_back_count: 0, memory_ids: [], to_persona_revision: 'rev-x', seen_key: init.headers['idempotency-key'] } }), { headers });
+    };
+  `);
+
+  const result = await run([
+    'memory', 'rollback', '--agent', 'agt_1', '--to', 'rev-x',
+    '--target-created-at', '2026-01-01T00:00:00.000Z', '--idempotency-key', 'orchestrator-owned-key-1'
+  ], { cwd: root, preload: preloadPath });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.data.seen_key, 'orchestrator-owned-key-1');
 });

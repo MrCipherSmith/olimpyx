@@ -429,9 +429,16 @@ async function main() {
     else if (action === 'rollback') {
       const revision = args.shift();
       const local = await state.rollbackPersona(revision);
-      const idempotencyKey = `persona-rollback:${revision}`;
+      // Keyed on the NEW local revision created by this rollback (not the target), so
+      // repeated rollbacks to the same target don't collide on a server-side idempotency
+      // key the server remembers forever (which would otherwise wedge the pending entry
+      // behind a permanent 409 idempotency_conflict).
+      const idempotencyKey = `persona-rollback:${local.revision}`;
       const config = await state.loadConfig();
       const agentId = process.env.OLIMPYX_AGENT_ID || config.agentId;
+      if (!agentId) {
+        throw new Error('Local persona rollback succeeded, but memory sync could not be queued: no agentId available. Set OLIMPYX_AGENT_ID or configure one via enroll, then retry with `olimpyx memory rollback --sync`.');
+      }
       const payload = {
         to_persona_revision: revision,
         reverted_persona_revisions: local.reverted_persona_revisions,
@@ -440,19 +447,25 @@ async function main() {
       };
       const ownerToken = await tryLoadOwnerToken();
       let server = null;
-      if (ownerToken && agentId) {
+      let syncError = null;
+      if (ownerToken) {
         try {
           const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
           server = await client.rollbackMemories(agentId, payload, { idempotencyKey });
-        } catch {
-          server = null;
+        } catch (error) {
+          syncError = error;
         }
       }
       if (server) {
         output({ local, server });
       } else {
         await state.savePendingMemoryRollback({ idempotencyKey, agentId, payload });
-        output({ local, pending: true, retry_command: 'olimpyx memory rollback --sync' });
+        output({
+          local,
+          pending: true,
+          retry_command: 'olimpyx memory rollback --sync',
+          ...(syncError ? { sync_error: { code: syncError.code ?? syncError.status ?? syncError.name ?? 'ERROR', message: syncError.message } } : {})
+        });
       }
     }
     else throw new Error('persona actions: show | history | save JSON|@file | rollback REVISION');
@@ -464,11 +477,29 @@ async function main() {
     if (sub === 'rollback' && option('sync')) {
       const pending = await state.pendingMemoryRollbacks();
       const client = await requireOwnerClient();
+      // 4xx here means the server has definitively rejected the request as it stands
+      // (bad input, forbidden, gone, already-applied conflict, or secret refusal) --
+      // retrying the exact same payload will never succeed, so drop it instead of
+      // leaving it pending forever. 5xx and network errors are transient: keep pending.
+      const nonRetryableStatuses = new Set([400, 403, 404, 409, 422]);
       const results = [];
       for (const entry of pending) {
-        const result = await client.rollbackMemories(entry.agentId, entry.payload, { idempotencyKey: entry.idempotencyKey });
-        results.push(result);
-        await state.clearPendingMemoryRollback(entry.idempotencyKey);
+        try {
+          // eslint-disable-next-line no-await-in-loop -- entries must sync in order, reusing each stored idempotency key
+          const result = await client.rollbackMemories(entry.agentId, entry.payload, { idempotencyKey: entry.idempotencyKey });
+          // eslint-disable-next-line no-await-in-loop
+          await state.clearPendingMemoryRollback(entry.idempotencyKey);
+          results.push({ status: 'synced', idempotencyKey: entry.idempotencyKey, agentId: entry.agentId, data: result?.data ?? result });
+        } catch (error) {
+          const errorInfo = { code: error.code ?? error.status ?? error.name ?? 'ERROR', message: error.message };
+          if (typeof error.status === 'number' && nonRetryableStatuses.has(error.status)) {
+            // eslint-disable-next-line no-await-in-loop
+            await state.clearPendingMemoryRollback(entry.idempotencyKey);
+            results.push({ status: 'dropped', idempotencyKey: entry.idempotencyKey, agentId: entry.agentId, error: errorInfo });
+          } else {
+            results.push({ status: 'pending', idempotencyKey: entry.idempotencyKey, agentId: entry.agentId, error: errorInfo });
+          }
+        }
       }
       output(results);
       return;
@@ -559,7 +590,11 @@ async function main() {
       if (!targetCreatedAt) throw new Error('--target-created-at is required');
       const reason = option('reason');
       const client = await requireOwnerClient();
-      const idempotencyKey = option('idempotency-key') || `persona-rollback:${to}`;
+      // A manual rollback has no locally-tracked new revision to key off, so require an
+      // explicit key from the caller (e.g. an orchestrator that owns retry semantics) or
+      // mint a fresh random one -- never derive it from --to, which would collide across
+      // repeated manual rollbacks to the same target revision.
+      const idempotencyKey = option('idempotency-key') || `persona-rollback:${crypto.randomUUID()}`;
       output(await client.rollbackMemories(agentId, {
         to_persona_revision: to, reverted_persona_revisions: reverted, target_created_at: targetCreatedAt, reason
       }, { idempotencyKey }));
