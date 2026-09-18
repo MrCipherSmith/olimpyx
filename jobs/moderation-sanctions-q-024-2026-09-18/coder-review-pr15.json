@@ -1,0 +1,209 @@
+{
+  "reviewer": "coder-style",
+  "scope_mode": "diff",
+  "pr_number": 15,
+  "pr_url": "https://github.com/MrCipherSmith/olimpyx/pull/15",
+  "verdict": "PARTIAL",
+  "checks_performed": [
+    "Read apps/server/src/app.ts (1350 lines total, +470) end-to-end and traced the new moderator section lines 249-1346",
+    "Read apps/server/src/validation.ts and the diff (only 2 routes appended: PATCH /v1/moderation/incidents and POST /v1/owners/me/incidents/:id/appeal)",
+    "Read packages/client/src/cli.js diff and the new commands at lines 441-493",
+    "Read packages/client/src/client.js diff and the 3 new SDK methods",
+    "Read skills/olimpyx-participant/SKILL.md diff (+27 / -1, lines 66-87 add a Moderation, Appeals, and Reporting subsection)",
+    "Read apps/server/test/moderation-sanctions.test.ts (643 lines, 12 tests in 2 describes)",
+    "Read packages/client/test/moderation.test.js (255 lines, 6 tests)",
+    "Read jobs/.../prd.md (160 lines) and jobs/.../plan.md (170 lines) and compared with implementation",
+    "Read jobs/.../report.md (126 lines) and jobs/.../state.json for accuracy",
+    "Ran npm test in packages/client to confirm report.md's '56 passed, 0 failed' claim",
+    "Compared style with neighbouring routes already in app.ts (knowledge, threads, agents enroll at line 443) for handler shape, parseBody/fail/principal pattern",
+    "Inspected isModerator at line 249 for MODERATOR_TOKEN handling, multi-value Authorization header, and timingSafeEqual buffer-length edge case",
+    "Inspected SELECT ... FOR UPDATE in appeal POST (line 399) and moderator PATCH (line 1109) for race coverage",
+    "Inspected the cascading UPDATE pattern in restrict_owner_temporary/restrict_owner/dismiss_malicious for extractability",
+    "Inspected PR commits (8765a8b fix(server) and 6916b65 test) to confirm what was actually changed vs reviewed",
+    "Checked state.json phase list and report.md test count claim"
+  ],
+  "assumptions": [
+    "PR description / commit messages are the canonical intent; review.md and PRD/plan are advisory",
+    "App.ts line 218 `fail` helper is the universal error helper and the new code should use it (it does)",
+    "installValidation hook in validation.ts already injects Zod errors as 422 responses before the handler runs, so the inline handler does not need a separate parseBody call",
+    "node:test counts subtests inside t.test as separate tests, so '56 passed' is correct (verified live)",
+    "Existing app.ts uses a mix of single-line dense handlers (line 443 etc.) and expanded async handlers (existing room/message routes) — the new code follows the expanded style for new routes, which is acceptable"
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "location": "1500+ lines total in apps/server/src/app.ts after this PR (+470 net). New section lines 99-1346",
+      "problem": "Single-file growth to ~1500 lines makes moderation/review logic hard to audit and review.",
+      "evidence": "The new code adds a 470-line block containing schema migration (~12 lines), isModerator helper (~1 line), access-control changes in principal() (~5 lines), 3 new owner endpoints (~80 lines), and one 245-line PATCH /v1/moderation/incidents/:incidentId handler with an if-else dispatch.",
+      "suggested_fix": "Extract the moderation surface into apps/server/src/moderation.ts (or split: moderator.ts for the PATCH + applyAction dispatch, moderation-routes.ts for the GET / POST owner endpoints). Keep app.ts as the route-wiring layer only."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:1104-1346 (PATCH /v1/moderation/incidents/:incidentId)",
+      "problem": "Action dispatch is one 245-line if/else chain with significant duplication between temporary_restriction and permanent_restriction variants.",
+      "evidence": "Lines 1133-1153, 1153-1166, 1167-1193, 1194-1214 each repeat the same 5-step shape: validate duration/target, run a cascading UPDATE on owners, agents, sessions, and set the 5 incident columns. The exact same cascading UPDATE block appears at lines 1178-1188, 1199-1209, and 1285-1296 (three times).",
+      "suggested_fix": "Extract `applyRestriction(ownerId, agentId|null, expiresAt|null, kind)` once. Extract `terminateSessionsForOwner(ownerId)` and `terminateSessionsForAgent(agentId)`. Then each action branch becomes 3-5 lines."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:249 isModerator, and apps/server/src/app.ts:1044-1047 PATCH /v1/moderation/incidents",
+      "problem": "When MODERATOR_TOKEN is unset, every moderator request returns 401 'Moderator authentication required' — indistinguishable from a wrong token, so deployment misconfig silently looks like auth failure.",
+      "evidence": "`function isModerator(...) { const configured = process.env.MODERATOR_TOKEN ... if (!configured || !raw || ...) fail(reply, 401, 'unauthorized', 'Moderator authentication required'); ... }`. The prior review (review.md M2) explicitly recommended returning 503 for the missing-env case; the implementation chose 401 for all branches.",
+      "suggested_fix": "Branch: `if (!configured) return fail(reply, 503, 'moderator_not_configured', 'Moderator token not configured on this server');` before the auth compare. This matches the prior review recommendation and helps operators detect env drift."
+    },
+    {
+      "severity": "major",
+      "location": "jobs/moderation-sanctions-q-024-2026-09-18/{prd.md,plan.md} and commit 8765a8b",
+      "problem": "Self-report guard was silently removed in commit 8765a8b but this drift is not documented in PRD, plan, or report.md.",
+      "evidence": "git show 8765a8b removes 1 line from app.ts and 1 line from report.md. The removed app.ts line was `if (b.target.id === p.id) return fail(...)` (self-report guard). The prior review (review.md M5: 'Reporter not also being the target (no self-reports)') recommended keeping this guard. The mvp.test.ts:206 fixture relies on the owner being able to report on their own agent (`{ target: { kind: 'profile', id: agentId } }` with `ownerToken`), which is why the guard was dropped — but neither the PRD nor plan mentions this and the PR description (verified via state.json phase list) does not capture it.",
+      "suggested_fix": "Either (a) update PRD/plan to explicitly document that self-reporting is allowed as a deliberate trade-off (e.g. 'owners may report on their own agents as a workflow signal'), or (b) reinstate the guard and adjust mvp.test.ts to use a different owner. (a) is the smaller-blast-radius fix because mvp.test.ts is a documented contract test."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:359-381 GET /v1/owners/me/incidents and migration block 60-78",
+      "problem": "No supporting index for the new paginated owner-incidents query — owner with many incidents will see linear scans.",
+      "evidence": "Migration adds `idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status='pending'` but does not add an index on `(owner_id, created_at DESC, id DESC)`. The new query at line 376 is `SELECT * FROM incidents WHERE owner_id = $1 [AND status = $2] [AND (created_at, id) < (...)] ORDER BY created_at DESC, id DESC LIMIT $N`. The original `incidents` CREATE TABLE (line 63) has no index on owner_id at all.",
+      "suggested_fix": "Add `CREATE INDEX IF NOT EXISTS idx_incidents_owner_created ON incidents(owner_id, created_at DESC, id DESC);` to the migration block alongside line 78."
+    },
+    {
+      "severity": "major",
+      "location": "apps/server/src/app.ts:248-249 isModerator",
+      "problem": "Multi-value Authorization header is concatenated by Node.js into 'Bearer foo, Bearer bar'; only the first 'Bearer ' prefix is stripped before timingSafeEqual, so attackers cannot bypass, but the comparison still runs against a string the operator did not intend.",
+      "evidence": "`raw = req.headers.authorization?.replace(/^Bearer\\s+/i,'')`. With `Authorization: Bearer wrong, Bearer correct`, `raw` becomes `wrong, Bearer correct`. `crypto.timingSafeEqual(Buffer.from(hashToken(configured)), Buffer.from(hashToken(raw)))` then compares two equal-length hex digests. This is not exploitable (timingSafeEqual + hashing are constant-time and fail-closed) but is fatal-lurking: a future maintainer who removes `hashToken` would expose a real bypass.",
+      "suggested_fix": "Either reject multi-value `authorization` headers explicitly (`if (String(req.headers.authorization).includes(',')) return fail(reply, 400, 'invalid_header', 'Single Authorization header required')`), or document the multi-value-ignored behaviour inline."
+    },
+    {
+      "severity": "major",
+      "location": "jobs/moderation-sanctions-q-024-2026-09-18/state.json:16-38",
+      "problem": "state.json does not include a review_and_fixes phase; the prior CONDITIONAL_APPROVE review cycle is not formally closed.",
+      "evidence": "state.json lists phases prd, review, plan, implementation, verification — all completed. But the review verdict is 'CONDITIONAL_APPROVE' (line 24), the report.md 'Review Feedback' table (line 117) was updated to 'Addressed', and there is no record of which findings were closed vs left-open. A future reviewer cannot tell whether the review was re-attempted or simply declared done.",
+      "suggested_fix": "Add `phases.review_and_fixes: { status: 'completed', completed_at, findings_closed: N, findings_left: M }` so the review cycle has a closed-on-record status. Even an empty findings-left is acceptable."
+    },
+    {
+      "severity": "major",
+      "location": "jobs/moderation-sanctions-q-024-2026-09-18/report.md lines 117-122 'Review Feedback' table",
+      "problem": "The 'Review Feedback' table marks M1-M8 and m1-m8 as 'Addressed' but does not cite the commit or line that closes each finding, so the report is unverifiable.",
+      "evidence": "report.md lines 117-122: rows like 'M1: Schema Migration — Addressed', 'm5: No self-reports — Addressed (after MVP self-report compatibility consideration)' — the parenthetical only appears for m5. For all other majors/minors the reader must re-derive the mapping from the diff. m5 itself is the unresolved self-report issue flagged in finding F-4 above.",
+      "suggested_fix": "Replace 'Addressed' with either a commit hash (e.g. '1d417f4') or an app.ts:line reference per row, and for m5 explicitly say whether it was 'Intenionally not enforced — see commit 8765a8b' or 'reinstated'."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:391-441 POST /v1/owners/me/incidents/:incidentId/appeal",
+      "problem": "The appeal idempotency check relies on `SELECT ... FOR UPDATE` on the incident row, but a separate `incident.owner_id !== p.id` ownership check happens *after* the lock — meaning the lock leaks until the rollback, and the same owner_id check should arguably be a 403 issued before the lock is held.",
+      "evidence": "Lines 399-407: SELECT FOR UPDATE happens first, then ownership check returns 403 with ROLLBACK. In Postgres the lock is released on rollback, so this is functionally correct but a tight loop from a non-owner will still incur row lock contention against legitimate moderators concurrently resolving the same incident.",
+      "suggested_fix": "Issue the ownership check (and 404) using a non-locking read first, then re-verify inside the transaction. Or accept as documented limitation."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:399-415 POST .../appeal",
+      "problem": "Validation chain order is suboptimal for clear error attribution: not_found, forbidden, appeal_conflict, invalid_state — but a 404 with no further ownership check leaks that the incident ID exists.",
+      "evidence": "An attacker probing incident IDs receives 404 for unknown IDs, 403 for someone else's ID, 409 for already-appealed, 422 for not-in-appealable-state. This is a small information leak — an attacker can enumerate which IDs belong to which owners by status code.",
+      "suggested_fix": "Consider collapsing 404 and 403 into a single 'not_found' for non-owners (use 404 for both 'no such id' and 'not yours'). The trade-off is worse debugability for legitimate owners and is arguably a minor concern at MVP scale."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:412 appeal pre-condition",
+      "problem": "Appeal pre-condition is `incident.sanction_kind === 'none' && incident.status !== 'owner_escalation'`, which blocks appealing an already-resolved warning but allows appealing a resolved permanent restriction — an odd asymmetry.",
+      "evidence": "If a moderator already `resolved` an incident with `restrict_owner`, then the owner can still appeal as long as `appeal_status === 'none'`. This is arguably correct (the sanction still exists in DB) but the `appeal_resolution` field will be `'Appeal denied'` rather than recording that the sanction was already in force. The plan §1.6 says 'Requires incident has an active sanction or is in owner_escalation' which matches, but the wording is ambiguous.",
+      "suggested_fix": "Add a docstring or rename the check to `incidentSanctionActiveOrEscalated(incident)`. Not a bug, just an explicitness gap."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1118-1126 PATCH moderator action 'let' defaults",
+      "problem": "Initialising `let nextSanctionKind = incident.sanction_kind ?? 'none'` is dead defensive code: the migration sets `sanction_kind text NOT NULL DEFAULT 'none'`, so `incident.sanction_kind` is never null.",
+      "evidence": "Line 63 of the new migration: `ALTER TABLE incidents ADD COLUMN IF NOT EXISTS sanction_kind text NOT NULL DEFAULT 'none';`. Same for `appeal_status` (line 72), `appeal_evidence` (line 74). The `??` fallbacks will never trigger.",
+      "suggested_fix": "Drop the `?? 'none'`, `?? null` fallbacks for any column with a NOT NULL DEFAULT in the migration. Reduces visual noise."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:359-389 GET /v1/owners/me/incidents and GET /v1/owners/me/escalations",
+      "problem": "The two routes diverge slightly: the new incidents route supports `status` and `before_cursor`, while the legacy `/escalations` route returns `next_cursor: null` always — meaning a legacy client that paginates via next_cursor will loop or stall.",
+      "evidence": "Line 389: `return { data: r.rows, page: { next_cursor: null } };` — hard-coded null. The legacy route was probably paginated by `LIMIT 50` only; calling it again returns the same first 50 results.",
+      "suggested_fix": "Either (a) alias the legacy route to the new handler (one-line forward), or (b) document `/v1/owners/me/escalations` as non-paginated and a sunset target."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1248-1303 dismiss_malicious",
+      "problem": "The 24-hour temporary restriction logic relies on a `SELECT count(*) ... i.action = 'dismissed_malicious' AND i.id != $1` race-prone check; concurrent dismiss_malicious for two reports by the same reporter can both see priorCount=0 and both record '1st offense' warnings instead of one warning and one restriction.",
+      "evidence": "Lines 1263-1275: the COUNT is not held under a row lock on the owner. Two concurrent transactions can both read priorCount=0, both insert an inbox_events, and neither apply the 24h restriction. This is a small race window (single SQL statement) but it exists.",
+      "suggested_fix": "Either (a) add `FOR UPDATE` on the reporter owner row, or (b) re-check after UPDATE and skip if `owners.restricted_until > now()`. Currently acceptable at MVP scale."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1045 PATCH /v1/moderation/incidents handler entry",
+      "problem": "The PATCH handler does not pass through `installValidation` hook's Zod validation — it relies on validation.ts having registered the schema for the route. If someone removes the entry from validation.ts the handler will accept arbitrary payloads silently.",
+      "evidence": "Looking at validation.ts line 42: `['PATCH', /^\\/v1\\/moderation\\/incidents\\/[^/]+$/, z.object(...)`. The handler at app.ts:1104 does not call `parseBody` (which doesn't exist anyway); the validation only happens because validation.ts pre-hooks it.",
+      "suggested_fix": "Add a runtime guard in tests (the integration tests do exercise validation, line 451-460 in the test), or add an inline assertion `if (b.action && !VALID_ACTIONS.has(b.action)) return fail(...)` as a belt-and-suspenders."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/test/moderation-sanctions.test.ts:418-522 AC-3 Appeals",
+      "problem": "AC-3 tests the 409 double-appeal guard but only serially (submit → expect 200, submit → expect 409); no concurrent submission test exists to confirm the FOR UPDATE locking actually prevents the race.",
+      "evidence": "The 4 test invocations at lines 451, 488, 502, 514 are all sequential. The current implementation handles the race correctly via FOR UPDATE, but there is no regression test to catch a future refactor that drops the lock.",
+      "suggested_fix": "Add a concurrent test using `Promise.all([appeal1, appeal2])` and assert exactly one 200 and one 409."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:467-493 cli.js 'report' command",
+      "problem": "`--reason` is silently accepted as a fallback for `--explanation`, but the canonical flag is `--reason`. This is a minor UX inconsistency.",
+      "evidence": "cli.js line 474: `const reason = option('reason') || option('explanation')`. The PRD §2.7 says `--reason`. The fallback means help text should mention both.",
+      "suggested_fix": "Either drop the `--explanation` fallback or document it in the SKILL.md section. Currently undocumented."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/src/app.ts:1283-1296 dismiss_malicious 24h SQL",
+      "problem": "The hard-coded `interval '24 hours'` for the malicious-penalty is a magic constant that the PRD does not specify.",
+      "evidence": "app.ts line 1283: `SELECT (now() + interval '24 hours') AS exp`. The plan §1.4 says '24 hours' once but does not call it a configurable parameter. Other durations come from `duration_sec` user input.",
+      "suggested_fix": "Extract `MALICIOUS_REPORT_PENALTY_HOURS = 24` at module scope with a comment, or accept it as a parameter on the action payload. Same comment applies to the 1-hour report quota interval at line 1058 (`interval '1 hour'`)."
+    },
+    {
+      "severity": "minor",
+      "location": "skills/olimpyx-participant/SKILL.md lines 66-87 (new subsection)",
+      "problem": "The new 'Moderation, Appeals, and Reporting' subsection does not reference D-042 (anti-spam guidance) explicitly, even though the report flow relies on D-042 rules.",
+      "evidence": "Line 89 has 'Avoid spam and repetitive outreach' which is the anti-spam guidance, but the new subsection above it does not cross-reference D-042 or the quota values (10 reports/hour, 1 open report per target). The CLI commands listed in the subsection are correct (`appeal`, `incidents`, `report`) but a learner agent does not see a single source-of-truth pointer.",
+      "suggested_fix": "Add one line: 'These commands implement D-042 anti-spam guidance: 10 reports/hour quota and 1 open report per target. Avoid frivolous reports to prevent automatic sanctions.'"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/client/src/client.js lines 192-218 (diff hunk)",
+      "problem": "The new SDK methods use `String(limit)` for query parameters but the prior SDK uses `String(...)` only for query strings, while body fields are passed as raw JS values.",
+      "evidence": "Line 196 `limit: String(limit)` vs line 209 `headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}` — inconsistent handling of optional vs empty values. The getOwnerIncidents explicitly drops `limit` when falsy, which is good.",
+      "suggested_fix": "Style is acceptable; document the pattern in a brief comment. No fix required."
+    },
+    {
+      "severity": "minor",
+      "location": "apps/server/test/moderation-sanctions.test.ts overall",
+      "problem": "The 643-line test file uses `describe` blocks but the rest of the apps/server/test/ directory uses bare `test()` calls (see auth-guard.test.ts, validation.test.ts). Mixing styles is a minor consistency drift.",
+      "evidence": "`grep '^describe(' apps/server/test/*.test.ts` returns only moderation-sanctions.test.ts:17 and :111. Every other test file uses top-level `test()` exclusively. The pattern does work under node:test, so this is purely stylistic.",
+      "suggested_fix": "Either (a) migrate to bare `test()` for consistency, or (b) accept the new pattern and update other tests to follow. Low priority."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1253-1254 dismiss_malicious",
+      "problem": "`reportRow.reporter_type === 'owner'` and `reportRow.reporter_type === 'agent'` — stringly-typed branch without exhaustive check.",
+      "evidence": "If a future reporter_type is added (e.g. 'moderator' for system reports), this branch silently does nothing.",
+      "suggested_fix": "Handle 'unknown' case explicitly: `else if (reporterOwnerId === null) { /* system or anonymous reporter; no penalty */ }`."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1221 grant_appeal branching",
+      "problem": "The condition `incident.action === 'restrict_owner' || incident.action === 'restrict_owner_temporary' || (!incident.agent_id && incident.owner_id)` is the implicit M6 matrix; it doesn't check `incident.sanction_kind`.",
+      "evidence": "Lines 1221-1231. If a future action sets `sanction_kind = 'permanent_restriction'` without setting `action = 'restrict_owner'` (e.g. via the legacy `dismiss` path being reused), `grant_appeal` would resolve the appeal but not lift the restriction. Currently unreachable.",
+      "suggested_fix": "Either (a) add a defensive `if (incident.sanction_kind === 'permanent_restriction' || ...) cascadeClear(...)` else-branch, or (b) document this dependency in a comment."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1104-1346 PATCH moderator",
+      "problem": "The endpoint signature returns `{ data: r.rows[0] }` (no envelope status), which is inconsistent with `principal`/`app.post('/v1/owners/me/incidents/:id/appeal')` returning `reply.code(200).send({ data: r.rows[0] })` with explicit status code.",
+      "evidence": "Line 1339: `return { data: r.rows[0] };` (defaults to 200). Line 434: `return reply.code(200).send({ data: r.rows[0] });`. Both result in the same wire format but the inconsistency is a minor style drift.",
+      "suggested_fix": "Use one or the other consistently across new routes. Either always `return { data: ... }` or always `reply.code(N).send(...)`."
+    },
+    {
+      "severity": "nit",
+      "location": "apps/server/src/app.ts:1057 POST /v1/reports quota check",
+      "problem": "Quota is enforced per `(reporter_type, reporter_id)`, not per IP. Owner tokens can rotate indefinitely to bypass the quota.",
+      "evidence": "Line 1058: `SELECT count(*)::int AS count FROM reports WHERE reporter_type = $1 AND reporter_id = $2 AND created_at > now() - interval '1 hour'`. The plan §1.5 says 'per caller IP / owner identity' (slash implies either-or) but the implementation only checks owner identity.",
+      "suggested_fix": "Either (a) document the implementation choice in PRD/plan (owner identity only), or (b) add IP fallback as a defense layer. Low priority."
+    }
+  ]
+}

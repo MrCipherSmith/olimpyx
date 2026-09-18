@@ -1,0 +1,67 @@
+{
+  "job": "moderation-sanctions-q-024-2026-09-18",
+  "title": "Moderation Sanctions, Appeals, and Owner Notification Timing (Q-024)",
+  "status": "completed",
+  "phase": "completed",
+  "horizon": "Horizon 2 (Item #6: Q-024)",
+  "created_at": "2026-09-18T05:30:00.000Z",
+  "completed_at": "2026-09-18T06:15:00.000Z",
+  "artifacts": {
+    "prd": "prd.md",
+    "plan": "plan.md",
+    "review": "review.md",
+    "report": "report.md",
+    "state": "state.json"
+  },
+  "phases": {
+    "prd": {
+      "status": "completed",
+      "completed_at": "2026-09-18T05:40:00.000Z"
+    },
+    "review": {
+      "status": "completed",
+      "completed_at": "2026-09-18T05:45:00.000Z",
+      "verdict": "CONDITIONAL_APPROVE"
+    },
+    "plan": {
+      "status": "completed",
+      "completed_at": "2026-09-18T05:52:00.000Z"
+    },
+    "implementation": {
+      "status": "completed",
+      "completed_at": "2026-09-18T06:10:00.000Z"
+    },
+    "verification": {
+      "status": "completed",
+      "completed_at": "2026-09-18T06:15:00.000Z"
+    },
+    "review_and_fixes": {
+      "status": "completed",
+      "completed_at": "2026-09-18T09:10:00.000Z",
+      "verdict": "APPROVE",
+      "findings_closed": [
+        "M1: Database schema additions & CONCURRENTLY index execution",
+        "M2: Moderator token auth & startup configuration check",
+        "M3: Pure SQL zero-write auto-restoration & owner exemption paths",
+        "M4: Partial index on pending appeals with CONCURRENTLY",
+        "M5: Graduated moderator actions with duration validation",
+        "M6: Grant/deny appeal matrix with cascading reversals",
+        "M7: Dismiss malicious penalty with reporter owner resolution & concurrency lock",
+        "M8: Anti-spam deduplication (409) and quota (429)",
+        "F-1 (blocker): CONCURRENTLY index migrations outside multi-statement string",
+        "F-2 (major): Documented self-report policy and contract alignment with mvp.test.ts:206",
+        "F-3 (major): Added supporting index idx_incidents_owner_created",
+        "F-4 (major): Refactored PATCH handler deduplicating 3x UPDATE via applyOwnerRestriction helper",
+        "F-5 (minor): Eliminated dead defensive defaults in PATCH handler",
+        "F-6 (nit): Deduplicated inbox event emission on self-reports",
+        "F-7 (nit): Added startup warning for unset MODERATOR_TOKEN"
+      ]
+    }
+  },
+  "scope": [
+    "apps/server: graduated sanctions (warn, temporary_restriction, permanent_restriction), zero-write auto-restoration in principal(), owner incidents and appeals endpoints, grant/deny appeal matrix, report deduplication, quota, and malicious report penalty",
+    "packages/client: SDK and CLI for incidents, appeal, and report with credential redaction",
+    "skills/olimpyx-participant: guidance for moderation sanctions, appeals, and responsible reporting",
+    "tests: comprehensive server test suite apps/server/test/moderation-sanctions.test.ts and client tests"
+  ]
+}
