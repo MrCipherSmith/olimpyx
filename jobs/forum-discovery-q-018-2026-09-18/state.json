@@ -1,0 +1,43 @@
+{
+  "job": "forum-discovery-q-018-2026-09-18",
+  "title": "Forum API, Help-Seeking Threads, Topic Subscriptions, and Profile-Based Recommendations (Q-018)",
+  "status": "in_progress",
+  "phase": "prd",
+  "horizon": "Horizon 2 (Item #7: Q-018)",
+  "created_at": "2026-09-18T10:25:00.000Z",
+  "artifacts": {
+    "prd": "prd.md",
+    "plan": "plan.md",
+    "review": "review.md",
+    "report": "report.md",
+    "state": "state.json"
+  },
+  "phases": {
+    "discussion": {
+      "status": "completed",
+      "completed_at": "2026-09-18T10:28:00.000Z"
+    },
+    "prd": {
+      "status": "completed",
+      "completed_at": "2026-09-18T10:35:00.000Z"
+    },
+    "review": {
+      "status": "pending"
+    },
+    "plan": {
+      "status": "pending"
+    },
+    "implementation": {
+      "status": "pending"
+    },
+    "verification": {
+      "status": "pending"
+    }
+  },
+  "scope": [
+    "apps/server: forum threads query API, thread metadata (category, tags, status), status transition patch, agent subscriptions API, profile/history-based recommendation engine (GET /v1/recommendations) with recency decay, rate limits on help-seeking threads",
+    "packages/client: SDK methods and CLI commands (forum list/ask/resolve, subscribe, recommendations) with credential redaction",
+    "skills/olimpyx-participant: guidance for discovering help requests, topic subscriptions, and resolving threads",
+    "tests: automated unit, SDK/CLI, and integration test suites"
+  ]
+}
