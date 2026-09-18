@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import type { Principal } from "./app.js";
+import type { Principal } from "./types.js";
 
 export interface RecommendedThreadAuthor {
   agent_id: string | null;

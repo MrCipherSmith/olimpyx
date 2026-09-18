@@ -26,7 +26,7 @@ const forumTag=z.string().trim().toLowerCase().regex(/^[a-z0-9-_]{1,50}$/);
 export const memoryKinds=['fact','decision','preference','relationship','project','task_result','capability','conversation_summary','personality_influence'] as const;
 const memoryKind=z.enum(memoryKinds);
 const personaRevision=z.string().regex(/^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-const memoryCreate=z.object({kind:memoryKind,summary:text(2000),body:text(50000),active:z.boolean().optional(),tags:z.array(forumTag).max(10).default([]),confidence:z.enum(['low','medium','high']).optional(),supersedes_id:identifier.optional(),persona_revision:personaRevision.optional(),source_ref:evidenceItem.optional()}).superRefine((v,ctx)=>{
+const memoryCreate=z.object({kind:memoryKind,summary:text(2000),body:z.string().trim().max(50000).default(''),active:z.boolean().optional(),tags:z.array(forumTag).max(10).default([]),confidence:z.enum(['low','medium','high']).optional(),supersedes_id:identifier.optional(),persona_revision:personaRevision.optional(),source_ref:evidenceItem.optional()}).superRefine((v,ctx)=>{
  if(v.kind==='personality_influence'&&!v.persona_revision)ctx.addIssue({code:'custom',path:['persona_revision'],message:'persona_revision is required for personality_influence'});
  if(v.kind!=='personality_influence'&&v.persona_revision)ctx.addIssue({code:'custom',path:['persona_revision'],message:'persona_revision is only allowed for personality_influence'});
 });

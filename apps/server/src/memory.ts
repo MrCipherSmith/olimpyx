@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import type { Principal } from "./app.js";
+import type { Principal } from "./types.js";
 import { detectSecret } from "./secret-scan.js";
 import type { MemoryCreateInput } from "./validation.js";
 
@@ -8,11 +8,12 @@ import type { MemoryCreateInput } from "./validation.js";
 export const KNOWLEDGE_LIMIT = 500;
 export const INFLUENCE_LIMIT = 50;
 export const WRITES_PER_HOUR = 30;
+export const CONSOLIDATIONS_PER_HOUR = 10;
 const INFLUENCE = "personality_influence";
 const BOOTSTRAP_RECENT = 5;
 
 type Db = Pool | PoolClient;
-type MemoryEventType = "created" | "deduplicated" | "superseded" | "archived" | "reactivated" | "consolidated" | "rolled_back";
+type MemoryEventType = "created" | "superseded" | "archived" | "reactivated" | "consolidated" | "rolled_back";
 
 const newId = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 
@@ -28,8 +29,21 @@ export function assertNoSecrets(values: unknown[]) {
   if (kind) throw new MemoryError(422, "secret_detected", `Memory content refused: detected ${kind}. Remove the secret; credentials must never be stored in memory.`, { kind });
 }
 
-export function computeMemoryFingerprint(kind: string, summary: string) {
-  return crypto.createHash("sha256").update(`${kind}:${summary.trim().toLowerCase().replace(/\s+/g, " ")}`).digest("hex");
+/** Influences are fingerprinted per persona revision so the same influence may be re-recorded under a new revision. */
+export function computeMemoryFingerprint(kind: string, summary: string, personaRevision?: string | null) {
+  const normalized = summary.trim().toLowerCase().replace(/\s+/g, " ");
+  const scope = kind === INFLUENCE ? `${kind}:${personaRevision ?? ""}` : kind;
+  return crypto.createHash("sha256").update(`${scope}:${normalized}`).digest("hex");
+}
+
+/** Reads the wall clock after lockAgentMemory() so timestamps order after any consolidation the caller waited behind. */
+async function lockedNow(client: PoolClient): Promise<string> {
+  return (await client.query("SELECT clock_timestamp()::text t")).rows[0].t;
+}
+
+function quotaExceeded(what: string, limit: number, retryRaw: unknown) {
+  const retry = Math.max(1, Number(retryRaw) || 1);
+  return new MemoryError(429, "quota_exceeded", `${what} quota exceeded: maximum ${limit} per hour`, { retry_after_sec: retry }, { "Retry-After": String(retry) });
 }
 
 export const escapeLike = (value: string) => value.replace(/[\\%_]/g, (m) => `\\${m}`);
@@ -78,26 +92,22 @@ export async function writeMemory(client: PoolClient, p: Principal, agentId: str
     if (!target.active) throw new MemoryError(409, "memory_not_active", "Superseded memory is not active");
     if (target.kind !== input.kind) throw new MemoryError(409, "kind_mismatch", "A memory can only be superseded by one of the same kind");
   }
-  const fingerprint = computeMemoryFingerprint(input.kind, input.summary);
+  const at = await lockedNow(client);
+  const fingerprint = computeMemoryFingerprint(input.kind, input.summary, input.persona_revision);
   if (!target) {
-    const dup = (await client.query("SELECT * FROM memories WHERE agent_id=$1 AND fingerprint=$2 AND active AND created_at>now()-interval '24 hours' ORDER BY created_at DESC,id DESC LIMIT 1", [agentId, fingerprint])).rows[0];
-    if (dup) {
-      await recordMemoryEvent(client, { agentId, type: "deduplicated", principal: p, memoryIds: [dup.id] });
-      return { status: 200, data: { ...memoryFrom(dup), deduplicated: true } };
-    }
+    // A deduplicated write returns the existing record and writes nothing, not even an audit row.
+    const dup = (await client.query("SELECT * FROM memories WHERE agent_id=$1 AND fingerprint=$2 AND active AND created_at>$3::timestamptz-interval '24 hours' ORDER BY created_at DESC,id DESC LIMIT 1", [agentId, fingerprint, at])).rows[0];
+    if (dup) return { status: 200, data: { ...memoryFrom(dup), deduplicated: true } };
   }
-  const rate = (await client.query("SELECT count(*)::int n,ceil(extract(epoch FROM min(created_at)+interval '1 hour'-now()))::int retry FROM memories WHERE agent_id=$1 AND created_at>now()-interval '1 hour'", [agentId])).rows[0];
-  if (Number(rate.n) >= WRITES_PER_HOUR) {
-    const retry = Math.max(1, Number(rate.retry) || 1);
-    throw new MemoryError(429, "quota_exceeded", `Memory write quota exceeded: maximum ${WRITES_PER_HOUR} memories per hour`, { retry_after_sec: retry }, { "Retry-After": String(retry) });
-  }
+  const rate = (await client.query("SELECT count(*)::int n,ceil(extract(epoch FROM min(created_at)+interval '1 hour'-$2::timestamptz))::int retry FROM memories WHERE agent_id=$1 AND created_at>$2::timestamptz-interval '1 hour'", [agentId, at])).rows[0];
+  if (Number(rate.n) >= WRITES_PER_HOUR) throw quotaExceeded("Memory write", WRITES_PER_HOUR, rate.retry);
   const active = input.active ?? true;
   if (!target && active) await assertCapacity(client, agentId, input.kind);
   const mid = newId("mem");
   const inserted = (await client.query(
     `INSERT INTO memories(id,agent_id,kind,summary,body,active,source_ref,created_at,tags,confidence,persona_revision,supersedes_id,fingerprint,archived_reason)
-     VALUES($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11,$12,$13) RETURNING *`,
-    [mid, agentId, input.kind, input.summary, input.body, active, input.source_ref === undefined ? null : JSON.stringify(input.source_ref), JSON.stringify([...new Set(input.tags ?? [])]), input.confidence ?? null, input.persona_revision ?? null, target?.id ?? null, fingerprint, active ? null : "manual"]
+     VALUES($1,$2,$3,$4,$5,$6,$7,$14::timestamptz,$8,$9,$10,$11,$12,$13) RETURNING *`,
+    [mid, agentId, input.kind, input.summary, input.body ?? "", active, input.source_ref === undefined ? null : JSON.stringify(input.source_ref), JSON.stringify([...new Set(input.tags ?? [])]), input.confidence ?? null, input.persona_revision ?? null, target?.id ?? null, fingerprint, active ? null : "manual", at]
   )).rows[0];
   await recordMemoryEvent(client, { agentId, type: "created", principal: p, memoryIds: [mid] });
   if (target) {
@@ -164,12 +174,15 @@ export async function setActive(client: PoolClient, p: Principal, agentId: strin
 /** PRD §3.5. The caller owns the transaction and must hold lockAgentMemory(). */
 export async function consolidate(client: PoolClient, p: Principal, agentId: string, input: { summary: string; covered_until?: string }) {
   assertNoSecrets([input.summary]);
-  // Bounds are compared in SQL to keep microsecond precision; clock_timestamp() is read after the lock is held.
+  // Bounds are compared in SQL to keep microsecond precision; the clock is read after the lock is held.
+  const at = await lockedNow(client);
+  const rate = (await client.query("SELECT count(*)::int n,ceil(extract(epoch FROM min(created_at)+interval '1 hour'-$2::timestamptz))::int retry FROM memory_summaries WHERE agent_id=$1 AND created_at>$2::timestamptz-interval '1 hour'", [agentId, at])).rows[0];
+  if (Number(rate.n) >= CONSOLIDATIONS_PER_HOUR) throw quotaExceeded("Memory consolidation", CONSOLIDATIONS_PER_HOUR, rate.retry);
   const bounds = (await client.query(
     `SELECT c.cu::text cu,c.cu>x.t future,(prev.covered_until IS NOT NULL AND c.cu<prev.covered_until) too_early,coalesce(prev.revision,0)+1 revision
-     FROM (SELECT clock_timestamp() t) x CROSS JOIN LATERAL (SELECT coalesce($2::timestamptz,x.t) cu) c
+     FROM (SELECT $3::timestamptz t) x CROSS JOIN LATERAL (SELECT coalesce($2::timestamptz,x.t) cu) c
      LEFT JOIN LATERAL (SELECT revision,covered_until FROM memory_summaries WHERE agent_id=$1 ORDER BY revision DESC LIMIT 1) prev ON true`,
-    [agentId, input.covered_until ?? null]
+    [agentId, input.covered_until ?? null, at]
   )).rows[0];
   if (bounds.future) throw new MemoryError(400, "bad_request", "covered_until must not be in the future");
   if (bounds.too_early) throw new MemoryError(400, "bad_request", "covered_until must not precede the previous consolidation");
@@ -179,8 +192,8 @@ export async function consolidate(client: PoolClient, p: Principal, agentId: str
     [agentId, sid, INFLUENCE, bounds.cu]
   );
   const summary = (await client.query(
-    "INSERT INTO memory_summaries(id,agent_id,revision,summary,covered_until,archived_memory_count,created_by_type,created_by_id) VALUES($1,$2,$3,$4,$5::timestamptz,$6,$7,$8) RETURNING *",
-    [sid, agentId, Number(bounds.revision), input.summary, bounds.cu, archived.rowCount ?? 0, p.type, p.id]
+    "INSERT INTO memory_summaries(id,agent_id,revision,summary,covered_until,archived_memory_count,created_by_type,created_by_id,created_at) VALUES($1,$2,$3,$4,$5::timestamptz,$6,$7,$8,$9::timestamptz) RETURNING *",
+    [sid, agentId, Number(bounds.revision), input.summary, bounds.cu, archived.rowCount ?? 0, p.type, p.id, at]
   )).rows[0];
   await recordMemoryEvent(client, { agentId, type: "consolidated", principal: p, memoryIds: archived.rows.map((x) => x.id), summaryId: sid });
   return { summary_id: sid, revision: summary.revision, covered_until: summary.covered_until, archived_memory_count: summary.archived_memory_count, created_at: summary.created_at };
@@ -196,6 +209,8 @@ export async function rollbackInfluences(client: PoolClient, p: Principal, agent
     [agentId, INFLUENCE, input.reverted_persona_revisions, input.target_created_at]
   );
   const ids = r.rows.map((x) => x.id as string);
+  // A no-op rollback changes nothing, so it is neither audited nor announced.
+  if (!ids.length) return { rolled_back_count: 0, memory_ids: ids, to_persona_revision: input.to_persona_revision };
   await recordMemoryEvent(client, { agentId, type: "rolled_back", principal: p, memoryIds: ids, reason: input.reason ?? null });
   await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'memory.rolled_back','agent',$3)", [newId("evt"), p.ownerId, agentId]);
   await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'memory.rolled_back','agent',$2)", [newId("evt"), agentId]);

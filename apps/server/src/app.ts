@@ -6,6 +6,7 @@ import { installValidation, memoryEventsQuery, memoryListQuery } from "./validat
 import { createEmbeddingAdapter, ensureEmbeddingSchema, type EmbeddingStatus } from "./embeddings.js";
 import { AuthRateLimiter, type RateLimitResult } from "./auth-guard.js";
 import { recommendThreads } from "./recommendations.js";
+import type { Principal } from "./types.js";
 import { MemoryError, buildMemoryBootstrap, consolidate, getMemory, listMemories, listMemoryEvents, lockAgentMemory, rollbackInfluences, setActive, writeMemory } from "./memory.js";
 
 const scrypt = promisify(crypto.scrypt);
@@ -107,11 +108,15 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS archived_reason text CHECK (archived_reason IN ('superseded','consolidated','personality_rollback','manual'));
     ALTER TABLE memories ADD COLUMN IF NOT EXISTS search_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(summary,'') || ' ' || coalesce(body,''))) STORED;
     UPDATE memories SET archived_reason='manual' WHERE active=false AND archived_reason IS NULL;
+    UPDATE memories SET archived_reason=NULL WHERE active AND archived_reason IS NOT NULL;
+    ALTER TABLE memories DROP CONSTRAINT IF EXISTS chk_memories_archived_reason;
+    ALTER TABLE memories ADD CONSTRAINT chk_memories_archived_reason CHECK (active = (archived_reason IS NULL));
     CREATE TABLE IF NOT EXISTS memory_summaries (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, revision integer NOT NULL, summary text NOT NULL, covered_until timestamptz NOT NULL, archived_memory_count integer NOT NULL, created_by_type text NOT NULL, created_by_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(agent_id, revision));
     CREATE TABLE IF NOT EXISTS memory_events (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, type text NOT NULL, actor_type text NOT NULL, actor_id text NOT NULL, memory_ids jsonb NOT NULL DEFAULT '[]'::jsonb, summary_id text, reason text, created_at timestamptz NOT NULL DEFAULT now());
     CREATE INDEX IF NOT EXISTS idx_memories_agent_active_kind ON memories(agent_id, active, kind, created_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_fingerprint ON memories(agent_id, fingerprint, created_at DESC) WHERE active;
     CREATE INDEX IF NOT EXISTS idx_memories_influence_rev ON memories(agent_id, persona_revision) WHERE kind='personality_influence' AND active;
+    CREATE INDEX IF NOT EXISTS idx_memories_agent_created ON memories(agent_id, created_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories USING gin(tags);
     CREATE INDEX IF NOT EXISTS idx_memories_search ON memories USING gin(search_tsv);
     CREATE INDEX IF NOT EXISTS idx_memory_summaries_agent ON memory_summaries(agent_id, revision DESC);
@@ -257,7 +262,7 @@ export function evaluateReviewQuorum(
   };
 }
 
-export type Principal = { type: "owner" | "agent"; id: string; ownerId: string; name: string; tokenType: "owner" | "session" | "agent"; sessionId?: string };
+export type { Principal } from "./types.js";
 export type OlimpyxApp = FastifyInstance & { pg: Pool };
 
 export async function createApp(options: { databaseUrl?: string } = {}): Promise<OlimpyxApp> {
@@ -310,7 +315,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   }
   function isModerator(req:FastifyRequest,reply:any){const configured=process.env.MODERATOR_TOKEN,raw=req.headers.authorization?.replace(/^Bearer\s+/i,"");if(!configured||!raw||!crypto.timingSafeEqual(Buffer.from(hashToken(configured)),Buffer.from(hashToken(raw)))){fail(reply,401,"unauthorized","Moderator authentication required");return false}return true}
   const bodyHash = (body: unknown) => crypto.createHash("sha256").update(JSON.stringify(body ?? {})).digest("hex");
-  async function idem(req: FastifyRequest, reply: any, actorKey: string, work: () => Promise<{ status: number; data: unknown }>) {
+  /** `work` may run its queries on `client` (the idempotency transaction) so its effects and the stored response commit atomically. */
+  async function idem(req: FastifyRequest, reply: any, actorKey: string, work: (client: PoolClient) => Promise<{ status: number; data: unknown }>) {
     const key = req.headers["idempotency-key"] as string | undefined;
     if (!key || key.length > 128) return fail(reply, 400, "idempotency_key_required", "Valid Idempotency-Key required");
     const hash = bodyHash({ method: req.method, path: req.url.split("?")[0], body: req.body });
@@ -324,8 +330,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         if (old.rows[0].body_hash !== hash) return fail(reply, 409, "idempotency_conflict", "Key was used with a different body");
         return reply.code(old.rows[0].status).send(old.rows[0].response);
       }
-      const result = await work();
-      if (reply.sent) return;
+      const result = await work(lock);
+      if (reply.sent) { await lock.query("ROLLBACK"); return; }
       const response = { data: result.data };
       const serialized = JSON.stringify(response);
       const credentialBearing = /"(?:access_token|agent_token|session_token|enrollment_token)"\s*:/.test(serialized);
@@ -514,6 +520,11 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   const queryFail=(reply:any,error:{issues:Array<{path:PropertyKey[];message:string}>})=>fail(reply,400,"validation_error","Invalid query parameters",{details:error.issues.map(i=>({path:i.path.join("."),reason:i.message}))});
   async function memoryAccess(req:FastifyRequest,reply:any,allowed?:Array<Principal["tokenType"]>){const p=await principal(req,reply,allowed);if(!p)return null;const aid=(req.params as any).agentId;if(!await ownsAgent(p,aid)){fail(reply,403,"forbidden","Private memory");return null}return{p,aid}}
   async function memoryRead<T>(reply:any,work:()=>Promise<T>){try{return await work()}catch(e){if(e instanceof MemoryError)return memoryFail(reply,e);throw e}}
+  /** Memory mutation under an Idempotency-Key: effects and key record share one transaction; MemoryErrors roll back and are never cached. */
+  async function memoryIdem(req:FastifyRequest,reply:any,a:{p:Principal;aid:string},work:(client:PoolClient)=>Promise<{status:number;data:unknown}>){
+    try{return await idem(req,reply,`${a.p.type}:${a.p.id}`,async client=>{await lockAgentMemory(client,a.aid);return work(client)})}
+    catch(e){if(e instanceof MemoryError)return memoryFail(reply,e);throw e}
+  }
   async function memoryTx<T>(reply:any,aid:string,work:(client:PoolClient)=>Promise<T>):Promise<T|undefined>{
     const client=await app.pg.connect();
     try{await client.query("BEGIN");await lockAgentMemory(client,aid);const result=await work(client);await client.query("COMMIT");return result}
@@ -523,10 +534,10 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.get("/v1/agents/:agentId/memory",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;const q=memoryListQuery.safeParse(req.query);if(!q.success)return queryFail(reply,q.error);return memoryRead(reply,()=>listMemories(app.pg,a.aid,q.data))});
   app.get("/v1/agents/:agentId/memory/events",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;const q=memoryEventsQuery.safeParse(req.query);if(!q.success)return queryFail(reply,q.error);return memoryRead(reply,()=>listMemoryEvents(app.pg,a.aid,q.data))});
   app.get("/v1/agents/:agentId/memory/:memoryId",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryRead(reply,async()=>({data:await getMemory(app.pg,a.aid,(req.params as any).memoryId)}))});
-  app.post("/v1/agents/:agentId/memory",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return idem(req,reply,`${a.p.type}:${a.p.id}`,async()=>await memoryTx(reply,a.aid,c=>writeMemory(c,a.p,a.aid,req.body as any))??{status:0,data:null})});
+  app.post("/v1/agents/:agentId/memory",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,c=>writeMemory(c,a.p,a.aid,req.body as any))});
   app.patch("/v1/agents/:agentId/memory/:memoryId",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;const data=await memoryTx(reply,a.aid,c=>setActive(c,a.p,a.aid,(req.params as any).memoryId,(req.body as any).active));return data&&{data}});
-  app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return idem(req,reply,`${a.p.type}:${a.p.id}`,async()=>{const data=await memoryTx(reply,a.aid,c=>consolidate(c,a.p,a.aid,req.body as any));return{status:201,data}})});
-  app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return idem(req,reply,`${a.p.type}:${a.p.id}`,async()=>{const data=await memoryTx(reply,a.aid,c=>rollbackInfluences(c,a.p,a.aid,req.body as any));return{status:200,data}})});
+  app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:201,data:await consolidate(c,a.p,a.aid,req.body as any)}))});
+  app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:200,data:await rollbackInfluences(c,a.p,a.aid,req.body as any)}))});
 
   app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async()=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;const r=await app.pg.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,now(),now()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
   app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});

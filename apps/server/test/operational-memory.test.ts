@@ -125,6 +125,10 @@ test("AC-1/AC-12 categories, persona_revision rule and optional active", async (
   assert.equal(archived.statusCode, 201);
   assert.equal(archived.json().data.active, false);
   assert.equal(archived.json().data.archived_reason, "manual");
+  const bodyless = await save(a.session, a.agentId, { kind: "fact", summary: "no body given" });
+  assert.equal(bodyless.statusCode, 201, bodyless.body);
+  assert.equal(bodyless.json().data.body, "");
+  assert.equal((await save(a.session, a.agentId, { kind: "fact", summary: "too long body", body: "x".repeat(50001) })).statusCode, 400);
   const full = await save(ownerToken, a.agentId, { kind: "decision", summary: "full shape", body: "b", tags: ["Postgres", "search"], confidence: "high", source_ref: { kind: "message", id_or_url: "msg_abc" } });
   assert.equal(full.statusCode, 201);
   assert.deepEqual(full.json().data.tags, ["postgres", "search"]);
@@ -170,6 +174,8 @@ test("AC-3 dedup returns existing record, writes nothing and does not consume ra
   await seed(a.agentId, "dedup", 28, { age: "10 minutes" });
   const first = await save(a.session, a.agentId, { kind: "fact", summary: "The sky is blue", body: "b" });
   assert.equal(first.statusCode, 201);
+  const eventCount = async () => Number((await app!.pg.query("SELECT count(*) n FROM memory_events WHERE agent_id=$1", [a.agentId])).rows[0].n);
+  const eventsBefore = await eventCount();
   for (let i = 0; i < 3; i++) {
     const dup = await save(a.session, a.agentId, { kind: "fact", summary: "  the SKY   is\tblue ", body: "other body" });
     assert.equal(dup.statusCode, 200, dup.body);
@@ -177,6 +183,7 @@ test("AC-3 dedup returns existing record, writes nothing and does not consume ra
     assert.equal(dup.json().data.memory_id, first.json().data.memory_id);
   }
   assert.equal(Number((await app!.pg.query("SELECT count(*) n FROM memories WHERE agent_id=$1", [a.agentId])).rows[0].n), 29);
+  assert.equal(await eventCount(), eventsBefore, "deduplicated writes must not insert audit rows");
   const differentKind = await save(a.session, a.agentId, { kind: "decision", summary: "The sky is blue", body: "b" });
   assert.equal(differentKind.statusCode, 201);
   const superseding = await save(a.session, a.agentId, { kind: "fact", summary: "The sky is blue", body: "b", supersedes_id: first.json().data.memory_id });
@@ -272,7 +279,7 @@ test("AC-6 consolidation revisions, bounds, concurrency and selective bootstrap"
   assert.equal(emptyBoot.memory.summary_id, null);
 
   const mvp = await newAgent(ownerToken, "mvp");
-  await app!.pg.query(`INSERT INTO memories(id,agent_id,kind,summary,body,active,created_at) SELECT 'mem_mvp_'||n,$1,CASE WHEN n%3=0 THEN 'personality_influence' ELSE 'fact' END,'mvp summary '||n,'b',n<>5,now()-(n||' minutes')::interval FROM generate_series(1,14) n`, [mvp.agentId]);
+  await app!.pg.query(`INSERT INTO memories(id,agent_id,kind,summary,body,active,archived_reason,created_at) SELECT 'mem_mvp_'||n,$1,CASE WHEN n%3=0 THEN 'personality_influence' ELSE 'fact' END,'mvp summary '||n,'b',n<>5,CASE WHEN n=5 THEN 'manual' END,now()-(n||' minutes')::interval FROM generate_series(1,14) n`, [mvp.agentId]);
   const expected = (await app!.pg.query("SELECT summary FROM memories WHERE agent_id=$1 AND active=true ORDER BY created_at DESC LIMIT 10", [mvp.agentId])).rows.map(x => x.summary).join("\n");
   const mvpBoot = (await app!.inject({ method: "GET", url: "/v1/bootstrap", headers: auth(mvp.session) })).json().data;
   assert.equal(mvpBoot.memory_summary, expected);
@@ -349,6 +356,9 @@ test("AC-7 owner rollback archives reverted influences only and notifies", async
   const replay = await app!.inject({ method: "POST", url: `/v1/agents/${a.agentId}/memory/rollback`, headers: mutate(ownerToken, "rollback-replay"), payload });
   assert.equal(replay.statusCode, 200);
   assert.equal(replay.json().data.rolled_back_count, 0);
+  assert.deepEqual(replay.json().data.memory_ids, []);
+  assert.equal(Number((await app!.pg.query("SELECT count(*) n FROM memory_events WHERE agent_id=$1 AND type='rolled_back'", [a.agentId])).rows[0].n), 1, "no audit row for a no-op rollback");
+  assert.equal(Number((await app!.pg.query("SELECT count(*) n FROM inbox_events WHERE type='memory.rolled_back' AND resource_id=$1", [a.agentId])).rows[0].n), 2, "no inbox events for a no-op rollback");
 });
 
 test("AC-8 rate limit and capacity limits, including under concurrency", async (t) => {
@@ -449,10 +459,157 @@ test("AC-10 access control on every memory endpoint and audit log", async (t) =>
   assert.equal(paged.json().data.length, 1);
 });
 
-test("migration is idempotent and backfills legacy archived rows", async (t) => {
+test("influence fingerprint includes persona_revision", async (t) => {
   if (!ready(t)) return;
-  const a = await newAgent(ownerToken, "legacy");
-  await app!.pg.query("INSERT INTO memories(id,agent_id,kind,summary,body,active) VALUES('mem_legacy_inactive',$1,'fact','legacy','b',false)", [a.agentId]);
+  const a = await newAgent(ownerToken, "inf-fingerprint");
+  const r1 = rev(1789000000000), r2 = rev(1789000001000);
+  const first = await save(a.session, a.agentId, { kind: "personality_influence", summary: "Prefer short answers", persona_revision: r1 });
+  assert.equal(first.statusCode, 201, first.body);
+  const same = await save(a.session, a.agentId, { kind: "personality_influence", summary: "prefer  SHORT answers", persona_revision: r1 });
+  assert.equal(same.statusCode, 200, same.body);
+  assert.equal(same.json().data.memory_id, first.json().data.memory_id);
+  const next = await save(a.session, a.agentId, { kind: "personality_influence", summary: "Prefer short answers", persona_revision: r2 });
+  assert.equal(next.statusCode, 201, next.body);
+  assert.notEqual(next.json().data.memory_id, first.json().data.memory_id);
+  assert.equal(next.json().data.persona_revision, r2);
+});
+
+test("a write that waited behind a consolidation is timestamped after it and stays visible", async (t) => {
+  if (!ready(t)) return;
+  const a = await newAgent(ownerToken, "lock-order");
+  const holder = await app!.pg.connect();
+  let pending: ReturnType<typeof save> | null = null;
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`memory:${a.agentId}`]);
+    pending = save(a.session, a.agentId, { kind: "fact", summary: "written behind consolidation", body: "b" });
+    let waiting = false;
+    for (let i = 0; i < 200 && !waiting; i++) {
+      const w = await app!.pg.query(
+        "SELECT count(*)::int n FROM pg_locks WHERE locktype='advisory' AND NOT granted AND objsubid=1 AND objid::bigint=(hashtext($1)::bigint & 4294967295)",
+        [`memory:${a.agentId}`]
+      );
+      waiting = w.rows[0].n > 0;
+      if (!waiting) await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(waiting, "memory write should be blocked on the agent memory lock");
+    await new Promise((r) => setTimeout(r, 30));
+    // Simulates a consolidation that commits while the write is waiting on the lock.
+    await holder.query(
+      "INSERT INTO memory_summaries(id,agent_id,revision,summary,covered_until,archived_memory_count,created_by_type,created_by_id) VALUES($1,$2,1,'held consolidation',clock_timestamp(),0,'owner','own_test')",
+      [`msum_held_${randomUUID().replaceAll("-", "")}`, a.agentId]
+    );
+    await holder.query("COMMIT");
+  } catch (e) {
+    await holder.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    holder.release();
+  }
+  const written = await pending!;
+  assert.equal(written.statusCode, 201, written.body);
+  const boot = (await app!.inject({ method: "GET", url: "/v1/bootstrap", headers: auth(a.session) })).json().data;
+  assert.ok(boot.memory_summary.startsWith("held consolidation"));
+  assert.ok(boot.memory.recent_memory_ids.includes(written.json().data.memory_id), "write must be newer than covered_until");
+  assert.ok(boot.memory_summary.includes("written behind consolidation"));
+});
+
+test("consolidation is rate limited per agent and errors are not cached by idempotency", async (t) => {
+  if (!ready(t)) return;
+  const a = await newAgent(ownerToken, "cons-rate");
+  await app!.pg.query(
+    `INSERT INTO memory_summaries(id,agent_id,revision,summary,covered_until,archived_memory_count,created_by_type,created_by_id,created_at)
+     SELECT 'msum_rate_'||$2||'_'||n,$1,n,'s '||n,now()-interval '2 hours',0,'agent',$1,now()-interval '10 minutes' FROM generate_series(1,10) n`,
+    [a.agentId, a.agentId.slice(-8)]
+  );
+  const k = key("cons-rate");
+  const limited = await consolidate(a.session, a.agentId, { summary: "eleventh" }, k);
+  assert.equal(limited.statusCode, 429, limited.body);
+  assert.equal(limited.json().error.code, "quota_exceeded");
+  const retry = Number(limited.headers["retry-after"]);
+  assert.ok(retry >= 2990 && retry <= 3600, String(retry));
+  assert.equal(limited.json().error.details.retry_after_sec, retry);
+  await app!.pg.query("UPDATE memory_summaries SET created_at=now()-interval '2 hours' WHERE agent_id=$1", [a.agentId]);
+  const ok = await consolidate(a.session, a.agentId, { summary: "eleventh" }, k);
+  assert.equal(ok.statusCode, 201, ok.body);
+  assert.equal(ok.json().data.revision, 11);
+});
+
+test("replaying a consolidate Idempotency-Key returns the same revision without a second row", async (t) => {
+  if (!ready(t)) return;
+  const a = await newAgent(ownerToken, "cons-replay");
+  await seed(a.agentId, "consreplay", 3, { age: "3 hours" });
+  const k = key("cons-replay");
+  const first = await consolidate(a.session, a.agentId, { summary: "replayed summary" }, k);
+  assert.equal(first.statusCode, 201, first.body);
+  const again = await consolidate(a.session, a.agentId, { summary: "replayed summary" }, k);
+  assert.equal(again.statusCode, 201, again.body);
+  assert.equal(again.json().data.summary_id, first.json().data.summary_id);
+  assert.equal(again.json().data.revision, first.json().data.revision);
+  assert.equal(Number((await app!.pg.query("SELECT count(*) n FROM memory_summaries WHERE agent_id=$1", [a.agentId])).rows[0].n), 1);
+  assert.equal(Number((await app!.pg.query("SELECT count(*) n FROM memory_events WHERE agent_id=$1 AND type='consolidated'", [a.agentId])).rows[0].n), 1);
+  const racedKey = key("cons-race");
+  const raced = await Promise.all([1, 2, 3].map(() => consolidate(a.session, a.agentId, { summary: "raced summary" }, racedKey)));
+  assert.deepEqual(raced.map((r) => r.statusCode), [201, 201, 201]);
+  assert.equal(new Set(raced.map((r) => r.json().data.summary_id)).size, 1);
+  assert.equal(Number((await app!.pg.query("SELECT count(*) n FROM memory_summaries WHERE agent_id=$1", [a.agentId])).rows[0].n), 2);
+});
+
+test("active and archived_reason are kept consistent by a CHECK constraint", async (t) => {
+  if (!ready(t)) return;
+  const a = await newAgent(ownerToken, "check");
+  await assert.rejects(
+    app!.pg.query("INSERT INTO memories(id,agent_id,kind,summary,body,active) VALUES('mem_check_inactive',$1,'fact','x','b',false)", [a.agentId]),
+    (e: any) => e.code === "23514"
+  );
+  await assert.rejects(
+    app!.pg.query("INSERT INTO memories(id,agent_id,kind,summary,body,active,archived_reason) VALUES('mem_check_active',$1,'fact','x','b',true,'manual')", [a.agentId]),
+    (e: any) => e.code === "23514"
+  );
+});
+
+test("migration is idempotent", async (t) => {
+  if (!ready(t)) return;
   await migrate(databaseUrl);
-  assert.equal((await row("mem_legacy_inactive")).archived_reason, "manual");
+  await migrate(databaseUrl);
+  const a = await newAgent(ownerToken, "legacy");
+  assert.equal((await save(a.session, a.agentId, { kind: "fact", summary: "after re-migrate", body: "b" })).statusCode, 201);
+});
+
+test("migration upgrades a pre-Q-008 memories table", async (t) => {
+  if (!ready(t)) return;
+  const legacy = `test_legacy_${randomUUID().replaceAll("-", "")}`;
+  const legacyUrl = new URL(baseUrl);
+  legacyUrl.searchParams.set("options", `-c search_path=${legacy},public`);
+  await admin!.query(`CREATE SCHEMA ${legacy}`);
+  const pool = new Pool({ connectionString: legacyUrl.toString() });
+  try {
+    // Pre-Q-008 DDL copied verbatim from main.
+    await pool.query(`
+      CREATE TABLE owners (id text PRIMARY KEY, email text UNIQUE NOT NULL, password_hash text NOT NULL, display_name text NOT NULL, restricted boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
+      CREATE TABLE agents (id text PRIMARY KEY, owner_id text NOT NULL REFERENCES owners(id), installation_id text NOT NULL, name text NOT NULL, role text NOT NULL, bio text NOT NULL DEFAULT '', interests jsonb NOT NULL DEFAULT '[]', capabilities jsonb NOT NULL DEFAULT '[]', profile_revision integer NOT NULL DEFAULT 1, restricted boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(owner_id, installation_id));
+      CREATE TABLE memories (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id), kind text NOT NULL, summary text NOT NULL, body text NOT NULL, active boolean NOT NULL, source_ref jsonb, created_at timestamptz NOT NULL DEFAULT now());
+      INSERT INTO owners(id,email,password_hash,display_name) VALUES('own_legacy','legacy@example.test','x','Legacy');
+      INSERT INTO agents(id,owner_id,installation_id,name,role) VALUES('agt_legacy','own_legacy','inst-legacy','Legacy','tester');
+      INSERT INTO memories(id,agent_id,kind,summary,body,active) VALUES
+        ('mem_old_active','agt_legacy','fact','legacy active summary','findable legacy body',true),
+        ('mem_old_inactive','agt_legacy','fact','legacy inactive summary','b',false);
+    `);
+    await migrate(legacyUrl.toString());
+    await migrate(legacyUrl.toString());
+    const cols = (await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='memories'", [legacy])).rows.map((x) => x.column_name);
+    for (const c of ["tags", "confidence", "persona_revision", "supersedes_id", "superseded_by", "consolidated_into", "fingerprint", "archived_reason", "search_tsv"]) assert.ok(cols.includes(c), c);
+    const rows = (await pool.query("SELECT id,active,archived_reason,tags FROM memories ORDER BY id")).rows;
+    assert.deepEqual(rows.map((x) => [x.id, x.active, x.archived_reason, x.tags]), [["mem_old_active", true, null, []], ["mem_old_inactive", false, "manual", []]]);
+    const found = (await pool.query("SELECT id FROM memories WHERE search_tsv @@ websearch_to_tsquery('simple','findable')")).rows.map((x) => x.id);
+    assert.deepEqual(found, ["mem_old_active"]);
+    const check = (await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='chk_memories_archived_reason' AND conrelid=to_regclass($1)", [`${legacy}.memories`])).rows;
+    assert.equal(check.length, 1);
+    assert.equal(check[0].convalidated, true);
+    for (const table of ["memory_summaries", "memory_events"]) assert.ok((await pool.query("SELECT to_regclass($1) r", [`${legacy}.${table}`])).rows[0].r, table);
+    assert.ok((await pool.query("SELECT 1 FROM pg_indexes WHERE schemaname=$1 AND indexname='idx_memories_agent_created'", [legacy])).rowCount);
+  } finally {
+    await pool.end().catch(() => {});
+    await admin!.query(`DROP SCHEMA IF EXISTS ${legacy} CASCADE`).catch(() => {});
+  }
 });
