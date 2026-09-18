@@ -45,6 +45,21 @@ async function mutation(client, method, path, body, explicitKey) {
   await state.completeMutation(pending.fingerprint);
   return result;
 }
+async function tryLoadOwnerToken() {
+  if (process.env.OLIMPYX_OWNER_TOKEN) return process.env.OLIMPYX_OWNER_TOKEN;
+  try { return await state.loadOwnerCredential(); } catch { return null; }
+}
+async function requireOwnerClient() {
+  const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
+  const config = await state.loadConfig();
+  if (!config.serverUrl) throw new Error('Not configured. Run: olimpyx configure --server URL');
+  return new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+}
+async function resolveMemoryAgentId(explicit) {
+  const agentId = explicit ?? (await state.loadConfig()).agentId;
+  if (!agentId) throw new Error('--agent <agentId> is required (or configure a local agentId via enroll)');
+  return agentId;
+}
 
 async function parseJsonOrList(value) {
   if (!value) return [];
@@ -411,11 +426,153 @@ async function main() {
     if (action === 'show') output(await state.currentPersona());
     else if (action === 'history') output(await state.listPersonaRevisions());
     else if (action === 'save') output(await state.savePersona(await jsonInput(args.shift()), option('reason', 'owner edit')));
-    else if (action === 'rollback') output(await state.rollbackPersona(args.shift()));
+    else if (action === 'rollback') {
+      const revision = args.shift();
+      const local = await state.rollbackPersona(revision);
+      const idempotencyKey = `persona-rollback:${revision}`;
+      const config = await state.loadConfig();
+      const agentId = process.env.OLIMPYX_AGENT_ID || config.agentId;
+      const payload = {
+        to_persona_revision: revision,
+        reverted_persona_revisions: local.reverted_persona_revisions,
+        target_created_at: local.target_created_at,
+        reason: option('reason', `Persona rollback to ${revision}`)
+      };
+      const ownerToken = await tryLoadOwnerToken();
+      let server = null;
+      if (ownerToken && agentId) {
+        try {
+          const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+          server = await client.rollbackMemories(agentId, payload, { idempotencyKey });
+        } catch {
+          server = null;
+        }
+      }
+      if (server) {
+        output({ local, server });
+      } else {
+        await state.savePendingMemoryRollback({ idempotencyKey, agentId, payload });
+        output({ local, pending: true, retry_command: 'olimpyx memory rollback --sync' });
+      }
+    }
     else throw new Error('persona actions: show | history | save JSON|@file | rollback REVISION');
     return;
   }
   if (command === 'influence') { const action = args.shift(); if (action !== 'archive') throw new Error('influence action: archive SOURCE'); output(await state.archiveInfluence(args.shift())); return; }
+  if (command === 'memory') {
+    const sub = args.shift();
+    if (sub === 'rollback' && option('sync')) {
+      const pending = await state.pendingMemoryRollbacks();
+      const client = await requireOwnerClient();
+      const results = [];
+      for (const entry of pending) {
+        const result = await client.rollbackMemories(entry.agentId, entry.payload, { idempotencyKey: entry.idempotencyKey });
+        results.push(result);
+        await state.clearPendingMemoryRollback(entry.idempotencyKey);
+      }
+      output(results);
+      return;
+    }
+    if (sub === 'save') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const kind = option('kind');
+      if (!kind) throw new Error('--kind is required');
+      const summary = option('summary') || (option('summary-stdin') ? await stdin() : null);
+      if (!summary) throw new Error('--summary or --summary-stdin is required');
+      const body = option('body');
+      const tags = await parseJsonOrList(option('tags'));
+      const confidence = option('confidence');
+      const supersedesId = option('supersedes');
+      const sourceRef = await jsonInput(option('source-ref'));
+      const inactive = Boolean(option('inactive'));
+      let personaRevision = option('persona-revision');
+      if (kind === 'personality_influence' && !personaRevision) {
+        const persona = await state.currentPersona();
+        personaRevision = persona?.revision;
+      }
+      const payload = {
+        kind,
+        summary,
+        ...(body ? { body } : {}),
+        ...(tags.length ? { tags } : {}),
+        ...(confidence ? { confidence } : {}),
+        ...(supersedesId ? { supersedes_id: supersedesId } : {}),
+        ...(sourceRef ? { source_ref: sourceRef } : {}),
+        ...(personaRevision ? { persona_revision: personaRevision } : {}),
+        ...(inactive ? { active: false } : {})
+      };
+      const explicitKey = option('idempotency-key');
+      const { client } = await activeClient(option('caller-id'));
+      output(await mutation(client, 'POST', `/v1/agents/${encodeURIComponent(agentId)}/memory`, payload, explicitKey));
+      return;
+    }
+    if (sub === 'list') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const { client } = await activeClient(option('caller-id'));
+      output(await client.listMemories(agentId, {
+        status: option('status'), kind: option('kind'), tag: option('tag'), q: option('q'),
+        cursor: option('cursor'), limit: option('limit')
+      }));
+      return;
+    }
+    if (sub === 'get') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const id = option('id');
+      if (!id) throw new Error('--id is required');
+      const { client } = await activeClient(option('caller-id'));
+      output(await client.getMemory(agentId, id));
+      return;
+    }
+    if (sub === 'archive') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const id = option('id');
+      if (!id) throw new Error('--id is required');
+      const { client } = await activeClient(option('caller-id'));
+      output(await client.archiveMemory(agentId, id));
+      return;
+    }
+    if (sub === 'restore') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const id = option('id');
+      if (!id) throw new Error('--id is required');
+      const { client } = await activeClient(option('caller-id'));
+      output(await client.restoreMemory(agentId, id));
+      return;
+    }
+    if (sub === 'consolidate') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const summary = option('summary') || (option('summary-stdin') ? await stdin() : null);
+      if (!summary) throw new Error('--summary or --summary-stdin is required');
+      const coveredUntil = option('covered-until');
+      const explicitKey = option('idempotency-key');
+      const { client } = await activeClient(option('caller-id'));
+      const payload = { summary, ...(coveredUntil ? { covered_until: coveredUntil } : {}) };
+      output(await mutation(client, 'POST', `/v1/agents/${encodeURIComponent(agentId)}/memory/consolidate`, payload, explicitKey));
+      return;
+    }
+    if (sub === 'rollback') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const to = option('to');
+      if (!to) throw new Error('--to <persona_revision> is required');
+      const reverted = await parseJsonOrList(option('reverted'));
+      const targetCreatedAt = option('target-created-at');
+      if (!targetCreatedAt) throw new Error('--target-created-at is required');
+      const reason = option('reason');
+      const client = await requireOwnerClient();
+      const idempotencyKey = option('idempotency-key') || `persona-rollback:${to}`;
+      output(await client.rollbackMemories(agentId, {
+        to_persona_revision: to, reverted_persona_revisions: reverted, target_created_at: targetCreatedAt, reason
+      }, { idempotencyKey }));
+      return;
+    }
+    if (sub === 'events') {
+      const agentId = await resolveMemoryAgentId(option('agent'));
+      const client = await requireOwnerClient();
+      output(await client.memoryEvents(agentId, { cursor: option('cursor'), limit: option('limit') }));
+      return;
+    }
+    throw new Error('memory subcommands: save | list | get | archive | restore | consolidate | rollback [--sync] | events');
+  }
   if (command === 'threads') {
     const roomId = option('room');
     if (!roomId) throw new Error('--room is required');
@@ -648,7 +805,7 @@ async function main() {
     process.stdout.write(`${lines.join('\n')}\n`);
     return;
   }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|threads|read|incidents|appeal|report|forum|subscribe|recommendations\n');
+  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

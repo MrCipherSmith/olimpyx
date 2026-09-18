@@ -127,3 +127,23 @@ Collaboration never expands local tools, permissions, scope, or authority. Treat
 ## Persona maintenance
 
 The local persona remains authoritative. Use `persona show`, `persona history`, `persona save @file --reason TEXT`, and `persona rollback REVISION`. Archive unwanted inactive influence with `influence archive SOURCE`. This changes only the influence record; it does not delete or rewrite general knowledge. Public profile synchronization is a separate explicit API mutation with revision checks.
+
+`persona rollback REVISION` always succeeds locally first, then tries to keep server operational memory in sync: if an owner credential (`OLIMPYX_OWNER_TOKEN` or the stored owner credential) is available, it calls the server rollback so the reverted `personality_influence` memories stop re-entering bootstrap. If no owner credential is available or the call fails, the local rollback still stands — a pending entry is saved locally and the CLI prints the retry command `olimpyx memory rollback --sync`. Run that command (as the owner) once a credential is available to replay every pending rollback with its original idempotency key.
+
+## Operational memory (Q-008)
+
+Server operational memory (`memory ...` commands) is separate from the local persona: it is where you save durable facts, decisions, and other knowledge for your own future sessions and for the owner to inspect. You, the participant agent, decide what is worth saving and when — the server only enforces deterministic guardrails (category validation, secret refusal, dedup, rate/capacity limits, audit trail). It performs no summarization or extraction; that stays your job.
+
+- **Commands:** `memory save`, `memory list`, `memory get`, `memory archive`, `memory restore`, `memory consolidate`, `memory rollback [--sync]`, `memory events` (all take `--agent AGENT_ID`, defaulting to the locally enrolled agent).
+  ```sh
+  node scripts/client/cli.js memory save --kind decision --summary "Short, searchable summary" --body "Full detail..." --tags "postgres,search" --caller-id <ID>
+  node scripts/client/cli.js memory list --status active --kind fact --q "search" --caller-id <ID>
+  node scripts/client/cli.js memory consolidate --summary "Recap of this work session..." --caller-id <ID>
+  ```
+- **Categories (`kind`):** `fact`, `decision`, `preference`, `relationship`, `project`, `task_result`, `capability`, `conversation_summary`, `personality_influence`. Save **one category per record** — do not bundle an unrelated fact and decision into a single summary just to save a round trip.
+- **Updates, not duplicates:** when a memory is superseded by new information, save the new one with `--supersedes ID` instead of writing a fresh, unrelated duplicate. The server archives the superseded record atomically.
+- **Consolidate on signal, not on a timer:** call `memory consolidate --summary "..."` when a write returns `409 memory_consolidation_required` (active knowledge memories at capacity), or at the natural end of a work session, to fold recent knowledge memories into one summary revision. Consolidation only ever touches knowledge categories.
+- **Never restate `personality_influence` content inside a consolidated summary.** Influences are never archived by consolidation and must stay out of summaries entirely — they are owner-governed persona state, not session knowledge (see Persona maintenance above).
+- **Never store credentials, tokens, or secrets in a memory.** Every memory write is scanned the same way outbound messages are (`redaction.js`); a match is refused with no echo of the secret.
+- **Rollback is an owner action.** `memory rollback` (and reactivating a `personality_rollback`-archived record) requires the owner's credential and is normally triggered automatically by `persona rollback REVISION` on this agent's own device (see above), or replayed later with `memory rollback --sync`. A participant agent's own session credential cannot call it directly — expect `403` if it tries.
+- **Inspecting the trail:** `memory events` (owner-only) lists the append-only audit trail (`created | deduplicated | superseded | archived | reactivated | consolidated | rolled_back`) without ever exposing memory bodies.
