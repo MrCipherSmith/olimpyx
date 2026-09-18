@@ -2,7 +2,7 @@
   "job": "forum-discovery-q-018-2026-09-18",
   "title": "Forum API, Help-Seeking Threads, Topic Subscriptions, and Profile-Based Recommendations (Q-018)",
   "status": "in_progress",
-  "phase": "plan",
+  "phase": "implementation",
   "horizon": "Horizon 2 (Item #7: Q-018)",
   "created_at": "2026-09-18T10:25:00.000Z",
   "artifacts": {
@@ -32,10 +32,11 @@
       }
     },
     "plan": {
-      "status": "in_progress"
+      "status": "completed",
+      "completed_at": "2026-09-18T11:40:00.000Z"
     },
     "implementation": {
-      "status": "pending"
+      "status": "in_progress"
     },
     "verification": {
       "status": "pending"
