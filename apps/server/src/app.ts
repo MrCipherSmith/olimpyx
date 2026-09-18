@@ -2,10 +2,11 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { Pool, type PoolClient } from "pg";
-import { installValidation } from "./validation.js";
+import { installValidation, memoryEventsQuery, memoryListQuery } from "./validation.js";
 import { createEmbeddingAdapter, ensureEmbeddingSchema, type EmbeddingStatus } from "./embeddings.js";
 import { AuthRateLimiter, type RateLimitResult } from "./auth-guard.js";
 import { recommendThreads } from "./recommendations.js";
+import { MemoryError, buildMemoryBootstrap, consolidate, getMemory, listMemories, listMemoryEvents, lockAgentMemory, rollbackInfluences, setActive, writeMemory } from "./memory.js";
 
 const scrypt = promisify(crypto.scrypt);
 const now = () => new Date().toISOString();
@@ -96,6 +97,25 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE messages DROP CONSTRAINT IF EXISTS chk_messages_root_forum;
     ALTER TABLE messages ADD CONSTRAINT chk_messages_root_forum 
       CHECK (reply_to_message_id IS NULL OR (category IS NULL AND resolved_at IS NULL));
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS tags jsonb NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS confidence text;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS persona_revision text;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS supersedes_id text REFERENCES memories(id);
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS superseded_by text REFERENCES memories(id);
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS consolidated_into text;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS fingerprint text;
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS archived_reason text CHECK (archived_reason IN ('superseded','consolidated','personality_rollback','manual'));
+    ALTER TABLE memories ADD COLUMN IF NOT EXISTS search_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(summary,'') || ' ' || coalesce(body,''))) STORED;
+    UPDATE memories SET archived_reason='manual' WHERE active=false AND archived_reason IS NULL;
+    CREATE TABLE IF NOT EXISTS memory_summaries (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, revision integer NOT NULL, summary text NOT NULL, covered_until timestamptz NOT NULL, archived_memory_count integer NOT NULL, created_by_type text NOT NULL, created_by_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(agent_id, revision));
+    CREATE TABLE IF NOT EXISTS memory_events (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, type text NOT NULL, actor_type text NOT NULL, actor_id text NOT NULL, memory_ids jsonb NOT NULL DEFAULT '[]'::jsonb, summary_id text, reason text, created_at timestamptz NOT NULL DEFAULT now());
+    CREATE INDEX IF NOT EXISTS idx_memories_agent_active_kind ON memories(agent_id, active, kind, created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_memories_fingerprint ON memories(agent_id, fingerprint, created_at DESC) WHERE active;
+    CREATE INDEX IF NOT EXISTS idx_memories_influence_rev ON memories(agent_id, persona_revision) WHERE kind='personality_influence' AND active;
+    CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories USING gin(tags);
+    CREATE INDEX IF NOT EXISTS idx_memories_search ON memories USING gin(search_tsv);
+    CREATE INDEX IF NOT EXISTS idx_memory_summaries_agent ON memory_summaries(agent_id, revision DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_events_agent ON memory_events(agent_id, created_at DESC, id DESC);
     DELETE FROM idempotency_keys WHERE response::text ~ '"(access_token|agent_token|session_token|enrollment_token)"';
   `);
 
@@ -328,8 +348,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     const max=Number((await app.pg.query("SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE agent_id=$1",[agentId])).rows[0].n);
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
     const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at}));
-    const memories=(await app.pg.query("SELECT summary FROM memories WHERE agent_id=$1 AND active=true ORDER BY created_at DESC LIMIT 10",[agentId])).rows.map(x=>x.summary);
-    return {agent,memory_summary:memories.length?memories.join("\n"):null,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus()};
+    const {memory_summary,memory}=await buildMemoryBootstrap(app.pg,agentId);
+    return {agent,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus()};
   }
 
   const safeLinks = (input:unknown) => Array.isArray(input) ? input.filter((x:any) => {
@@ -490,9 +510,23 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.get("/v1/agents/:agentId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query(`${profileSql} WHERE a.id=$1`,[(req.params as any).agentId]);if(!r.rowCount)return fail(reply,404,"not_found","Agent not found");return{data:profileFrom(r.rows[0])}});
   app.patch("/v1/agents/:agentId/profile",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const aid=(req.params as any).agentId;if(p.type==="agent"&&p.id!==aid)return fail(reply,403,"forbidden","Cannot edit another profile");if(p.type==="owner"&&!((await app.pg.query("SELECT 1 FROM agents WHERE id=$1 AND owner_id=$2",[aid,p.id])).rowCount))return fail(reply,403,"forbidden","Cannot edit another profile");const b=req.body as any;const current=(await app.pg.query("SELECT * FROM agents WHERE id=$1",[aid])).rows[0];if(b.expected_revision!==current.profile_revision)return fail(reply,409,"stale_revision","Profile revision is stale");const r=await app.pg.query("UPDATE agents SET name=$2,role=$3,bio=$4,interests=$5,capabilities=$6,profile_revision=profile_revision+1 WHERE id=$1 RETURNING *",[aid,b.name??current.name,b.role??current.role,b.bio??current.bio,JSON.stringify(b.interests??current.interests),JSON.stringify(b.capabilities??current.capabilities)]);return{data:profileFrom(r.rows[0])}});
   async function ownsAgent(p:Principal,aid:string){return p.type==="agent"?p.id===aid:Boolean((await app.pg.query("SELECT 1 FROM agents WHERE id=$1 AND owner_id=$2",[aid,p.id])).rowCount)}
-  app.get("/v1/agents/:agentId/memory",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const aid=(req.params as any).agentId;if(!await ownsAgent(p,aid))return fail(reply,403,"forbidden","Private memory");const r=await app.pg.query("SELECT id memory_id,kind,summary,body,active,source_ref,created_at FROM memories WHERE agent_id=$1 ORDER BY created_at DESC LIMIT $2",[aid,boundedLimit((req.query as any).limit)]);return{data:r.rows,page:{next_cursor:null}}});
-  app.post("/v1/agents/:agentId/memory",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const aid=(req.params as any).agentId;if(!await ownsAgent(p,aid))return fail(reply,403,"forbidden","Private memory");return idem(req,reply,`${p.type}:${p.id}`,async()=>{const b=req.body as any,mid=id("mem");const r=await app.pg.query("INSERT INTO memories VALUES($1,$2,$3,$4,$5,$6,$7,now()) RETURNING *",[mid,aid,b.kind,b.summary,b.body,b.active,b.source_ref??null]);return{status:201,data:{...r.rows[0],memory_id:mid}}})});
-  app.patch("/v1/agents/:agentId/memory/:memoryId",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const x=req.params as any;if(!await ownsAgent(p,x.agentId))return fail(reply,403,"forbidden","Private memory");const r=await app.pg.query("UPDATE memories SET active=$3 WHERE id=$1 AND agent_id=$2 RETURNING *",[x.memoryId,x.agentId,(req.body as any).active]);if(!r.rowCount)return fail(reply,404,"not_found","Memory not found");return{data:r.rows[0]}});
+  const memoryFail=(reply:any,e:MemoryError)=>{for(const [k,v] of Object.entries(e.headers??{}))reply.header(k,v);return fail(reply,e.status,e.code,e.message,e.details?{details:e.details}:undefined)};
+  const queryFail=(reply:any,error:{issues:Array<{path:PropertyKey[];message:string}>})=>fail(reply,400,"validation_error","Invalid query parameters",{details:error.issues.map(i=>({path:i.path.join("."),reason:i.message}))});
+  async function memoryAccess(req:FastifyRequest,reply:any,allowed?:Array<Principal["tokenType"]>){const p=await principal(req,reply,allowed);if(!p)return null;const aid=(req.params as any).agentId;if(!await ownsAgent(p,aid)){fail(reply,403,"forbidden","Private memory");return null}return{p,aid}}
+  async function memoryRead<T>(reply:any,work:()=>Promise<T>){try{return await work()}catch(e){if(e instanceof MemoryError)return memoryFail(reply,e);throw e}}
+  async function memoryTx<T>(reply:any,aid:string,work:(client:PoolClient)=>Promise<T>):Promise<T|undefined>{
+    const client=await app.pg.connect();
+    try{await client.query("BEGIN");await lockAgentMemory(client,aid);const result=await work(client);await client.query("COMMIT");return result}
+    catch(e){await client.query("ROLLBACK");if(e instanceof MemoryError){memoryFail(reply,e);return undefined}throw e}
+    finally{client.release()}
+  }
+  app.get("/v1/agents/:agentId/memory",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;const q=memoryListQuery.safeParse(req.query);if(!q.success)return queryFail(reply,q.error);return memoryRead(reply,()=>listMemories(app.pg,a.aid,q.data))});
+  app.get("/v1/agents/:agentId/memory/events",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;const q=memoryEventsQuery.safeParse(req.query);if(!q.success)return queryFail(reply,q.error);return memoryRead(reply,()=>listMemoryEvents(app.pg,a.aid,q.data))});
+  app.get("/v1/agents/:agentId/memory/:memoryId",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryRead(reply,async()=>({data:await getMemory(app.pg,a.aid,(req.params as any).memoryId)}))});
+  app.post("/v1/agents/:agentId/memory",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return idem(req,reply,`${a.p.type}:${a.p.id}`,async()=>await memoryTx(reply,a.aid,c=>writeMemory(c,a.p,a.aid,req.body as any))??{status:0,data:null})});
+  app.patch("/v1/agents/:agentId/memory/:memoryId",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;const data=await memoryTx(reply,a.aid,c=>setActive(c,a.p,a.aid,(req.params as any).memoryId,(req.body as any).active));return data&&{data}});
+  app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return idem(req,reply,`${a.p.type}:${a.p.id}`,async()=>{const data=await memoryTx(reply,a.aid,c=>consolidate(c,a.p,a.aid,req.body as any));return{status:201,data}})});
+  app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return idem(req,reply,`${a.p.type}:${a.p.id}`,async()=>{const data=await memoryTx(reply,a.aid,c=>rollbackInfluences(c,a.p,a.aid,req.body as any));return{status:200,data}})});
 
   app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async()=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;const r=await app.pg.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,now(),now()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
   app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
