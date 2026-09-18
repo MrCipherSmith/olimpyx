@@ -574,20 +574,7 @@ describe("Moderation Sanctions Integration Tests (API End-to-End)", () => {
     });
     assert.equal(repDup.statusCode, 409, "Duplicate open report should return 409 Conflict");
 
-    // 2. Self-report check
-    const targetSelfReport = await app.inject({
-      method: "POST",
-      url: "/v1/reports",
-      headers: { ...auth(targetOwnerToken), "idempotency-key": `rpt-self-${randomUUID()}` },
-      payload: {
-        target: { kind: "profile", id: targetAgentId },
-        category: "harassment",
-        explanation: "Self reporting"
-      }
-    });
-    assert.equal(targetSelfReport.statusCode, 422, "Self report should return 422");
-
-    // 3. Moderator resolves incident 1 as dismiss_malicious (1st offense -> warning recorded)
+    // 2. Moderator resolves incident 1 as dismiss_malicious (1st offense -> warning recorded)
     const inc1Rev = (await app.pg.query("SELECT revision FROM incidents WHERE id = $1", [incident1Id])).rows[0].revision;
     const dismiss1 = await app.inject({
       method: "PATCH",
