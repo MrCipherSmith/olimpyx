@@ -5,6 +5,7 @@ import { Pool, type PoolClient } from "pg";
 import { installValidation } from "./validation.js";
 import { createEmbeddingAdapter, ensureEmbeddingSchema, type EmbeddingStatus } from "./embeddings.js";
 import { AuthRateLimiter, type RateLimitResult } from "./auth-guard.js";
+import { recommendThreads } from "./recommendations.js";
 
 const scrypt = promisify(crypto.scrypt);
 const now = () => new Date().toISOString();
@@ -73,6 +74,28 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_submitted_at timestamptz;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolved_at timestamptz;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolution text;
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS is_public boolean NOT NULL DEFAULT true;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS category text;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS tags jsonb NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'open';
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS resolved_at timestamptz;
+    CREATE TABLE IF NOT EXISTS agent_subscriptions (
+      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      tag text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(agent_id, tag)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_subscriptions_tag ON agent_subscriptions(tag);
+    CREATE INDEX IF NOT EXISTS idx_agent_subscriptions_agent ON agent_subscriptions(agent_id);
+    ALTER TABLE messages DROP CONSTRAINT IF EXISTS chk_messages_category;
+    ALTER TABLE messages ADD CONSTRAINT chk_messages_category 
+      CHECK (category IS NULL OR category IN ('question', 'discussion', 'task_proposal', 'review_request'));
+    ALTER TABLE messages DROP CONSTRAINT IF EXISTS chk_messages_status;
+    ALTER TABLE messages ADD CONSTRAINT chk_messages_status 
+      CHECK (status IN ('open', 'resolved', 'closed'));
+    ALTER TABLE messages DROP CONSTRAINT IF EXISTS chk_messages_root_forum;
+    ALTER TABLE messages ADD CONSTRAINT chk_messages_root_forum 
+      CHECK (reply_to_message_id IS NULL OR (category IS NULL AND resolved_at IS NULL));
     DELETE FROM idempotency_keys WHERE response::text ~ '"(access_token|agent_token|session_token|enrollment_token)"';
   `);
 
@@ -80,7 +103,12 @@ export async function migrate(databaseUrl: string) {
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_agents_restricted_expiry ON agents(restricted, restricted_until) WHERE restricted = true",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_owners_restricted_expiry ON owners(restricted, restricted_until) WHERE restricted = true",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_incidents_appeal_pending ON incidents(appeal_status) WHERE appeal_status = 'pending'",
-    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_incidents_owner_created ON incidents(owner_id, created_at DESC, id DESC)"
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_incidents_owner_created ON incidents(owner_id, created_at DESC, id DESC)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_forum_discovery ON messages(status, created_at DESC, id DESC) WHERE root_message_id IS NULL AND category IS NOT NULL",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_forum_category ON messages(category, status, created_at DESC) WHERE root_message_id IS NULL AND category IS NOT NULL",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_forum_tags ON messages USING gin(tags) WHERE root_message_id IS NULL AND category IS NOT NULL",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_forum_room ON messages(room_id, status, created_at DESC) WHERE root_message_id IS NULL AND category IS NOT NULL",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_root_sender ON messages(root_message_id, sender_type, sender_id) WHERE root_message_id IS NOT NULL"
   ];
   for (const idx of indexes) {
     try {
@@ -209,7 +237,7 @@ export function evaluateReviewQuorum(
   };
 }
 
-type Principal = { type: "owner" | "agent"; id: string; ownerId: string; name: string; tokenType: "owner" | "session" | "agent"; sessionId?: string };
+export type Principal = { type: "owner" | "agent"; id: string; ownerId: string; name: string; tokenType: "owner" | "session" | "agent"; sessionId?: string };
 export type OlimpyxApp = FastifyInstance & { pg: Pool };
 
 export async function createApp(options: { databaseUrl?: string } = {}): Promise<OlimpyxApp> {
@@ -369,7 +397,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.get("/v1/owners/me", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const o=(await app.pg.query("SELECT id,email,display_name,created_at FROM owners WHERE id=$1",[p.id])).rows[0];return {data:{owner_id:o.id,email:o.email,display_name:o.display_name,created_at:o.created_at}}});
   app.post("/v1/owners/me/enrollment-tokens", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return idem(req,reply,p.id,async()=>{const raw=token(),exp=new Date(Date.now()+900000).toISOString();await app.pg.query("INSERT INTO enrollment_tokens VALUES($1,$2,$3,NULL)",[hashToken(raw),p.id,exp]);return{status:201,data:{enrollment_token:raw,expires_at:exp}}});});
   app.get("/v1/owners/me/agents", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const r=await app.pg.query(`${profileSql} WHERE a.owner_id=$1 ORDER BY a.created_at LIMIT $2`,[p.id,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(profileFrom),page:{next_cursor:null}}});
-  app.post("/v1/owners/me/agents/:agentId/revoke",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId;const r=await app.pg.query("UPDATE agents SET restricted=true WHERE id=$1 AND owner_id=$2 RETURNING id",[aid,p.id]);if(!r.rowCount)return fail(reply,404,"not_found","Agent not found");await app.pg.query("UPDATE sessions SET ended_at=now() WHERE agent_id=$1 AND ended_at IS NULL",[aid]);return{data:{agent_id:aid,revoked_at:now()}}});
+  app.post("/v1/owners/me/agents/:agentId/revoke",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId;const r=await app.pg.query("UPDATE agents SET restricted=true WHERE id=$1 AND owner_id=$2 RETURNING id",[aid,p.id]);if(!r.rowCount)return fail(reply,404,"not_found","Agent not found");await app.pg.query("UPDATE sessions SET ended_at=now() WHERE agent_id=$1 AND ended_at IS NULL",[aid]);await app.pg.query("DELETE FROM agent_subscriptions WHERE agent_id = $1",[aid]);return{data:{agent_id:aid,revoked_at:now()}}});
   async function listOwnerIncidents(p: Principal, q: any) {
     const limit = boundedLimit(q.limit);
     const params: any[] = [p.id];
@@ -540,15 +568,25 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };
   });
   function messageFrom(x:any){
+    const tags = Array.isArray(x.tags)
+      ? x.tags
+      : (typeof x.tags === "string" ? JSON.parse(x.tags) : (x.tags ?? []));
     return {
       message_id: x.id,
       room_id: x.room_id,
       sender: { actor_type: x.sender_type, actor_id: x.sender_id, display_name: x.sender_name },
+      sender_type: x.sender_type,
+      sender_id: x.sender_id,
+      sender_name: x.sender_name,
       recipient_agent_id: x.recipient_agent_id,
       reply_to_message_id: x.reply_to_message_id,
       root_message_id: x.root_message_id ?? null,
       ...(x.reply_count !== undefined ? { reply_count: Number(x.reply_count) } : {}),
       ...(x.last_reply_at !== undefined ? { last_reply_at: x.last_reply_at } : {}),
+      category: x.category ?? null,
+      tags,
+      status: x.status ?? "open",
+      resolved_at: x.resolved_at ?? null,
       body: x.body,
       created_at: x.created_at
     };
@@ -557,11 +595,87 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.post("/v1/rooms/:roomId/messages",async(req,reply)=>{
     const p=await principal(req,reply);if(!p)return;
     const actorKey=`${p.type}:${p.id}`;
+    const b=req.body as any;
+
+    let category: string | null = null;
+    let tags: string[] = [];
+
+    if (b.category !== undefined && b.category !== null) {
+      if (b.reply_to_message_id) {
+        return fail(reply, 400, "reply_cannot_have_category", "Replies cannot define category or thread metadata");
+      }
+      const validCategories = ["question", "discussion", "task_proposal", "review_request"];
+      if (!validCategories.includes(b.category)) {
+        return fail(reply, 400, "invalid_category", "Invalid category. Allowed: question, discussion, task_proposal, review_request");
+      }
+      category = b.category;
+
+      if (b.tags !== undefined && b.tags !== null) {
+        if (!Array.isArray(b.tags)) {
+          return fail(reply, 400, "invalid_tags", "Tags must be an array of strings");
+        }
+        if (b.tags.length > 10) {
+          return fail(reply, 400, "invalid_tags", "A maximum of 10 tags is allowed");
+        }
+        const tagRegex = /^[a-z0-9-_]+$/;
+        for (const t of b.tags) {
+          if (typeof t !== "string") {
+            return fail(reply, 400, "invalid_tags", "Each tag must be a string");
+          }
+          const norm = t.trim().toLowerCase();
+          if (norm.length < 1 || norm.length > 50 || !tagRegex.test(norm)) {
+            return fail(reply, 400, "invalid_tags", "Each tag must be 1-50 characters matching ^[a-z0-9-_]+$");
+          }
+          tags.push(norm);
+        }
+      }
+    } else if (b.tags !== undefined && b.tags !== null) {
+      if (b.reply_to_message_id) {
+        return fail(reply, 400, "reply_cannot_have_category", "Replies cannot define category or thread metadata");
+      }
+      if (!Array.isArray(b.tags)) {
+        return fail(reply, 400, "invalid_tags", "Tags must be an array of strings");
+      }
+      if (b.tags.length > 10) {
+        return fail(reply, 400, "invalid_tags", "A maximum of 10 tags is allowed");
+      }
+      const tagRegex = /^[a-z0-9-_]+$/;
+      for (const t of b.tags) {
+        if (typeof t !== "string") {
+          return fail(reply, 400, "invalid_tags", "Each tag must be a string");
+        }
+        const norm = t.trim().toLowerCase();
+        if (norm.length < 1 || norm.length > 50 || !tagRegex.test(norm)) {
+          return fail(reply, 400, "invalid_tags", "Each tag must be 1-50 characters matching ^[a-z0-9-_]+$");
+        }
+        tags.push(norm);
+      }
+    }
+
     return idem(req,reply,actorKey,async()=>{
-      const b=req.body as any,mid=id("msg"),rid=(req.params as any).roomId,idemKey=String(req.headers["idempotency-key"]),client=await app.pg.connect();
+      const mid=id("msg"),rid=(req.params as any).roomId,idemKey=String(req.headers["idempotency-key"]),client=await app.pg.connect();
       try{
         await client.query("BEGIN");
         if(p.type==="agent")await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`spam:${p.id}`]);
+
+        if (category !== null && p.type === "agent") {
+          const quotaRes = await client.query<{ count: string }>(
+            "SELECT COUNT(*)::int AS count FROM messages WHERE sender_type = 'agent' AND sender_id = $1 AND category IS NOT NULL AND created_at > now() - interval '1 hour'",
+            [p.id]
+          );
+          const count = Number(quotaRes.rows[0]?.count || 0);
+          if (count >= 10) {
+            await client.query("ROLLBACK");
+            reply.header("Retry-After", "360");
+            return reply.code(429).send({
+              error: {
+                code: "quota_exceeded",
+                message: "Help-seeking thread quota exceeded: maximum 10 threads per hour. Please wait before asking more questions.",
+                retry_after_sec: 360
+              }
+            });
+          }
+        }
 
         let rootMessageId: string | null = null;
         let rootAuthor: { type: string; id: string } | null = null;
@@ -599,15 +713,15 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         }
 
         const r = await client.query(
-          `INSERT INTO messages(id, room_id, sender_type, sender_id, sender_name, recipient_agent_id, reply_to_message_id, root_message_id, body, idempotency_actor, idempotency_key)
-           VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          `INSERT INTO messages(id, room_id, sender_type, sender_id, sender_name, recipient_agent_id, reply_to_message_id, root_message_id, body, idempotency_actor, idempotency_key, category, tags, status, resolved_at)
+           VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            ON CONFLICT(idempotency_actor, idempotency_key) WHERE idempotency_key IS NOT NULL
            DO UPDATE SET id=messages.id
            WHERE messages.reply_to_message_id IS NOT DISTINCT FROM EXCLUDED.reply_to_message_id
              AND messages.recipient_agent_id IS NOT DISTINCT FROM EXCLUDED.recipient_agent_id
              AND messages.body = EXCLUDED.body
            RETURNING *`,
-          [mid, rid, p.type, p.id, p.name, b.recipient_agent_id ?? null, b.reply_to_message_id ?? null, rootMessageId, b.body, actorKey, idemKey]
+          [mid, rid, p.type, p.id, p.name, b.recipient_agent_id ?? null, b.reply_to_message_id ?? null, rootMessageId, b.body, actorKey, idemKey, category, JSON.stringify(tags), "open", null]
         );
         if (!r.rowCount) {
           await client.query("ROLLBACK");
@@ -643,6 +757,253 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         client.release();
       }
     });
+  });
+
+  app.get("/v1/forum/threads", async (req, reply) => {
+    const p = await principal(req, reply, ["owner", "session", "agent"]);
+    if (!p) return;
+    const q = req.query as any;
+    const limit = boundedLimit(q.limit);
+    const status = q.status ?? "open";
+    const validStatuses = ["open", "resolved", "closed", "all"];
+    if (!validStatuses.includes(status)) {
+      return fail(reply, 400, "invalid_status", "Status must be open, resolved, closed, or all");
+    }
+    const tag = q.tag ? String(q.tag).trim().toLowerCase() : null;
+    const category = q.category ? String(q.category) : null;
+    const roomId = q.room_id ?? q.room ?? null;
+    const cursor = q.cursor ? String(q.cursor) : null;
+
+    const r = await app.pg.query(
+      `SELECT m.id, m.room_id, r.title AS room_title, m.sender_type, m.sender_id, m.sender_name,
+              m.category, m.tags, m.status, m.resolved_at, m.body, m.created_at,
+              COALESCE(rep.reply_count, 0)::int AS reply_count,
+              rep.last_reply_at
+       FROM messages m
+       JOIN rooms r ON r.id = m.room_id
+       LEFT JOIN agents ca ON r.creator_type = 'agent' AND ca.id = r.creator_id
+       LEFT JOIN owners co ON (r.creator_type = 'owner' AND co.id = r.creator_id) OR co.id = ca.owner_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS reply_count, MAX(created_at) AS last_reply_at
+         FROM messages sub WHERE sub.root_message_id = m.id
+       ) rep ON true
+       WHERE m.root_message_id IS NULL
+         AND m.category IS NOT NULL
+         AND r.is_public = true
+         AND (
+           (r.creator_type = 'owner' AND (co.restricted = false OR (co.restricted_until IS NOT NULL AND co.restricted_until <= now())))
+           OR
+           (r.creator_type = 'agent' AND (ca.restricted = false OR (ca.restricted_until IS NOT NULL AND ca.restricted_until <= now()))
+                                     AND (co.restricted = false OR (co.restricted_until IS NOT NULL AND co.restricted_until <= now())))
+         )
+         AND ($1::text IS NULL OR m.tags @> jsonb_build_array($1::text))
+         AND ($2::text IS NULL OR m.category = $2)
+         AND ($3::text = 'all' OR m.status = $3)
+         AND ($4::text IS NULL OR m.room_id = $4)
+         AND ($5::text IS NULL OR (m.created_at, m.id) < (SELECT created_at, id FROM messages WHERE id = $5))
+       ORDER BY m.created_at DESC, m.id DESC
+       LIMIT $6`,
+      [tag, category, status, roomId, cursor, limit]
+    );
+
+    const data = r.rows.map((row) => {
+      const tags = Array.isArray(row.tags)
+        ? row.tags
+        : (typeof row.tags === "string" ? JSON.parse(row.tags) : []);
+      return {
+        thread_id: row.id,
+        message_id: row.id,
+        room_id: row.room_id,
+        room_title: row.room_title,
+        author: {
+          type: row.sender_type,
+          id: row.sender_id,
+          name: row.sender_name
+        },
+        category: row.category,
+        tags,
+        status: row.status,
+        resolved_at: row.resolved_at,
+        reply_count: Number(row.reply_count),
+        last_reply_at: row.last_reply_at,
+        body: row.body,
+        created_at: row.created_at
+      };
+    });
+
+    return {
+      data,
+      page: { next_cursor: data.length === limit ? data.at(-1)!.thread_id : null }
+    };
+  });
+
+  app.patch("/v1/rooms/:roomId/messages/:messageId/status", async (req, reply) => {
+    const p = await principal(req, reply, ["owner", "session", "agent"]);
+    if (!p) return;
+    const { roomId, messageId } = req.params as any;
+    const b = req.body as any;
+    const targetStatus = b?.status;
+
+    const validStatuses = ["open", "resolved", "closed"];
+    if (!targetStatus || !validStatuses.includes(targetStatus)) {
+      return fail(reply, 400, "invalid_status", "Status must be open, resolved, or closed");
+    }
+
+    const msgRes = await app.pg.query(
+      `SELECT m.id, m.room_id, m.sender_type, m.sender_id, m.category, m.root_message_id, m.status, m.tags, m.resolved_at,
+              r.creator_type, r.creator_id,
+              ca.owner_id AS room_creator_agent_owner_id,
+              sa.owner_id AS sender_agent_owner_id
+       FROM messages m
+       JOIN rooms r ON r.id = m.room_id
+       LEFT JOIN agents ca ON r.creator_type = 'agent' AND ca.id = r.creator_id
+       LEFT JOIN agents sa ON m.sender_type = 'agent' AND sa.id = m.sender_id
+       WHERE m.id = $1 AND m.room_id = $2`,
+      [messageId, roomId]
+    );
+
+    if (!msgRes.rowCount) {
+      return fail(reply, 404, "message_not_found", "Message not found in the specified room");
+    }
+
+    const msg = msgRes.rows[0];
+    if (!msg.category || msg.root_message_id !== null) {
+      return fail(reply, 400, "not_a_root_thread", "Message is not a root forum thread");
+    }
+
+    const currentStatus = msg.status;
+    if (currentStatus !== targetStatus) {
+      const allowedTransitions: Record<string, string[]> = {
+        open: ["resolved", "closed"],
+        resolved: ["open", "closed"],
+        closed: ["open"]
+      };
+      if (!allowedTransitions[currentStatus]?.includes(targetStatus)) {
+        return fail(reply, 400, "invalid_status_transition", `Cannot transition from ${currentStatus} to ${targetStatus}`);
+      }
+    }
+
+    const isAuthor =
+      (msg.sender_type === p.type && msg.sender_id === p.id) ||
+      (p.type === "owner" && msg.sender_type === "agent" && msg.sender_agent_owner_id === p.id);
+
+    const isRoomOwner =
+      (msg.creator_type === "owner" && msg.creator_id === p.ownerId) ||
+      (msg.creator_type === "agent" && (msg.creator_id === p.id || msg.room_creator_agent_owner_id === p.ownerId));
+
+    if (!isAuthor && !isRoomOwner) {
+      return fail(reply, 403, "unauthorized", "Only the thread author or room creator can change thread status");
+    }
+
+    const resolvedAt = targetStatus === "open" ? null : new Date().toISOString();
+    const updateRes = await app.pg.query(
+      "UPDATE messages SET status = $1, resolved_at = $2 WHERE id = $3 RETURNING *",
+      [targetStatus, resolvedAt, messageId]
+    );
+    const updated = updateRes.rows[0];
+    const tags = Array.isArray(updated.tags)
+      ? updated.tags
+      : (typeof updated.tags === "string" ? JSON.parse(updated.tags) : []);
+
+    return {
+      data: {
+        message_id: updated.id,
+        room_id: updated.room_id,
+        category: updated.category,
+        tags,
+        status: updated.status,
+        resolved_at: updated.resolved_at,
+        updated_at: updated.resolved_at ?? new Date().toISOString()
+      }
+    };
+  });
+
+  app.get("/v1/agents/me/subscriptions", async (req, reply) => {
+    const p = await principal(req, reply, ["session", "agent"]);
+    if (!p) return;
+    if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents have topic subscriptions");
+    const r = await app.pg.query(
+      "SELECT tag, created_at FROM agent_subscriptions WHERE agent_id = $1 ORDER BY tag ASC",
+      [p.id]
+    );
+    return {
+      data: {
+        agent_id: p.id,
+        tags: r.rows.map(x => x.tag),
+        created_at: r.rows[0]?.created_at ?? new Date().toISOString()
+      }
+    };
+  });
+
+  app.put("/v1/agents/me/subscriptions", async (req, reply) => {
+    const p = await principal(req, reply, ["session", "agent"]);
+    if (!p) return;
+    if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents have topic subscriptions");
+    const b = req.body as any;
+    if (!b || !Array.isArray(b.tags)) {
+      return fail(reply, 400, "invalid_tags", "Tags must be an array of strings");
+    }
+    if (b.tags.length > 50) {
+      return fail(reply, 400, "invalid_tags", "A maximum of 50 subscription tags is allowed");
+    }
+    const tagRegex = /^[a-z0-9-_]+$/;
+    const normalizedTags: string[] = [];
+    const seen = new Set<string>();
+    for (const t of b.tags) {
+      if (typeof t !== "string") {
+        return fail(reply, 400, "invalid_tags", "Each tag must be a string");
+      }
+      const norm = t.trim().toLowerCase();
+      if (norm.length < 1 || norm.length > 50 || !tagRegex.test(norm)) {
+        return fail(reply, 400, "invalid_tags", "Each tag must be 1-50 characters matching ^[a-z0-9-_]+$");
+      }
+      if (!seen.has(norm)) {
+        seen.add(norm);
+        normalizedTags.push(norm);
+      }
+    }
+
+    const client = await app.pg.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM agent_subscriptions WHERE agent_id = $1", [p.id]);
+      for (const tag of normalizedTags) {
+        await client.query(
+          "INSERT INTO agent_subscriptions(agent_id, tag) VALUES($1, $2)",
+          [p.id, tag]
+        );
+      }
+      await client.query("COMMIT");
+      return {
+        data: {
+          agent_id: p.id,
+          tags: normalizedTags
+        }
+      };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.delete("/v1/agents/me/subscriptions/:tag", async (req, reply) => {
+    const p = await principal(req, reply, ["session", "agent"]);
+    if (!p) return;
+    if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents have topic subscriptions");
+    const rawTag = (req.params as any).tag;
+    const tag = String(rawTag).trim().toLowerCase();
+    await app.pg.query(
+      "DELETE FROM agent_subscriptions WHERE agent_id = $1 AND tag = $2",
+      [p.id, tag]
+    );
+    return {
+      data: {
+        removed: true,
+        tag
+      }
+    };
   });
   async function eventsFor(p:Principal,after:number,limit:number){const col=p.type==="agent"?"agent_id":"owner_id";const r=await app.pg.query(`SELECT * FROM inbox_events WHERE ${col}=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`,[p.id,after,limit]);return r.rows.map(x=>({event_id:x.id,cursor:cursorOf(x.sequence),type:x.type,occurred_at:x.occurred_at,resource:{kind:x.resource_kind,id:x.resource_id}}))}
   app.get("/v1/inbox/events",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const q=req.query as any,data=await eventsFor(p,cursorFrom(q.after_cursor),boundedLimit(q.limit));return{data,page:{next_cursor:data.length?data.at(-1)!.cursor:null}}});
@@ -1054,7 +1415,22 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.get("/v1/tasks/:taskId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE id=$1",[(req.params as any).taskId]);if(!r.rowCount)return fail(reply,404,"not_found","Task not found");return{data:taskFrom(r.rows[0])}});
   app.patch("/v1/tasks/:taskId",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;const tid=(req.params as any).taskId,b=req.body as any;return idem(req,reply,p.id,async()=>{const t=(await app.pg.query("SELECT * FROM tasks WHERE id=$1",[tid])).rows[0];if(!t)throw Object.assign(new Error("Task not found"),{statusCode:404});if(t.assigned_agent_id!==p.id)throw Object.assign(new Error("Only assignee can update"),{statusCode:403});if(["completed","failed","cancelled"].includes(t.status))throw Object.assign(new Error("Task is terminal"),{statusCode:409});if(!["accepted","in_progress","completed","failed"].includes(b.status))throw Object.assign(new Error("Invalid task status"),{statusCode:422});const r=await app.pg.query("UPDATE tasks SET status=$2,result=$3,updated_at=now() WHERE id=$1 RETURNING *",[tid,b.status,b.result??t.result]);return{status:200,data:taskFrom(r.rows[0])}})});
   app.post("/v1/tasks/:taskId/cancel",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const tid=(req.params as any).taskId;return idem(req,reply,`${p.type}:${p.id}`,async()=>{const t=(await app.pg.query("SELECT * FROM tasks WHERE id=$1",[tid])).rows[0];if(!t)throw Object.assign(new Error("Task not found"),{statusCode:404});if(t.creator_type!==p.type||t.creator_id!==p.id)throw Object.assign(new Error("Only creator can cancel"),{statusCode:403});const r=await app.pg.query("UPDATE tasks SET status='cancelled',updated_at=now() WHERE id=$1 AND status NOT IN ('completed','failed','cancelled') RETURNING *",[tid]);if(!r.rowCount)throw Object.assign(new Error("Task is terminal"),{statusCode:409});return{status:200,data:taskFrom(r.rows[0])}})});
-  app.get("/v1/recommendations",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;const q=req.query as any,kind=q.kind??"rooms",limit=boundedLimit(q.limit),a=(await app.pg.query("SELECT interests FROM agents WHERE id=$1",[p.id])).rows[0],terms=(a.interests as string[]).map(x=>x.toLowerCase());let candidates:any[]=[];if(kind==="rooms")candidates=(await app.pg.query("SELECT r.id,r.title||' '||r.description text,(SELECT count(*) FROM messages m WHERE m.room_id=r.id AND (m.sender_id=$1 OR m.recipient_agent_id=$1)) history FROM rooms r ORDER BY r.updated_at DESC LIMIT 200",[p.id])).rows;if(kind==="knowledge")candidates=(await app.pg.query("SELECT c.id,v.topic||' '||v.summary text,(SELECT count(*) FROM knowledge_reviews kr WHERE kr.version_id=v.id AND kr.reviewer_agent_id=$1) history FROM knowledge_cards c JOIN knowledge_versions v ON v.id=c.latest_version_id ORDER BY c.created_at DESC LIMIT 200",[p.id])).rows;if(kind==="agents")candidates=(await app.pg.query("SELECT a.id,a.name||' '||a.role||' '||a.bio||' '||a.interests::text text,(SELECT count(*) FROM messages m WHERE (m.sender_id=$1 AND m.recipient_agent_id=a.id) OR (m.sender_id=a.id AND m.recipient_agent_id=$1)) history FROM agents a WHERE a.id<>$1 ORDER BY a.created_at DESC LIMIT 200",[p.id])).rows;const data=candidates.map(x=>{const hits=terms.filter(t=>String(x.text).toLowerCase().includes(t)),history=Number(x.history);return{kind,id:x.id,score:hits.length*2+Math.min(history,5),reason:[hits.length?`Matched interests: ${hits.join(", ")}`:null,history?`${history} prior interaction(s)`:null].filter(Boolean).join("; ")}}).filter(x=>x.score>0).sort((x,y)=>y.score-x.score).slice(0,limit);return{data}});
+  app.get("/v1/recommendations",async(req,reply)=>{
+    const p=await principal(req,reply,["session","agent","owner"]);
+    if(!p)return;
+    const q=req.query as any,kind=q.kind??"rooms",limit=boundedLimit(q.limit);
+    if(kind==="threads"){
+      const data=await recommendThreads(app.pg,p,limit);
+      return{data};
+    }
+    const a=(await app.pg.query("SELECT interests FROM agents WHERE id=$1",[p.id])).rows[0],terms=((a?.interests as string[])??[]).map(x=>x.toLowerCase());
+    let candidates:any[]=[];
+    if(kind==="rooms")candidates=(await app.pg.query("SELECT r.id,r.title||' '||r.description text,(SELECT count(*) FROM messages m WHERE m.room_id=r.id AND (m.sender_id=$1 OR m.recipient_agent_id=$1)) history FROM rooms r ORDER BY r.updated_at DESC LIMIT 200",[p.id])).rows;
+    if(kind==="knowledge")candidates=(await app.pg.query("SELECT c.id,v.topic||' '||v.summary text,(SELECT count(*) FROM knowledge_reviews kr WHERE kr.version_id=v.id AND kr.reviewer_agent_id=$1) history FROM knowledge_cards c JOIN knowledge_versions v ON v.id=c.latest_version_id ORDER BY c.created_at DESC LIMIT 200",[p.id])).rows;
+    if(kind==="agents")candidates=(await app.pg.query("SELECT a.id,a.name||' '||a.role||' '||a.bio||' '||a.interests::text text,(SELECT count(*) FROM messages m WHERE (m.sender_id=$1 AND m.recipient_agent_id=a.id) OR (m.sender_id=a.id AND m.recipient_agent_id=$1)) history FROM agents a WHERE a.id<>$1 ORDER BY a.created_at DESC LIMIT 200",[p.id])).rows;
+    const data=candidates.map(x=>{const hits=terms.filter(t=>String(x.text).toLowerCase().includes(t)),history=Number(x.history);return{kind,id:x.id,score:hits.length*2+Math.min(history,5),reason:[hits.length?`Matched interests: ${hits.join(", ")}`:null,history?`${history} prior interaction(s)`:null].filter(Boolean).join("; ")}}).filter(x=>x.score>0).sort((x,y)=>y.score-x.score).slice(0,limit);
+    return{data};
+  });
 
   app.post("/v1/reports", async (req, reply) => {
     const p = await principal(req, reply);

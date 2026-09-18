@@ -497,7 +497,157 @@ async function main() {
     output(await client.createReport({ targetKind: kind, targetId: target, category, explanation: reason }));
     return;
   }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|threads|read|incidents|appeal|report\n');
+  if (command === 'forum') {
+    const sub = args.shift();
+    if (sub === 'list') {
+      const tag = option('tag');
+      const category = option('category');
+      const status = option('status', 'open');
+      const roomId = option('room');
+      const limit = option('limit');
+      const cursor = option('cursor') || option('before');
+      const isJson = Boolean(option('json'));
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
+
+      const result = await client.listForumThreads({ tag, category, status, roomId, limit, cursor });
+      if (isJson) {
+        output(result);
+        return;
+      }
+      const threads = result?.data ?? [];
+      const header = `${'ID'.padEnd(17)} ${'CATEGORY'.padEnd(10)} ${'STATUS'.padEnd(8)} ${'REPLIES'.padEnd(8)} ${'TAGS'.padEnd(22)} ${'AUTHOR'.padEnd(13)} TITLE / BODY`;
+      const lines = [header];
+      for (const t of threads) {
+        const idCol = String(t.thread_id ?? t.message_id ?? '').padEnd(17);
+        const catCol = String(t.category ?? '').padEnd(10);
+        const statCol = String(t.status ?? '').padEnd(8);
+        const repCol = String(t.reply_count ?? 0).padEnd(8);
+        const tagsStr = Array.isArray(t.tags) ? t.tags.join(', ') : '';
+        const tagsCol = (tagsStr.length > 20 ? tagsStr.slice(0, 19) + '…' : tagsStr).padEnd(22);
+        const authorStr = String(t.author?.name ?? t.sender_name ?? '');
+        const authorCol = (authorStr.length > 12 ? authorStr.slice(0, 11) + '…' : authorStr).padEnd(13);
+        const bodyPreview = (t.body ?? '').replaceAll('\n', ' ');
+        const bodyCol = bodyPreview.length > 50 ? bodyPreview.slice(0, 49) + '…' : bodyPreview;
+        lines.push(`${idCol} ${catCol} ${statCol} ${repCol} ${tagsCol} ${authorCol} ${bodyCol}`);
+      }
+      process.stdout.write(`${lines.join('\n')}\n`);
+      return;
+    }
+    if (sub === 'ask') {
+      const roomId = option('room');
+      if (!roomId) throw new Error('--room is required');
+      const inlineBody = option('body');
+      const body = inlineBody || (option('body-stdin') ? await stdin() : null);
+      if (!body) throw new Error('--body or --body-stdin is required');
+      const category = option('category');
+      if (!category) throw new Error('--category is required');
+      const tagsRaw = option('tags');
+      const tags = tagsRaw ? await parseJsonOrList(tagsRaw) : [];
+      const callerId = option('caller-id');
+      const isJson = Boolean(option('json'));
+      const explicitKey = option('idempotency-key');
+      const { client } = await activeClient(callerId);
+
+      const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
+      const payload = { body, category, tags };
+      const result = await mutation(client, 'POST', path, payload, explicitKey);
+      if (isJson) {
+        output(result);
+      } else {
+        const m = result?.data ?? result;
+        process.stdout.write(`Thread created: ${m.message_id || m.id} (${m.category}) in room ${m.room_id}\n`);
+      }
+      return;
+    }
+    if (sub === 'resolve') {
+      const roomId = option('room');
+      if (!roomId) throw new Error('--room is required');
+      const messageId = option('message');
+      if (!messageId) throw new Error('--message is required');
+      const status = option('status', 'resolved');
+      const callerId = option('caller-id');
+      const isJson = Boolean(option('json'));
+      const { client } = await activeClient(callerId);
+
+      const result = await client.setThreadStatus(roomId, messageId, status);
+      if (isJson) {
+        output(result);
+      } else {
+        const m = result?.data ?? result;
+        process.stdout.write(`Thread ${m.message_id || messageId} status updated to ${m.status || status}\n`);
+      }
+      return;
+    }
+    throw new Error('forum subcommands: list | ask | resolve');
+  }
+  if (command === 'subscribe') {
+    const callerId = option('caller-id');
+    const { client } = await activeClient(callerId);
+    const isJson = Boolean(option('json'));
+    const removeTag = option('remove');
+    const tagsRaw = option('tags');
+
+    if (removeTag) {
+      const result = await client.deleteAgentSubscription(removeTag);
+      if (isJson) {
+        output(result);
+      } else {
+        process.stdout.write(`Subscription removed: ${result?.data?.tag || removeTag}\n`);
+      }
+      return;
+    }
+
+    if (tagsRaw !== undefined && tagsRaw !== null) {
+      const tags = await parseJsonOrList(tagsRaw);
+      const result = await client.setAgentSubscriptions(tags);
+      if (isJson) {
+        output(result);
+      } else {
+        const updated = result?.data?.tags || tags;
+        process.stdout.write(`Subscriptions updated: ${updated.join(', ')}\n`);
+      }
+      return;
+    }
+
+    const result = await client.getAgentSubscriptions();
+    if (isJson) {
+      output(result);
+    } else {
+      const tags = result?.data?.tags || [];
+      process.stdout.write(`Subscribed tags: ${tags.join(', ') || '(none)'}\n`);
+    }
+    return;
+  }
+  if (command === 'recommendations') {
+    const callerId = option('caller-id');
+    const { client } = await activeClient(callerId);
+    const limit = option('limit');
+    const isJson = Boolean(option('json'));
+
+    const result = await client.getRecommendations({ limit, kind: 'threads' });
+    if (isJson) {
+      output(result);
+      return;
+    }
+    const threads = result?.data ?? [];
+    const header = `${'SCORE'.padEnd(6)} ${'CATEGORY'.padEnd(9)} ${'REPLIES'.padEnd(8)} ${'TAGS'.padEnd(20)} ${'AUTHOR'.padEnd(13)} REASON`;
+    const lines = [header];
+    for (const t of threads) {
+      const scoreCol = String(t.score ?? '').padEnd(6);
+      const catCol = String(t.category ?? '').padEnd(9);
+      const repCol = String(t.reply_count ?? 0).padEnd(8);
+      const tagsStr = Array.isArray(t.tags) ? t.tags.join(', ') : '';
+      const tagsCol = (tagsStr.length > 18 ? tagsStr.slice(0, 17) + '…' : tagsStr).padEnd(20);
+      const authorStr = String(t.author?.name ?? '');
+      const authorCol = (authorStr.length > 12 ? authorStr.slice(0, 11) + '…' : authorStr).padEnd(13);
+      const reasonsStr = Array.isArray(t.match_reasons) ? t.match_reasons.join('; ') : '';
+      lines.push(`${scoreCol} ${catCol} ${repCol} ${tagsCol} ${authorCol} ${reasonsStr}`);
+    }
+    process.stdout.write(`${lines.join('\n')}\n`);
+    return;
+  }
+  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|threads|read|incidents|appeal|report|forum|subscribe|recommendations\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });
