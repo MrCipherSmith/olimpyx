@@ -175,6 +175,115 @@ async function main() {
       output(await client.setCardArchived(cardId, isArchived));
       return;
     }
+    if (sub === 'inspect') {
+      const targetId = args.shift() || option('id') || option('card') || option('version');
+      if (!targetId) throw new Error('knowledge inspect requires a <cardId|versionId>');
+      const callerId = option('caller-id');
+      let client;
+      if (callerId) {
+        const active = await activeClient(callerId);
+        client = active.client;
+      } else {
+        client = await configuredClient();
+      }
+
+      const isJson = Boolean(option('json'));
+      let cardData = null;
+      let versionData = null;
+
+      if (String(targetId).startsWith('knv_')) {
+        const vRes = await client.getKnowledgeVersion(targetId);
+        versionData = vRes?.data ?? vRes;
+        if (versionData?.card_id) {
+          try {
+            const cRes = await client.getKnowledgeCard(versionData.card_id);
+            cardData = cRes?.data ?? cRes;
+          } catch {
+            // ignore card fetch failure
+          }
+        }
+      } else {
+        try {
+          const cRes = await client.getKnowledgeCard(targetId);
+          cardData = cRes?.data ?? cRes;
+          if (cardData?.latest) {
+            versionData = cardData.latest;
+          } else if (cardData?.latest_version_id) {
+            try {
+              const vRes = await client.getKnowledgeVersion(cardData.latest_version_id);
+              versionData = vRes?.data ?? vRes;
+            } catch {
+              // ignore
+            }
+          }
+        } catch (err) {
+          if (!String(targetId).startsWith('knw_')) {
+            const vRes = await client.getKnowledgeVersion(targetId);
+            versionData = vRes?.data ?? vRes;
+            if (versionData?.card_id) {
+              const cRes = await client.getKnowledgeCard(versionData.card_id);
+              cardData = cRes?.data ?? cRes;
+            }
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      const quorum = versionData?.quorum ?? {
+        threshold: 2,
+        independent_confirms: 0,
+        independent_refutes: 0,
+        reached: false,
+        confirms_needed: 2
+      };
+      const threshold = Number(quorum.threshold ?? 2);
+      const indConfirms = Number(quorum.independent_confirms ?? 0);
+      const indRefutes = Number(quorum.independent_refutes ?? 0);
+      const filled = Math.min(indConfirms, threshold);
+      const empty = Math.max(0, threshold - filled);
+      const reachedTag = indConfirms >= threshold ? ' (Quorum Reached)' : '';
+      const progressIndicator = `[${'■'.repeat(filled)}${'□'.repeat(empty)}] ${indConfirms}/${threshold} independent confirmations${reachedTag}`;
+
+      const inspectResult = {
+        card_id: cardData?.card_id ?? versionData?.card_id,
+        version_id: versionData?.version_id ?? cardData?.latest_version_id,
+        topic: versionData?.topic,
+        status: cardData?.status ?? versionData?.status,
+        version_status: versionData?.status,
+        canonical_version_id: cardData?.canonical_version_id ?? null,
+        latest_version_id: cardData?.latest_version_id ?? versionData?.version_id,
+        has_pending_proposal: Boolean(cardData?.has_pending_proposal),
+        has_refuted_proposal: Boolean(cardData?.has_refuted_proposal),
+        progress: progressIndicator,
+        quorum,
+        independent_review_counts: versionData?.independent_review_counts ?? { confirm: indConfirms, refute: indRefutes },
+        review_counts: versionData?.review_counts ?? cardData?.review_counts ?? { confirm: 0, refute: 0, comment: 0 }
+      };
+
+      if (isJson) {
+        output(inspectResult);
+        return;
+      }
+
+      const lines = [
+        `Knowledge Inspection: ${inspectResult.topic ? `"${inspectResult.topic}"` : inspectResult.card_id}`,
+        `  Card ID:            ${inspectResult.card_id ?? 'unknown'}`,
+        `  Card Status:        ${inspectResult.status}`,
+        `  Canonical Version:  ${inspectResult.canonical_version_id ?? 'none (no confirmed version)'}`,
+        `  Latest Version:     ${inspectResult.latest_version_id ?? 'none'} (${inspectResult.version_status ?? 'unknown'})`,
+        `  Pending Proposal:   ${inspectResult.has_pending_proposal ? 'yes' : 'no'}`,
+        `  Refuted Proposal:   ${inspectResult.has_refuted_proposal ? 'yes' : 'no'}`,
+        `  Quorum Progress:    ${progressIndicator}`,
+        `  Independent Votes:  ${indConfirms} confirm(s), ${indRefutes} refute(s)`,
+        `  Raw Review Counts:  ${inspectResult.review_counts.confirm} confirm(s), ${inspectResult.review_counts.refute} refute(s), ${inspectResult.review_counts.comment ?? 0} comment(s)`
+      ];
+
+      const formatted = lines.join('\n') + '\n';
+      const safeFormatted = formatted.replace(/(?:access_token|agent_token|session_token|enrollment_token)\b[=:\s]+["']?[^"'\s,}]+/gi, '[REDACTED]');
+      process.stdout.write(safeFormatted);
+      return;
+    }
     if (!sub || sub === 'list' || sub === 'search') {
       const q = option('q');
       const scope = option('scope');
@@ -197,7 +306,7 @@ async function main() {
       output(await client.knowledge(qs));
       return;
     }
-    throw new Error('knowledge subcommands: card | review | publish | archive | list');
+    throw new Error('knowledge subcommands: card | review | publish | archive | inspect | list');
   }
   if (command === 'message') { const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null); const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key'); if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required'); const { client } = await activeClient(option('caller-id')); const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`; const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) }; output(await mutation(client, 'POST', path, payload, explicitKey)); return; }
   if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); output(page); return; }

@@ -135,11 +135,20 @@ test("knowledge governance: migration, privacy isolation, owner publication, ref
     payload: { installation_id: "install-bob", host: { kind: "codex" }, persona_revision: 1 }
   })).json().data.session_token;
 
-  // Enroll Charlie (also under Owner B)
+  // Register Owner C and enroll Charlie under Owner C for independent verification
+  const regC = await app.inject({
+    method: "POST",
+    url: "/v1/owners/register",
+    headers: { "idempotency-key": "reg-own-c" },
+    payload: { email: `owner_c_${randomUUID()}@example.test`, password: "very secure password", display_name: "Owner C" }
+  });
+  assert.equal(regC.statusCode, 201);
+  const ownerCToken = regC.json().data.access_token;
+
   const enrollTokenC = (await app.inject({
     method: "POST",
     url: "/v1/owners/me/enrollment-tokens",
-    headers: mutate(ownerBToken, "enroll-charlie-code"),
+    headers: mutate(ownerCToken, "enroll-charlie-code"),
     payload: {}
   })).json().data.enrollment_token;
 
