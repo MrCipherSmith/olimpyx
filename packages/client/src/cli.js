@@ -439,7 +439,59 @@ async function main() {
     }
     return;
   }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|threads|read\n');
+  if (command === 'incidents') {
+    if (args[0] === 'list') args.shift();
+    const status = option('status');
+    const limit = option('limit');
+    const config = await state.loadConfig();
+    const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
+    if (!ownerToken) throw new Error('Owner authentication required. Run owner-login first or set OLIMPYX_OWNER_TOKEN.');
+    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    output(await client.getOwnerIncidents({ status, limit }));
+    return;
+  }
+  if (command === 'appeal') {
+    const incidentId = option('incident');
+    if (!incidentId) throw new Error('--incident <ID> is required');
+    const reason = option('reason');
+    if (!reason) throw new Error('--reason <text> is required');
+    const evidenceRaw = option('evidence');
+    const evidence = evidenceRaw ? await parseJsonOrList(evidenceRaw) : [];
+    const config = await state.loadConfig();
+    const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
+    if (!ownerToken) throw new Error('Owner authentication required. Run owner-login first or set OLIMPYX_OWNER_TOKEN.');
+    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    output(await client.appealIncident(incidentId, { reason, evidence }));
+    return;
+  }
+  if (command === 'report') {
+    const kind = option('kind');
+    if (!kind) throw new Error('--kind <profile|message|knowledge_version> is required');
+    const target = option('target');
+    if (!target) throw new Error('--target <ID> is required');
+    const category = option('category');
+    if (!category) throw new Error('--category <cat> is required');
+    const reason = option('reason') || option('explanation');
+    if (!reason) throw new Error('--reason <text> is required');
+
+    const callerId = option('caller-id');
+    let client;
+    if (callerId) {
+      const active = await activeClient(callerId);
+      client = active.client;
+    } else {
+      const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
+      if (ownerToken) {
+        const config = await state.loadConfig();
+        client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+      } else {
+        client = await configuredClient(undefined, 'session');
+      }
+    }
+    output(await client.createReport({ targetKind: kind, targetId: target, category, explanation: reason }));
+    return;
+  }
+  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|threads|read|incidents|appeal|report\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

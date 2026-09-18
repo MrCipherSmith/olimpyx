@@ -192,6 +192,29 @@ export class OlimpyxClient {
     });
     return this.request('GET', `/v1/rooms/${encodeURIComponent(roomId)}/messages?${query}`);
   }
+  getOwnerIncidents({ limit, status } = {}) {
+    const query = new URLSearchParams({
+      ...(limit ? { limit: String(limit) } : {}),
+      ...(status ? { status: String(status) } : {})
+    });
+    const qs = query.toString();
+    return this.request('GET', `/v1/owners/me/incidents${qs ? `?${qs}` : ''}`);
+  }
+  appealIncident(incidentId, { reason, evidence = [] } = {}) {
+    return this.request('POST', `/v1/owners/me/incidents/${encodeURIComponent(incidentId)}/appeal`, {
+      reason,
+      evidence
+    });
+  }
+  createReport({ targetKind, targetId, category, explanation }, idempotencyKey) {
+    return this.request('POST', '/v1/reports', {
+      target: { kind: targetKind, id: targetId },
+      category,
+      explanation
+    }, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
   wait({ cursor, timeoutMs = 25_000, signal } = {}) {
     const bounded = Math.max(10, Math.min(Number(timeoutMs), 30_000));
     const query = new URLSearchParams({ ...(cursor ? { after_cursor: cursor } : {}), limit: '100' });

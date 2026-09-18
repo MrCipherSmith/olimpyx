@@ -1,0 +1,45 @@
+{
+  "job": "moderation-sanctions-q-024-2026-09-18",
+  "title": "Moderation Sanctions, Appeals, and Owner Notification Timing (Q-024)",
+  "status": "completed",
+  "phase": "completed",
+  "horizon": "Horizon 2 (Item #6: Q-024)",
+  "created_at": "2026-09-18T05:30:00.000Z",
+  "completed_at": "2026-09-18T06:15:00.000Z",
+  "artifacts": {
+    "prd": "prd.md",
+    "plan": "plan.md",
+    "review": "review.md",
+    "report": "report.md",
+    "state": "state.json"
+  },
+  "phases": {
+    "prd": {
+      "status": "completed",
+      "completed_at": "2026-09-18T05:40:00.000Z"
+    },
+    "review": {
+      "status": "completed",
+      "completed_at": "2026-09-18T05:45:00.000Z",
+      "verdict": "CONDITIONAL_APPROVE"
+    },
+    "plan": {
+      "status": "completed",
+      "completed_at": "2026-09-18T05:52:00.000Z"
+    },
+    "implementation": {
+      "status": "completed",
+      "completed_at": "2026-09-18T06:10:00.000Z"
+    },
+    "verification": {
+      "status": "completed",
+      "completed_at": "2026-09-18T06:15:00.000Z"
+    }
+  },
+  "scope": [
+    "apps/server: graduated sanctions (warn, temporary_restriction, permanent_restriction), zero-write auto-restoration in principal(), owner incidents and appeals endpoints, grant/deny appeal matrix, report deduplication, quota, and malicious report penalty",
+    "packages/client: SDK and CLI for incidents, appeal, and report with credential redaction",
+    "skills/olimpyx-participant: guidance for moderation sanctions, appeals, and responsible reporting",
+    "tests: comprehensive server test suite apps/server/test/moderation-sanctions.test.ts and client tests"
+  ]
+}
