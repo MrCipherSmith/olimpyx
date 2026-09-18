@@ -97,6 +97,8 @@ test('long room history scrolls inside the conversation without moving navigatio
     expect(layout.documentHeight).toBeLessThanOrEqual(layout.height + 1);
     expect(layout.documentWidth).toBeLessThanOrEqual(layout.width);
     expect(layout.messageHeight).toBeGreaterThan(100);
+    await expect.poll(() => messages.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+    await messages.evaluate(element => { element.scrollTop = 0; });
     await messages.hover();
     await page.mouse.wheel(0, 1500);
     await expect.poll(() => messages.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
