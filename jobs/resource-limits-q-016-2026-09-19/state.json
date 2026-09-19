@@ -1,8 +1,8 @@
 {
   "job": "resource-limits-q-016-2026-09-19",
   "title": "Resource Limits, Stop Behavior, and Contribution Counters (Q-016)",
-  "status": "in_progress",
-  "phase": "ready_for_implementation",
+  "status": "ready_for_pr",
+  "phase": "COMPLETION",
   "horizon": "Horizon 2 (Item #9: Q-016)",
   "created_at": "2026-09-19T00:00:00.000Z",
   "proposed_decision": "D-045 — Server resource limits and stop behavior",
@@ -28,12 +28,76 @@
     "state": "state.json"
   },
   "phases": {
-    "discovery": { "status": "completed", "completed_at": "2026-09-19T00:00:00.000Z" },
-    "brainstorm": { "status": "completed", "completed_at": "2026-09-19T00:00:00.000Z" },
-    "prd": { "status": "completed", "revision": 2 },
-    "plan": { "status": "completed", "revision": 2 },
-    "review": { "status": "completed", "verdict_round1": "REQUEST_CHANGES", "applied_in_revision": 2 },
-    "implementation": { "status": "pending" },
-    "verification": { "status": "pending" }
-  }
+    "discovery": {
+      "status": "completed",
+      "completed_at": "2026-09-19T00:00:00.000Z"
+    },
+    "brainstorm": {
+      "status": "completed",
+      "completed_at": "2026-09-19T00:00:00.000Z"
+    },
+    "prd": {
+      "status": "completed",
+      "revision": 2
+    },
+    "plan": {
+      "status": "completed",
+      "revision": 2
+    },
+    "review": {
+      "status": "completed",
+      "verdict_round1": "REQUEST_CHANGES",
+      "applied_in_revision": 2
+    },
+    "implementation": {
+      "status": "completed",
+      "commits": [
+        "8dd0ce5",
+        "d846075",
+        "dcf4f21",
+        "8b34746",
+        "888a719"
+      ]
+    },
+    "verification": {
+      "status": "completed",
+      "tests": {
+        "server": "120/120",
+        "client": "177/177",
+        "web": "18/18",
+        "skipped": 0
+      },
+      "e2e": "16/16 (pre-fix)",
+      "live": "smoke/live/live-cli green (pre-fix)"
+    },
+    "code_review": {
+      "rounds": [
+        {
+          "verdict": "REQUEST_CHANGES",
+          "major": 2,
+          "minor": 7,
+          "info": 5,
+          "fixed_in": [
+            "87792d8",
+            "a757e52"
+          ]
+        },
+        {
+          "verdict": "APPROVE_WITH_SUGGESTIONS",
+          "low": 3,
+          "nit": 1,
+          "fixed_in": [
+            "37f715e"
+          ]
+        }
+      ]
+    }
+  },
+  "branch": "feat/resource-limits-q-016",
+  "worktree": "../olimpyx-q016",
+  "follow_ups": [
+    "Push + PR after owner confirmation; rerun e2e/live in CI",
+    "ROADMAP Horizon 2 #9 after merge",
+    "apps/web stop/usage view (out of scope)"
+  ]
 }
