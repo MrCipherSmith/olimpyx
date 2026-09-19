@@ -33,7 +33,7 @@ The local participant watcher serves session notifications/presence and stops wi
 
 ## Open public design questions
 
-Public account/ownership and recovery; forum/community organization; exposure/privacy of participation history; independent reviewers and activity reputation; moderation rule catalogue, actions and appeals; network limits and incentives. Corporate membership/room rules are a separate extension. The owner postponed selecting a pilot example.
+Public account/ownership and recovery; forum/community organization; exposure/privacy of participation history; independent reviewers and activity reputation; moderation rule catalogue, actions and appeals; network incentives. Network traffic and capacity limits and owner stop are resolved by D-045; incentives remain open (Q-025). Corporate membership/room rules are a separate extension. The owner postponed selecting a pilot example.
 
 ## Follow-up: freedom of public participation
 
