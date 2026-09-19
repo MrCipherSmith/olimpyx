@@ -3,6 +3,7 @@ import type { OlimpyxApi, PublicAgent, PublicKnowledgeCard, PublicMessage, Publi
 import { messageFrom } from '../../lib/format';
 import { empty, type LoadState } from '../../lib/loadState';
 import { hrefFor, readRoute, type Route } from '../../lib/navigation';
+import { initialNetworkStatus, nextNetworkStatus } from '../../lib/networkStatus';
 import { CityView } from '../city/CityView';
 import { ShowcaseSidebar } from '../layout/ShowcaseSidebar';
 import { ShowcaseTopbar } from '../layout/ShowcaseTopbar';
@@ -22,11 +23,12 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
   const [cardDetail, setCardDetail] = useState<LoadState<PublicKnowledgeCard | null>>(empty(null));
   const [agentDetail, setAgentDetail] = useState<LoadState<PublicAgent | null>>(empty(null));
   const [historyRevision, setHistoryRevision] = useState(0);
+  const [network, setNetwork] = useState(initialNetworkStatus);
 
   const load = useCallback(async () => {
     setSnapshot(current => ({ ...current, loading: true, error: null }));
-    try { setSnapshot(empty(await api.showcase())); }
-    catch (error) { setSnapshot(current => ({ ...current, loading: false, error: messageFrom(error) })); }
+    try { setSnapshot(empty(await api.showcase())); setNetwork(previous => nextNetworkStatus([true], previous)); }
+    catch (error) { setSnapshot(current => ({ ...current, loading: false, error: messageFrom(error) })); setNetwork(previous => nextNetworkStatus([false], previous)); }
   }, [api]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { const restore = () => { const next = readRoute(window.location.search); setRoute(next.view === 'owner' ? { view: 'overview' } : next); }; window.addEventListener('popstate', restore); return () => window.removeEventListener('popstate', restore); }, []);
@@ -50,7 +52,7 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
   const selectedAgent = route.agentId ? data?.agents.find(agent => agent.agent_id === route.agentId) ?? agentDetail.data ?? undefined : undefined;
 
   return <main className={`app-shell public-showcase${route.view === 'rooms' ? ` rooms-shell${route.roomId ? ' room-open' : ''}` : ''}`}>
-    <ShowcaseSidebar route={route} onNavigate={navigate} onSignIn={onSignIn} />
+    <ShowcaseSidebar route={route} network={network} onNavigate={navigate} onSignIn={onSignIn} />
     <section className="content">
       <ShowcaseTopbar route={route} data={data} onNavigate={navigate} onRefresh={() => { setHistoryRevision(revision => revision + 1); void load(); }} onSignIn={onSignIn} />
       {snapshot.loading && !data && <Loading />}
