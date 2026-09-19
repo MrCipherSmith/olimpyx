@@ -46,11 +46,14 @@ export function App() {
   const api = useMemo(() => new OlimpyxApi(sessionStore), [sessionStore]);
   const [session, setSession] = useState<StoredSession | null>(() => sessionStore.current);
   const [authWanted, setAuthWanted] = useState(false);
-  const authenticate = (newSession: StoredSession) => { sessionStore.save(newSession); showCityInHistory(); setSession(newSession); };
-  const signedOut = () => { showCityInHistory(); setSession(null); };
+  // `authWanted` only asks for the auth screen while there is no session; once the session ends (sign-out
+  // or it is lost elsewhere) it must not linger, or the guest lands back on the auth screen instead of
+  // the public city.
+  const authenticate = (newSession: StoredSession) => { sessionStore.save(newSession); showCityInHistory(); setSession(newSession); setAuthWanted(false); };
+  const signedOut = () => { showCityInHistory(); setSession(null); setAuthWanted(false); };
 
   if (!session) return authWanted ? <AuthScreen api={api} onAuthenticated={authenticate} onBack={() => setAuthWanted(false)} /> : <PublicShowcase api={api} onSignIn={() => setAuthWanted(true)} />;
-  return <ParticipantApp key={session.token} api={api} sessionStore={sessionStore} session={session} onSignedOut={signedOut} onSessionLost={() => setSession(null)} />;
+  return <ParticipantApp key={session.token} api={api} sessionStore={sessionStore} session={session} onSignedOut={signedOut} onSessionLost={() => { setSession(null); setAuthWanted(false); }} />;
 }
 
 interface ParticipantAppProps {

@@ -182,7 +182,11 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
        mount or unmount --- */
     const panelObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => onPanelsChanged()) : null;
     const observed = new Set<Element>();
-    const hudRoot = canvas.closest('.city-shell, .city-view');
+    // `.city-shell` is preferred: in the app it is an ancestor of both this canvas (via `.city-view`) and
+    // the HUD/tab-bar panels (via the sibling `.city-shell-hud`), so it is the one root that actually
+    // contains every occluder. `.city-view` alone (the nearer match, e.g. in a standalone render with no
+    // shell) would miss panels that live outside it.
+    const hudRoot = canvas.closest('.city-shell') ?? canvas.closest('.city-view');
     const queryPanels = () => (hudRoot ? Array.from(hudRoot.querySelectorAll<HTMLElement>(HUD_PANEL_SELECTOR)) : []);
     /** Observes new panels and stops observing the ones that left the document (no retained detached nodes). */
     const syncObserved = (panels: readonly Element[]) => {

@@ -649,6 +649,10 @@
   }
 
   .screen-room .screen-actions a::before {
+    /* Fallback for browsers that don't parse the `/ ''` alt-text syntax below: without it, the whole
+       `content` declaration is invalid and dropped, leaving this ::before with no glyph at all. A browser
+       that does support alt text overrides this with the next declaration. */
+    content: '#';
     /* The `/ ''` alt text stops this generated glyph from also joining the accessible name (which would
        otherwise read "# All rooms"): the plain "All rooms" text (still in the DOM, see above) is enough. */
     content: '#' / '';

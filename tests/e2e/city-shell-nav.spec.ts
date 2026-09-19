@@ -49,14 +49,13 @@ test.describe('the dive transition (motion allowed)', () => {
     await expect(overlay(page)).toHaveAttribute('data-phase', 'focusing');
     await expect(page).not.toHaveURL(/view=/);
 
-    // Diving: advance past the 650ms focus timer; the full-screen "packet dive" overlay takes over. Its
-    // visible label is set from a useEffect (DiveOverlay.tsx) that a virtual clock never flushes in this
-    // browser, so assert the dive through the (prop-driven, effect-free) live region instead — it carries
-    // the same "Opening <name>…" announcement and is what actually reaches assistive tech, the overlay
-    // itself being aria-hidden decoration.
+    // Diving: advance past the 650ms focus timer; the full-screen "packet dive" overlay takes over, with
+    // its visible (but aria-hidden, decorative) label naming the building, and the effect-free live region
+    // carrying the same announcement to assistive tech.
     await page.clock.runFor(650);
     await expect(overlay(page)).toHaveAttribute('data-phase', 'diving');
     await expect(overlay(page)).toHaveClass(/visible/);
+    await expect(overlay(page).locator('.dive-overlay-name')).toHaveText('Central Library of Knowledge');
     await expect(page.locator('.dive-status')).toContainText('Opening');
     await expect(page.locator('.dive-status')).toContainText('Central Library of Knowledge');
 
@@ -106,18 +105,29 @@ test.describe('the dive transition (motion allowed)', () => {
   test('opening a room from the Rooms directory redives into it, with motion enabled', async ({ page }) => {
     await fixture(page);
     await page.goto('/');
+    await page.clock.install();
+
     // Rooms itself has no building (diveTargetFor falls back to the forum plaza), so this dive from idle
     // lands without a specific target name; the interesting case here is the *second* dive it sets up.
     await page.getByRole('link', { name: 'Rooms', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'Rooms', exact: true })).toBeFocused({ timeout: 2000 });
+    await expect(page.getByRole('heading', { name: 'Rooms', exact: true })).toBeFocused();
 
     // Screen → screen redive (diveMachine.ts: the rooms directory handing off to a room's building): the
-    // directory is hidden first (the URL reverts to the overview) and the overlay dives straight into the
-    // room's building, without a "Back to the city" round trip in between.
+    // directory is hidden immediately (the internal route reverts to the overview, though the address bar
+    // is left alone — only a `push` commit touches it, and this one isn't) and the overlay dives straight
+    // into the room's building through the same focusing (650ms) → diving (550ms) phases as a fresh dive,
+    // without a "Back to the city" round trip in between.
     await page.locator('.room-list .room-row').filter({ hasText: room.title }).click();
-    await expect(overlay(page)).toHaveClass(/visible/, { timeout: 2000 });
+    await expect(overlay(page)).toHaveAttribute('data-phase', 'focusing');
+
+    await page.clock.runFor(650);
+    await expect(overlay(page)).toHaveAttribute('data-phase', 'diving');
+    await expect(overlay(page)).toHaveClass(/visible/);
     await expect(overlay(page)).toContainText(room.title);
-    await expect(page.getByRole('heading', { name: room.title, exact: true })).toBeFocused({ timeout: 2000 });
+
+    await page.clock.runFor(550);
+    await expect(overlay(page)).toHaveAttribute('data-phase', 'inside');
+    await expect(page.getByRole('heading', { name: room.title, exact: true })).toBeFocused();
     await expect(page).toHaveURL(/room=room_shell/);
     await expect(overlay(page)).not.toHaveClass(/visible/);
   });

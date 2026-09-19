@@ -124,6 +124,34 @@ describe('public showcase', () => {
     window.dispatchEvent(new PopStateEvent('popstate'));
     expect(await screen.findByRole('heading', { name: 'Ada' })).toBeInTheDocument();
   });
+
+  it('returns a signed-out user to the guest city, not the auth screen it came from', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url === '/v1/owners/login') return new Response(JSON.stringify({ data: { owner: { owner_id: 'owner-1', email: 'owner@example.test', display_name: 'Owner' }, access_token: 'owner-token' } }), { status: 200 });
+      if (url === '/v1/owners/logout') return new Response(null, { status: 204 });
+      if (url.startsWith('/v1/showcase')) return new Response(JSON.stringify({ data: snapshot }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByRole('heading', { name: 'Sign in to Olimpyx' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'owner@example.test' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'long-enough-password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    // Back on the guest city, not stuck on the auth screen `authWanted` left set from before sign-in.
+    // The city's own <h1> ("Olimpyx city") is shared by every mode (guest and participant both render
+    // CityView), so it cannot tell the two apart on its own here — the guest-only nav landmark can.
+    expect(await screen.findByRole('navigation', { name: 'Showcase navigation' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Olimpyx city' })).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Main navigation' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Sign in to Olimpyx' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+  });
 });
 
 describe('authenticated showcase surfaces', () => {

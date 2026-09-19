@@ -22,6 +22,7 @@ const PANELS: Record<string, { left: number; top: number; width: number; height:
   'hud-directory': { left: 1130, top: 20, width: 290, height: 670 },
   'city-camera': { left: 1292, top: 710, width: 128, height: 170 },
   'tab-bar': { left: 0, top: 836, width: 1440, height: 64 },
+  'hud-main': { left: 20, top: 834, width: 240, height: 46 },
 };
 
 let rafCallbacks: FrameRequestCallback[] = [];
@@ -140,37 +141,49 @@ describe('CityCanvas HUD panels', () => {
   }
 
   const controller = { current: null as CityCameraController | null };
+  // Nested like the real app (CityShell.tsx): `.city-shell-hud` (hud-main, the phone tab bar) is a
+  // *sibling* of `.city-view` (which wraps the canvas), never an ancestor of it — both hang off
+  // `.city-shell`. A hudRoot resolved from the nearer `.city-view` alone would miss both panels.
   function Shell({ legend = true, tabBar = true }: { legend?: boolean; tabBar?: boolean }) {
     return (
       <div className="city-shell">
-        {legend && <div className="hud hud-legend" />}
-        {tabBar && <nav className="tab-bar" />}
-        <CityCanvas scene={scene} selectedId={null} filter="all" label="City" reducedMotion={false} controller={controller} onSelect={vi.fn()} />
+        <div className="city-shell-hud">
+          {legend && <div className="hud hud-main" />}
+          {tabBar && <nav className="tab-bar" />}
+        </div>
+        <section className="city-view">
+          <CityCanvas scene={scene} selectedId={null} filter="all" label="City" reducedMotion={false} controller={controller} onSelect={vi.fn()} />
+        </section>
       </div>
     );
   }
 
   beforeEach(() => { RecordingResizeObserver.instances = []; vi.stubGlobal('ResizeObserver', RecordingResizeObserver); });
 
-  it('keeps labels and the fit off the phone tab bar', () => {
+  it('keeps labels and the fit off the phone tab bar although it sits outside .city-view', () => {
     render(<Shell legend={false} />);
     flush();
     expect(frames.at(-1)!.occluders).toEqual([{ left: 0, top: 836, right: 1440, bottom: 900 }]);
   });
 
-  it('stops observing a HUD panel once it unmounts, and drops its rectangle', async () => {
+  it('measures hud-main and the tab bar although both sit outside .city-view, and stops observing a HUD panel once it unmounts', async () => {
     const view = render(<Shell />);
     flush();
-    const legend = document.querySelector('.hud-legend')!;
-    const panelObserver = RecordingResizeObserver.instances.find(observer => observer.observed.has(legend))!;
+    const hudMain = document.querySelector('.hud-main')!;
+    const tabBar = document.querySelector('.tab-bar')!;
+    const panelObserver = RecordingResizeObserver.instances.find(observer => observer.observed.has(hudMain))!;
     expect(panelObserver).toBeDefined();
-    expect(frames.at(-1)!.occluders).toHaveLength(2);
+    expect(panelObserver.observed.has(tabBar)).toBe(true);
+    expect(frames.at(-1)!.occluders).toEqual([
+      { left: 20, top: 834, right: 260, bottom: 880 },
+      { left: 0, top: 836, right: 1440, bottom: 900 },
+    ]);
 
     view.rerender(<Shell legend={false} />);
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); // MutationObserver delivery
     flush();
-    expect(panelObserver.unobserved).toContain(legend);
-    expect(panelObserver.observed.has(legend)).toBe(false);
+    expect(panelObserver.unobserved).toContain(hudMain);
+    expect(panelObserver.observed.has(hudMain)).toBe(false);
     expect(frames.at(-1)!.occluders).toEqual([{ left: 0, top: 836, right: 1440, bottom: 900 }]);
   });
 });

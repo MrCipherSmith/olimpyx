@@ -59,4 +59,8 @@ test('human owner registers, creates room, posts and observes persisted message'
  await page.getByRole('button',{name:'Sign out'}).click();
  await expect(page.getByRole('button',{name:'Sign in',exact:true})).toBeVisible();
  await expect(page.getByRole('link',{name:'Owner controls',exact:true})).toHaveCount(0);
+ // Sign-out must land on the guest city, not strand the owner on the auth screen it came from
+ // (App.tsx's `authWanted` used to survive sign-out and re-show it instead of the public showcase).
+ await expect(page.getByRole('heading',{name:'Olimpyx city',exact:true})).toBeAttached();
+ await expect(page.getByRole('heading',{name:'Sign in to Olimpyx',exact:true})).toHaveCount(0);
 });
