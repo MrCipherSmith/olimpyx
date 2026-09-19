@@ -1,1 +1,0 @@
-export function Metric({ label, value, onClick }: { label: string; value: number | string; onClick?: () => void }) { return onClick ? <button className="metric" onClick={onClick}><strong>{value}</strong><span>{label}</span></button> : <div className="metric"><strong>{value}</strong><span>{label}</span></div>; }

@@ -1,22 +1,26 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import type { OlimpyxApi, PublicAgent, PublicKnowledgeCard, PublicMessage, PublicRoom, ShowcaseSnapshot } from '../../lib/api';
 import { messageFrom } from '../../lib/format';
 import { empty, type LoadState } from '../../lib/loadState';
-import { hrefFor, readRoute, type Route } from '../../lib/navigation';
+import { hrefFor, readRoute, screenFor, type Route } from '../../lib/navigation';
 import { initialNetworkStatus, nextNetworkStatus } from '../../lib/networkStatus';
+import { ago } from '../../lib/format';
 import { CityView } from '../city/CityView';
-import { ShowcaseSidebar } from '../layout/ShowcaseSidebar';
-import { ShowcaseTopbar } from '../layout/ShowcaseTopbar';
+import { buildCityScene } from '../city/cityScene';
+import { Empty } from '../shared/Empty';
 import { ErrorText } from '../shared/ErrorText';
 import { Loading } from '../shared/Loading';
+import { RouteLink } from '../shared/RouteLink';
+import { agentsBadge, CityHud, countBadge } from '../shell/CityHud';
+import { CityShell } from '../shell/CityShell';
+import { RoomBadges, RoomSubline } from '../shell/RoomHeader';
+import { ScreenLayer } from '../shell/ScreenLayer';
 import { PublicAgents } from './PublicAgents';
 import { PublicKnowledge } from './PublicKnowledge';
-import { PublicOverview } from './PublicOverview';
-import { PublicRooms } from './PublicRooms';
+import { PublicRoomConversation, PublicRoomDirectory } from './PublicRooms';
 
 export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => void }) {
   const [route, setRoute] = useState<Route>(() => { const initial = readRoute(window.location.search); return initial.view === 'owner' ? { view: 'overview' } : initial; });
-  useEffect(() => { const content = document.querySelector('.content'); if (content) content.scrollTop = 0; }, [route]);
   const [snapshot, setSnapshot] = useState<LoadState<ShowcaseSnapshot | null>>(empty(null));
   const [roomMessages, setRoomMessages] = useState<LoadState<PublicMessage[]>>(empty([]));
   const [roomDetail, setRoomDetail] = useState<LoadState<PublicRoom | null>>(empty(null));
@@ -51,21 +55,78 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
   const selectedCard = route.cardId ? data?.knowledge_cards.find(card => card.card_id === route.cardId) ?? cardDetail.data ?? undefined : undefined;
   const selectedAgent = route.agentId ? data?.agents.find(agent => agent.agent_id === route.agentId) ?? agentDetail.data ?? undefined : undefined;
 
-  return <main className={`app-shell public-showcase${route.view === 'rooms' ? ` rooms-shell${route.roomId ? ' room-open' : ''}` : ''}`}>
-    <ShowcaseSidebar route={route} network={network} onNavigate={navigate} onSignIn={onSignIn} />
-    <section className="content">
-      <ShowcaseTopbar route={route} data={data} onNavigate={navigate} onRefresh={() => { setHistoryRevision(revision => revision + 1); void load(); }} onSignIn={onSignIn} />
-      {snapshot.loading && !data && <Loading />}
-      {snapshot.error && !data && <ErrorText text={snapshot.error} />}
-      {data && route.view === 'overview' && <PublicOverview data={data} onNavigate={navigate} />}
-      {data && route.view === 'city' && <CityView rooms={data.rooms} agents={data.agents} cardCount={data.knowledge_cards.length} mode="guest" onNavigate={navigate} />}
-      {data && route.view === 'rooms' && <PublicRooms data={data} selected={selectedRoom} messages={roomMessages} onNavigate={navigate} />}
-      {data && route.view === 'agents' && <PublicAgents data={data} selected={selectedAgent} onNavigate={navigate} />}
-      {data && route.view === 'knowledge' && <PublicKnowledge data={data} selected={selectedCard} onNavigate={navigate} />}
-      {route.roomId && roomDetail.loading && <Loading />}{route.roomId && roomDetail.error && <ErrorText text="This room is unavailable in the public showcase." />}
-      {route.cardId && cardDetail.loading && <Loading />}{route.cardId && cardDetail.error && <ErrorText text="This knowledge card is unavailable in the public showcase." />}
-      {route.agentId && agentDetail.loading && <Loading />}{route.agentId && agentDetail.error && <ErrorText text="This agent is unavailable in the public showcase." />}
-      {snapshot.error && data && <ErrorText text={`Refresh failed: ${snapshot.error}`} />}
-    </section>
-  </main>;
+  const rooms = useMemo(() => data?.rooms ?? [], [data]);
+  const avenues = useMemo(() => buildCityScene(rooms).avenues.length, [rooms]);
+  const refresh = () => { setHistoryRevision(revision => revision + 1); void load(); };
+  const refreshButton = <button className="secondary compact" onClick={refresh}>↻ Refresh</button>;
+  const screen = screenFor(route);
+  const closeScreen = () => navigate({ view: 'overview' });
+  const snapshotState = <>
+    {snapshot.loading && !data && <Loading />}
+    {snapshot.error && !data && <ErrorText text={snapshot.error} />}
+    {snapshot.error && data && <ErrorText text={`Refresh failed: ${snapshot.error}`} />}
+  </>;
+
+  const hud = <CityHud
+    navLabel="Showcase navigation"
+    eyebrow="Public showcase"
+    network={network}
+    activeView={route.view}
+    onNavigate={navigate}
+    note={<p className="hud-note">{data ? `Updated ${ago(data.generated_at)}` : 'Status unavailable'}</p>}
+    items={[
+      { view: 'overview', label: 'Overview', icon: '◫', badge: '3D', badgeLabel: 'The city map' },
+      { view: 'rooms', label: 'Rooms', icon: '#', ...countBadge(data ? data.counts.rooms : null, 'published room', 'published rooms') },
+      { view: 'agents', label: 'Agents', icon: '⦾', ...agentsBadge(data ? data.agents : null) },
+      { view: 'knowledge', label: 'Knowledge', icon: '◈', ...countBadge(data ? data.counts.knowledge_cards : null, 'knowledge card', 'knowledge cards') },
+    ]}
+    stats={[{ label: 'Rooms', value: data ? data.rooms.length : null }, { label: 'Avenues', value: data ? avenues : null }, { label: 'Agents', value: data ? data.agents.length : null }]}
+    account={<>
+      <div><strong>Guest view</strong><small>Published material only</small></div>
+      {refreshButton}
+      <button className="secondary compact" onClick={onSignIn}>Sign in</button>
+    </>}
+  />;
+
+  const layer = (() => {
+    if (!screen) return null;
+    const common = { kind: screen.kind, onBack: closeScreen };
+    switch (screen.kind) {
+      case 'rooms': return <ScreenLayer {...common} eyebrow="Forum · published rooms" title="Rooms" actions={refreshButton}>
+        {snapshotState}{data && <PublicRoomDirectory data={data} onNavigate={navigate} />}
+      </ScreenLayer>;
+      case 'room': return <ScreenLayer {...common} eyebrow="Published room" title={selectedRoom?.title ?? 'Room'}
+        badges={selectedRoom && <RoomBadges room={selectedRoom} agents={data ? data.agents : null} access="Read only" />}
+        subline={selectedRoom && <RoomSubline room={selectedRoom} />}
+        actions={<><RouteLink className="secondary compact" route={{ view: 'rooms' }} onNavigate={navigate}>All rooms</RouteLink>{refreshButton}<button className="secondary compact" onClick={onSignIn}>Sign in</button></>}>
+        {snapshotState}
+        {roomDetail.loading && <Loading />}{roomDetail.error && <ErrorText text="This room is unavailable in the public showcase." />}
+        {data && selectedRoom && <PublicRoomConversation data={data} room={selectedRoom} messages={roomMessages} onNavigate={navigate} />}
+        {data && !selectedRoom && !roomDetail.loading && !roomDetail.error && <Empty title="Room unavailable" text="This room is not in the public showcase." />}
+      </ScreenLayer>;
+      case 'knowledge': return <ScreenLayer {...common} eyebrow="Forum · Central Library" title="Central Library of Knowledge" actions={refreshButton}>
+        {snapshotState}
+        {data && <PublicKnowledge data={data} selected={selectedCard} onNavigate={navigate} />}
+        {cardDetail.loading && <Loading />}{cardDetail.error && <ErrorText text="This knowledge card is unavailable in the public showcase." />}
+      </ScreenLayer>;
+      case 'agents': return <ScreenLayer {...common} eyebrow="Forum · Pantheon" title="Pantheon of Agents" actions={refreshButton}>
+        {snapshotState}
+        {data && <PublicAgents data={data} selected={selectedAgent} onNavigate={navigate} />}
+        {agentDetail.loading && <Loading />}{agentDetail.error && <ErrorText text="This agent is unavailable in the public showcase." />}
+      </ScreenLayer>;
+      case 'owner': return null; // never for a guest: the route is rewritten to the city above
+    }
+  })();
+
+  return <CityShell
+    hud={hud}
+    city={<>
+      <CityView rooms={rooms} mode="guest" loading={snapshot.loading} paused={Boolean(layer)} onNavigate={navigate} />
+      {!layer && snapshot.error && <div className="hud hud-alert"><ErrorText text={data ? `Refresh failed: ${snapshot.error}` : snapshot.error} /></div>}
+    </>}
+    screen={layer && <Fragment key={screen!.key}>{layer}</Fragment>}
+    screenKey={layer ? screen!.key : null}
+    screenView={layer ? route.view : null}
+    onClose={closeScreen}
+  />;
 }

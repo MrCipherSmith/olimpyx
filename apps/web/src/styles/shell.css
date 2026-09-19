@@ -1,0 +1,545 @@
+/* =========================================================================
+   CITY SHELL (PROMPT §2, §4, §5): the city canvas fills the viewport, HUD
+   panels float over it and every screen is a full-screen layer on top.
+   There is no document scroll: HUD panels and screen bodies scroll inside.
+   ========================================================================= */
+
+:root {
+  --hud-gap: 20px;
+  --hud-camera-height: 170px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.city-shell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: var(--bg-base);
+}
+
+.city-shell-main, .city-shell-world {
+  position: absolute;
+  inset: 0;
+}
+
+/* HUD panels: opaque on purpose (no glass). Text contrast must not depend on the canvas behind it, and
+   no backdrop-filter has to be recomputed on every animated frame. */
+.hud {
+  position: absolute;
+  z-index: 20;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  background: var(--bg-panel-solid);
+  box-shadow: var(--shadow-panel);
+}
+
+/* --- Main HUD card (top left) --- */
+
+.city-shell-hud {
+  position: absolute;
+  z-index: 20;
+  top: var(--hud-gap);
+  left: var(--hud-gap);
+}
+
+.hud-main {
+  position: static;
+  display: flex;
+  width: 300px;
+  max-height: calc(100dvh - var(--hud-gap) * 2 - 64px);
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.hud-brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-glass);
+}
+
+.hud-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.hud-brand .brand-mark {
+  font-size: 20px;
+}
+
+.hud-brand-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-xs);
+  background: var(--tint-cyan);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.hud-main .network-status {
+  margin: 0;
+}
+
+.hud-eyebrow {
+  margin: 0;
+}
+
+.hud-note {
+  margin: -6px 0 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.hud-nav {
+  display: grid;
+  gap: 4px;
+}
+
+.hud-link {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+
+.hud-link:hover {
+  border-color: var(--border-glass);
+  background: var(--tint-cyan);
+  color: var(--text-primary);
+}
+
+.hud-link[aria-current="page"] {
+  border-color: var(--border-glow);
+  background: var(--tint-cyan-strong);
+  color: var(--text-primary);
+  box-shadow: var(--glow-cyan);
+}
+
+.hud-link-icon {
+  width: 18px;
+  color: var(--color-cyan);
+  font-size: 15px;
+  text-align: center;
+}
+
+.hud-link-label {
+  flex: 1;
+}
+
+.hud-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.hud-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.hud-stats div {
+  display: flex;
+  gap: 5px;
+}
+
+.hud-stats dt {
+  color: var(--text-muted);
+}
+
+.hud-stats dd {
+  margin: 0;
+  color: var(--color-cyan);
+  font-weight: 700;
+}
+
+.hud-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-glass);
+}
+
+.hud-account > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.hud-account strong, .hud-account small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-account strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.hud-account small {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.hud-account .icon-button {
+  margin-left: 0;
+}
+
+.hud-alert {
+  top: var(--hud-gap);
+  left: 50%;
+  width: min(420px, calc(100% - 2 * var(--hud-gap)));
+  padding: 4px 12px;
+  transform: translateX(-50%);
+}
+
+/* --- Screen layers --- */
+
+.screen-layer {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  background: var(--bg-app);
+  animation: screen-in var(--motion-base) var(--ease-out);
+}
+
+@keyframes screen-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.screen-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  padding: 12px clamp(16px, 2.5vw, 28px);
+  border-bottom: 1px solid var(--border-glass);
+  background: var(--bg-panel-solid);
+}
+
+.screen-back {
+  display: inline-flex;
+  flex: none;
+  min-height: 40px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.screen-back:hover {
+  border-color: var(--color-cyan);
+  background: var(--tint-cyan-strong);
+  color: var(--text-primary);
+}
+
+.screen-title-block {
+  min-width: 0;
+  flex: 1;
+  padding-left: 16px;
+  border-left: 1px solid var(--border-glass);
+}
+
+.screen-title-block .eyebrow {
+  margin-bottom: 2px;
+}
+
+.screen-title-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.screen-title-row h1 {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: clamp(18px, 1.8vw, 22px);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+/* The heading receives focus programmatically; show the ring for keyboard users only. */
+.screen-title-row h1:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.screen-subline .room-description {
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.screen-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.screen-actions a.secondary {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.screen-body {
+  min-height: 0;
+  flex: 1;
+  padding: clamp(16px, 2.5vw, 28px) max(clamp(16px, 2.5vw, 28px), calc((100% - 1400px) / 2));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Room header badges: archetype colour, online agents from presence, access. */
+.archetype-badge {
+  --accent: var(--color-cyan);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.screen-online {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.screen-online i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-slate);
+}
+
+.screen-online.online {
+  color: var(--color-emerald);
+}
+
+.screen-online.online i {
+  background: var(--color-emerald);
+  box-shadow: 0 0 6px var(--color-emerald);
+}
+
+/* Room directory: the list uses the whole screen width. */
+.room-directory .section-heading {
+  align-items: center;
+}
+
+.room-directory .section-heading .eyebrow {
+  margin: 0;
+}
+
+.room-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+/* Room: the feed fills the layer and scrolls inside .message-list; the composer stays put. */
+.screen-room .screen-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.screen-room .conversation {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.screen-room .message-list {
+  min-height: 0;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+.screen-room .composer, .screen-room .conversation > .permission-note {
+  flex: none;
+}
+
+.screen-room .conversation > .permission-note {
+  margin-bottom: 0;
+}
+
+.screen-room .composer textarea {
+  max-height: 18dvh;
+}
+
+/* =========================================================================
+   ≤ 900px: a simple stacked fallback until the phone/tablet HUD (W5).
+   The shell scrolls inside itself; screens stay full-screen layers.
+   ========================================================================= */
+
+@media (max-width: 900px) {
+  :root {
+    --hud-gap: 12px;
+  }
+
+  .city-shell {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .city-shell-hud {
+    position: static;
+    padding: var(--hud-gap) var(--hud-gap) 0;
+  }
+
+  .hud-main {
+    width: auto;
+    max-height: none;
+  }
+
+  .hud-nav {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+
+  .city-shell-main, .city-shell-world, .city-view {
+    position: relative;
+    inset: auto;
+  }
+
+  .city-view {
+    display: grid;
+    gap: var(--hud-gap);
+    padding: var(--hud-gap);
+  }
+
+  .city-stage {
+    position: relative;
+    height: min(60dvh, 520px);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-xl);
+  }
+
+  .hud, .hud-legend, .hud-directory, .city-camera {
+    position: static;
+    width: auto;
+    max-height: none;
+    transform: none;
+  }
+
+  .city-camera {
+    justify-self: end;
+  }
+
+  .screen-header {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .screen-title-block {
+    flex-basis: 100%;
+    order: 3;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .screen-body {
+    padding: 12px;
+  }
+
+  .screen-room .screen-body {
+    padding: 8px;
+  }
+
+  .screen-room .conversation {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 560px) {
+  .screen-actions {
+    flex: 1;
+  }
+
+  .room-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

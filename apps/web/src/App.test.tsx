@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 
@@ -12,12 +12,16 @@ const snapshot = {
   relationships: [],
 };
 
+/** jsdom has no 2D canvas; the city renderer skips drawing when getContext returns null. */
+function stubCanvas() { vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null); }
+
 describe('public showcase', () => {
   beforeEach(() => {
     cleanup();
     sessionStorage.clear();
     window.history.replaceState(null, '', '/');
     vi.restoreAllMocks();
+    stubCanvas();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
       const url = String(input);
       if (url.startsWith('/v1/showcase/rooms/room-1/messages')) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
@@ -25,10 +29,67 @@ describe('public showcase', () => {
     });
   });
 
-  it('shows network activity even though the visitor has no personal inbox', async () => {
+  it('lands a guest on the city with HUD counters from the published snapshot and no owner entry', async () => {
     render(<App />);
-    expect(await screen.findByText('Published a measured result.')).toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: 'Showcase navigation' });
+    await waitFor(() => expect(within(nav).getByRole('link', { name: 'Rooms' })).toHaveAccessibleDescription('1 published room'));
+    expect(within(nav).getByRole('link', { name: 'Agents' })).toHaveAccessibleDescription('1 of 1 agents online');
+    expect(within(nav).getByRole('link', { name: 'Knowledge' })).toHaveAccessibleDescription('1 knowledge card');
+    expect(within(nav).getByRole('link', { name: 'Overview' })).toHaveAttribute('aria-current', 'page');
+    expect(within(nav).queryByRole('link', { name: 'Owner controls' })).toBeNull();
+    expect(screen.getByRole('img', { name: /1 room building/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
     expect(screen.queryByText('Pending messages')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'City Map' })).toBeNull();
+  });
+
+  it('never opens the owner screen for a guest, even from a deep link', async () => {
+    window.history.replaceState(null, '', '/?view=owner');
+    render(<App />);
+    await screen.findByRole('navigation', { name: 'Showcase navigation' });
+    expect(screen.queryByRole('heading', { name: 'Owner controls' })).toBeNull();
+    expect(screen.queryByText('Owner controls')).toBeNull();
+  });
+
+  it('opens a deep-linked room at once over the city, with its heading focused', async () => {
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const { container } = render(<App />);
+    const heading = await screen.findByRole('heading', { level: 1, name: 'Public Lab' });
+    expect(heading).toHaveFocus();
+    expect(screen.getByRole('link', { name: 'Back to the city' })).toBeInTheDocument();
+    const layer = within(heading.closest('section')!);
+    expect(layer.getByText('1 of 1 agents online')).toBeInTheDocument();
+    expect(layer.getByText('Read only')).toBeInTheDocument();
+    // The city is still rendered underneath, just hidden from assistive tech while the screen is open.
+    expect(container.querySelector('.city-shell-world canvas')).not.toBeNull();
+  });
+
+  it('closes a screen with Escape back to the city and supports browser back and forward', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('link', { name: 'Knowledge' }));
+    expect(window.location.search).toBe('?view=knowledge');
+    expect(screen.getByRole('heading', { level: 1, name: 'Central Library of Knowledge' })).toHaveFocus();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(window.location.search).toBe('');
+    expect(screen.queryByRole('heading', { name: 'Central Library of Knowledge' })).toBeNull();
+    // Back: the Library again; Back once more: the city.
+    window.history.pushState(null, '', '/?view=knowledge');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Central Library of Knowledge' })).toBeInTheDocument();
+    window.history.pushState(null, '', '/');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Central Library of Knowledge' })).toBeNull());
+    expect(screen.getByRole('navigation', { name: 'Showcase navigation' })).toBeInTheDocument();
+  });
+
+  it('opens the rooms directory from Rooms and a room from the directory', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('link', { name: 'Rooms' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'Rooms' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('link', { name: /Public Lab/ }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Public Lab' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('link', { name: 'All rooms' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'Rooms' })).toBeInTheDocument();
   });
 
   it('uses readable reviewer links and hides owner and mutation controls from guests', async () => {
@@ -52,9 +113,9 @@ describe('public showcase', () => {
 });
 
 describe('authenticated showcase surfaces', () => {
-  beforeEach(() => { cleanup(); sessionStorage.clear(); window.history.replaceState(null, '', '/'); vi.restoreAllMocks(); });
+  beforeEach(() => { cleanup(); sessionStorage.clear(); window.history.replaceState(null, '', '/'); vi.restoreAllMocks(); stubCanvas(); });
 
-  it('uses published network activity instead of the owner inbox on the overview', async () => {
+  it('lands a participant on the city with HUD counters from their data and the owner entry', async () => {
     sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
     vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
       const url = String(input);
@@ -64,8 +125,43 @@ describe('authenticated showcase surfaces', () => {
       return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
     });
     render(<App />);
-    expect((await screen.findAllByText('An observed result.')).length).toBeGreaterThan(0);
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' });
+    await waitFor(() => expect(within(nav).getByRole('link', { name: 'Rooms' })).toHaveAccessibleDescription('1 room'));
+    await waitFor(() => expect(within(nav).getByRole('link', { name: 'Agents' })).toHaveAccessibleDescription('1 of 1 agents online'));
+    await waitFor(() => expect(within(nav).getByRole('link', { name: 'Knowledge' })).toHaveAccessibleDescription('1 knowledge card'));
+    expect(within(nav).getByRole('link', { name: 'Owner controls' })).toHaveAttribute('href', '/?view=owner');
+    expect(screen.getByText('Owner')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
     expect(screen.queryByText('Pending messages')).not.toBeInTheDocument();
+  });
+
+  it('hides the agents counter while agents are unknown instead of showing 0', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/agents')) return new Response(JSON.stringify({ error: { message: 'Server error' } }), { status: 500 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+    render(<App />);
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' });
+    expect(within(nav).getByRole('link', { name: 'Agents' })).not.toHaveAccessibleDescription();
+    await waitFor(() => expect(within(nav).getByRole('link', { name: 'Rooms' })).toHaveAccessibleDescription('0 rooms'));
+    expect(within(nav).getByRole('link', { name: 'Agents' })).not.toHaveAccessibleDescription();
+    expect(screen.queryByText('Agents', { selector: 'dt' })).toBeNull();
+  });
+
+  it('opens Owner controls as the Praetorium screen and returns focus to its nav item on close', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 }));
+    render(<App />);
+    const owner = screen.getByRole('link', { name: 'Owner controls' });
+    owner.focus();
+    fireEvent.click(owner);
+    expect(screen.getByRole('heading', { level: 1, name: 'Owner controls' })).toHaveFocus();
+    expect(screen.getByText('Praetorium')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'Back to the city' }));
+    expect(window.location.search).toBe('');
+    expect(screen.getByRole('link', { name: 'Owner controls' })).toHaveFocus();
   });
 
   it('resolves authenticated review agent IDs to readable linked names', async () => {
@@ -108,6 +204,8 @@ describe('authenticated showcase surfaces', () => {
     fireEvent.click(await screen.findByRole('button', { name: '+ New room' }));
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Leaked old room' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create room' }));
+    // Sign out lives in the HUD, which the Rooms screen covers: go back to the city first.
+    fireEvent.click(screen.getByRole('link', { name: 'Back to the city' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
     fireEvent.change(await screen.findByLabelText('Email'), { target: { value: 'new@example.test' } });
@@ -161,6 +259,7 @@ describe('authenticated showcase surfaces', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     expect(await screen.findByText(/Semantic search is temporarily unavailable/)).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole('link', { name: 'Back to the city' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
 
     // Sign back in (a different owner) and return to Knowledge: the previous notice must not reappear.

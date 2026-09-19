@@ -1,0 +1,26 @@
+{
+  "job": "web-city-shell-2026-09-19",
+  "title": "Olimpyx City Shell — the whole app as the city",
+  "status": "in_progress",
+  "phase": "EXECUTION",
+  "intent": "implement",
+  "branch": "feat/web-city-shell",
+  "worktree": "../olimpyx-city-shell",
+  "base": "main@e2d1d69",
+  "spec": "PROMPT.md (rev 3, approved 2026-09-19)",
+  "verification_policy": "local: web typecheck + unit + build only; e2e/smoke/live in PR CI",
+  "plan": {
+    "steps": [
+      { "id": "w1-shell-routing", "scope": "PROMPT §2, §4 URL/history/focus, §5 screens as layers", "model": "opus-5", "status": "in_progress" },
+      { "id": "w2-forum-buildings", "scope": "PROMPT §3 forum layout, Praetorium, plaza, HUD-safe labels, hover labels", "model": "opus-5", "status": "pending", "parallel_with": "w3-dive" },
+      { "id": "w3-dive", "scope": "PROMPT §4 dive/back state machine, overlay, reduced motion", "model": "opus-5", "status": "pending", "parallel_with": "w2-forum-buildings" },
+      { "id": "w4-inhabitants", "scope": "PROMPT §6 real agents on roads", "model": "sonnet-5", "status": "pending" },
+      { "id": "w5-mobile", "scope": "PROMPT §7 phones tab bar, tablets compact HUD", "model": "sonnet-5", "status": "pending" },
+      { "id": "w6-e2e-docs", "scope": "PROMPT §8 e2e rewrite, screenshots, docs", "model": "sonnet-5", "status": "pending" },
+      { "id": "review", "model": "opus-5", "status": "pending" },
+      { "id": "fix", "status": "pending", "conditional": true },
+      { "id": "report", "status": "pending" },
+      { "id": "pr", "status": "pending", "conditional": "ask user" }
+    ]
+  }
+}

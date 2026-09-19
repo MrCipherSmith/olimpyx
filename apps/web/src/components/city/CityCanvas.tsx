@@ -19,6 +19,8 @@ interface CityCanvasProps {
   filter: ArchetypeCategory | 'all';
   label: string;
   reducedMotion: boolean;
+  /** Stop the loop while a screen layer covers the whole city; resume with one fresh frame. */
+  paused?: boolean;
   controller: MutableRefObject<CityCameraController | null>;
   onSelect: (id: string) => void;
 }
@@ -33,7 +35,7 @@ interface Animation { from: Camera; to: Camera; start: number; duration: number;
  * document is visible and the canvas intersects the viewport; with reduced motion frames are drawn on demand
  * and camera moves are instant. Everything is cancelled and unsubscribed on unmount.
  */
-export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, controller, onSelect }: CityCanvasProps) {
+export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, paused = false, controller, onSelect }: CityCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const state = useRef({
     scene, selectedId, filter, reducedMotion, onSelect,
@@ -52,8 +54,10 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     dragging: false,
     visible: true,
     onScreen: true,
+    paused,
     rafId: 0,
     requestFrame: () => {},
+    stop: () => {},
   });
   state.current.onSelect = onSelect;
 
@@ -65,7 +69,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     s.palette = resolveCityPalette(canvas);
 
     const animated = () => !s.reducedMotion;
-    const shouldRun = () => s.visible && s.onScreen && s.view.width > 0;
+    const shouldRun = () => s.visible && s.onScreen && !s.paused && s.view.width > 0;
 
     const draw = (now: number) => {
       s.rafId = 0;
@@ -97,6 +101,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     };
     s.requestFrame = () => { s.dirty = true; if (!s.rafId && shouldRun()) s.rafId = requestAnimationFrame(draw); };
     const stop = () => { if (s.rafId) cancelAnimationFrame(s.rafId); s.rafId = 0; };
+    s.stop = stop;
 
     /** Applies a CSS size; the backing store is only rewritten when the size or the DPR actually changed. */
     const applySize = (cssWidth: number, cssHeight: number) => {
@@ -202,6 +207,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     return () => {
       stop();
       s.requestFrame = () => {};
+      s.stop = () => {};
       s.dragging = false;
       resizeObserver?.disconnect();
       dprQuery?.removeEventListener?.('change', onDprChange);
@@ -230,6 +236,12 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     if (reducedMotion && s.animation) { s.camera = s.animation.to; s.animation = null; }
     s.requestFrame();
   }, [scene, filter, reducedMotion]);
+
+  useEffect(() => {
+    const s = state.current;
+    s.paused = paused;
+    if (paused) s.stop(); else s.requestFrame();
+  }, [paused]);
 
   // Selection: two-phase dive (glide, then zoom) to the building; instant under reduced motion.
   useEffect(() => {

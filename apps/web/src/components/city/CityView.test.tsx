@@ -18,8 +18,6 @@ const rooms = [
   { room_id: 'rom_b', title: '<img src=x onerror=alert(1)>', description: 'Plain text', message_count: 0 },
   { room_id: 'rom_c', title: 'Observatory', description: '' },
 ];
-const agents = [{ presence: 'online' as const }, { presence: 'offline' as const }, { presence: 'online' as const }];
-
 let rafCallbacks: FrameRequestCallback[] = [];
 beforeEach(() => {
   rafCallbacks = [];
@@ -32,7 +30,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('CityView accessible building list', () => {
   it('describes the canvas and lists every building as a focusable button', () => {
-    render(<CityView rooms={rooms} agents={agents} cardCount={4} mode="participant" onNavigate={vi.fn()} />);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
     const canvas = screen.getByRole('img');
     expect(canvas.tagName).toBe('CANVAS');
     expect(canvas).toHaveAccessibleName(/Central Library, the Pantheon of Agents and 3 room buildings on 1 ring/);
@@ -49,43 +47,34 @@ describe('CityView accessible building list', () => {
     act(() => { rafCallbacks.splice(0).forEach(callback => callback(16)); });
   });
 
-  it('opens a room card from the keyboard-focusable list and enters the existing room route', () => {
+  it('opens a room screen from the keyboard-focusable list (no intermediate card)', () => {
     const onNavigate = vi.fn();
-    render(<CityView rooms={rooms} agents={agents} cardCount={4} mode="participant" onNavigate={onNavigate} />);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={onNavigate} />);
     const item = screen.getByRole('button', { name: /Consensus Hall/ });
     item.focus();
     expect(item).toHaveFocus();
     fireEvent.click(item); // Enter/Space on a native <button> dispatches click
-    expect(item).toHaveAttribute('aria-pressed', 'true');
-    const card = screen.getByRole('region', { name: 'Consensus Hall' });
-    expect(card).toHaveFocus();
-    expect(card).toHaveTextContent('Трибунал & Консенсус');
-    expect(card).toHaveTextContent('Agora');
-    expect(card).toHaveTextContent('Messages12');
-    expect(card).toHaveTextContent('Votes and quorum');
-    expect(card).not.toHaveTextContent('[archetype:');
-    fireEvent.click(within(card).getByRole('button', { name: 'Enter room' }));
     expect(onNavigate).toHaveBeenCalledWith({ view: 'rooms', roomId: 'rom_a' });
-    fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByRole('region', { name: 'Consensus Hall' })).toBeNull();
-    expect(item).toHaveFocus(); // focus returns to the list entry
   });
 
-  it('omits the message count when the API does not provide one, and routes landmarks to their screens', () => {
+  it('routes the Forum landmarks and the legend to their screens', () => {
     const onNavigate = vi.fn();
-    render(<CityView rooms={rooms} agents={agents} cardCount={4} mode="participant" onNavigate={onNavigate} />);
-    fireEvent.click(screen.getByRole('button', { name: /^Observatory/ }));
-    expect(screen.getByRole('region', { name: 'Observatory' })).not.toHaveTextContent('Messages');
-    fireEvent.click(screen.getByRole('button', { name: /Central Library/ }));
-    const library = screen.getByRole('region', { name: 'Центральная Библиотека' });
-    expect(library).toHaveTextContent('Knowledge cards4');
-    fireEvent.click(within(library).getByRole('button', { name: 'Open knowledge' }));
+    render(<CityView rooms={rooms} mode="participant" onNavigate={onNavigate} />);
+    const list = screen.getByRole('navigation', { name: 'City buildings' });
+    fireEvent.click(within(list).getByRole('button', { name: /Central Library/ }));
     expect(onNavigate).toHaveBeenLastCalledWith({ view: 'knowledge' });
+    fireEvent.click(within(list).getByRole('button', { name: /Pantheon of Agents/ }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: 'agents' });
+    const legend = screen.getByRole('group', { name: 'Key buildings' });
+    fireEvent.click(within(legend).getByRole('button', { name: 'Library' }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: 'knowledge' });
+    fireEvent.click(within(legend).getByRole('button', { name: 'Pantheon' }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: 'agents' });
   });
 
-  it('shows online agents from presence and filters buildings by category', () => {
-    render(<CityView rooms={rooms} agents={agents} cardCount={0} mode="participant" onNavigate={vi.fn()} />);
-    expect(screen.getByText(/of 3 agents online/)).toHaveTextContent('2 of 3 agents online');
+  it('filters buildings by category and collapses the directory panel', () => {
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
     const agora = within(screen.getByRole('group', { name: 'Filter buildings by category' })).getByRole('button', { name: /Agora/ });
     expect(agora).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(agora);
@@ -96,22 +85,35 @@ describe('CityView accessible building list', () => {
     expect(names.some(name => name?.includes('Central Library'))).toBe(true);
     const expectedRooms = rooms.filter(room => room.room_id === 'rom_a' || deterministicArchetype(room.room_id).category === 'agora').length;
     expect(names).toHaveLength(2 + expectedRooms);
+    const toggle = screen.getByRole('button', { name: /Buildings/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('navigation', { name: 'City buildings' })).toBeNull();
   });
 
-  it('guest mode marks rooms as published and read only', () => {
-    render(<CityView rooms={rooms.slice(0, 1)} agents={[]} cardCount={0} mode="guest" onNavigate={vi.fn()} />);
-    expect(screen.getByText('No agents visible')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Consensus Hall/ }));
-    const card = screen.getByRole('region', { name: 'Consensus Hall' });
-    expect(card).toHaveTextContent('Published messages12');
-    expect(card).toHaveTextContent('Guest access is read only.');
+  it('guest mode says when nothing is published yet', () => {
+    render(<CityView rooms={[]} mode="guest" onNavigate={vi.fn()} />);
+    expect(screen.getByText('No published rooms yet.')).toBeInTheDocument();
+  });
+
+  it('stops the render loop while a screen covers the city and resumes after', () => {
+    const cancel = vi.fn();
+    vi.stubGlobal('cancelAnimationFrame', cancel);
+    const { rerender } = render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
+    expect(rafCallbacks.length).toBeGreaterThan(0);
+    rerender(<CityView rooms={rooms} mode="participant" paused onNavigate={vi.fn()} />);
+    expect(cancel).toHaveBeenCalled();
+    rafCallbacks = [];
+    rerender(<CityView rooms={rooms} mode="participant" paused={false} onNavigate={vi.fn()} />);
+    expect(rafCallbacks.length).toBe(1);
   });
 
   it('cancels the animation frame and observers on unmount', () => {
     const cancel = vi.fn();
     vi.stubGlobal('cancelAnimationFrame', cancel);
     const removeListener = vi.spyOn(document, 'removeEventListener');
-    const { unmount } = render(<CityView rooms={rooms} agents={agents} cardCount={0} mode="participant" onNavigate={vi.fn()} />);
+    const { unmount } = render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
     unmount();
     expect(cancel).toHaveBeenCalled();
     expect(removeListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
