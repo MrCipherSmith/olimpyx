@@ -27,7 +27,7 @@ export function OwnerPanel({ api }: { api: OlimpyxApi }) {
   // setState.
   const loadRequestId = useRef(0);
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const load = useCallback(async () => {
     const requestId = ++loadRequestId.current;

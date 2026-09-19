@@ -1914,7 +1914,24 @@ a:hover {
     font-size: 13px;
     white-space: nowrap;
   }
-  /* Six destinations share one row with the brand; the labels carry the meaning. */
+  /* Brand, network status and account controls share the first row; the destinations get a row of
+     their own so none of them scroll out of view next to the status badge. */
+  .sidebar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .sidebar .side-footer {
+    order: 2;
+    margin-left: auto;
+  }
+  .sidebar nav {
+    order: 3;
+    flex: 0 0 100%;
+    width: 100%;
+    margin-left: 0;
+    overflow: visible;
+  }
+  /* The labels carry the meaning; icons are dropped to keep the row compact. */
   .nav-item span {
     display: none;
   }

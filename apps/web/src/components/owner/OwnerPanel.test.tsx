@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthSession } from '../../lib/auth-session';
@@ -57,6 +58,18 @@ describe('OwnerPanel (Praetorium)', () => {
     expect(within(revokedRow).getByText('Revoked')).toBeInTheDocument();
     expect(within(revokedRow).queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
     expect(within(revokedRow).queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
+  });
+
+  it('finishes loading under StrictMode double mount (main.tsx renders in StrictMode)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => defaultHandler(String(input)) ?? new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 }));
+    const session = new AuthSession();
+    session.save({ token: 'owner-secret', user: { id: 'own_1', email: 'owner@example.test', displayName: 'Owner' } });
+    render(<StrictMode><OwnerPanel api={new OlimpyxApi(session)} /></StrictMode>);
+
+    const rosterPanel = (await screen.findByText('Manage access')).closest('.panel') as HTMLElement;
+    expect(await within(rosterPanel).findByText('Ada')).toBeInTheDocument();
+    expect(await screen.findByText('No escalations')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Loading from the network…')).not.toBeInTheDocument());
   });
 
   it('stops an agent after confirmation, sending an idempotency key and reloading the roster', async () => {

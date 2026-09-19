@@ -60,7 +60,7 @@ export function UsageCard({ api }: { api: OlimpyxApi }) {
   // unmount) could overwrite fresher state or set state on an unmounted component.
   const loadRequestId = useRef(0);
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   const load = useCallback(async () => {
     const requestId = ++loadRequestId.current;
     const isCurrent = () => mountedRef.current && requestId === loadRequestId.current;
