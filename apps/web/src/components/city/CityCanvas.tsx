@@ -1,7 +1,7 @@
 import { useEffect, useRef, type MutableRefObject } from 'react';
 import { clampZoom, diveCamera, fitZoom, hitTest, shouldRefitZoom, type Camera, type ScreenBox, type Viewport } from './isometricMath';
 import { DIVE_ZOOM, FOCUS_ZOOM, divePointCamera, easeIn, hudSafeFit, lerpCamera, occludersFrom, type DiveCameraMove } from './cameraMath';
-import { createRenderCache, renderCity } from './cityRenderer';
+import { createRenderCache, labelAt, renderCity } from './cityRenderer';
 import { shouldSkipFrame } from './cityLoop';
 import type { CityScene } from './cityScene';
 import { CITY_MOTION, resolveCityPalette, type CityPalette } from './cityTokens';
@@ -194,7 +194,8 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     /* --- pointer: drag to pan, click to select, wheel to zoom --- */
     let drag: { id: number; x: number; y: number; moved: boolean } | null = null;
     // offsetX/Y are relative to the canvas padding edge: no layout read (getBoundingClientRect) per move.
-    const pick = (event: PointerEvent) => hitTest(s.scene.drawOrder, event.offsetX, event.offsetY, s.camera, s.view);
+    // A click on a building's label or hover card opens that building, like a click on the building itself.
+    const pick = (event: PointerEvent) => { const labelled = labelAt(s.cache, event.offsetX, event.offsetY); return (labelled ? s.scene.buildings.find(b => b.id === labelled) : undefined) ?? hitTest(s.scene.drawOrder, event.offsetX, event.offsetY, s.camera, s.view); };
     const onPointerDown = (event: PointerEvent) => { if (s.locked) return; drag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }; canvas.setPointerCapture?.(event.pointerId); };
     const onPointerMove = (event: PointerEvent) => {
       if (drag && drag.id === event.pointerId) {

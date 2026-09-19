@@ -47,6 +47,32 @@ function renderCity() {
   return camera.current!;
 }
 
+describe('CityCanvas picking', () => {
+  const tap = (canvas: HTMLCanvasElement, x: number, y: number) => {
+    for (const type of ['pointerdown', 'pointerup']) {
+      const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y });
+      Object.defineProperties(event, { pointerId: { value: 1 }, offsetX: { value: x }, offsetY: { value: y } });
+      act(() => { canvas.dispatchEvent(event); });
+    }
+  };
+
+  it('opens a building when its label is clicked, even away from the building itself', () => {
+    const onNavigate = vi.fn();
+    render(<CityView rooms={rooms} scene={scene} mode="participant" onNavigate={onNavigate} />);
+    flush();
+    const canvas = document.querySelector('canvas')!;
+    tap(canvas, 8, 8); // empty corner: no building, no label
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    const cache = frames.at(-1)!.cache!;
+    const room = scene.buildings.find(building => building.room?.roomId === 'r1')!;
+    cache.placed[0] = { ...cache.placed[0], visible: true, left: 0, top: 0, right: 20, bottom: 20, building: room } as never;
+    cache.placedCount = 1;
+    tap(canvas, 8, 8);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('CityCanvas camera', () => {
   it('fits the city into the area the HUD panels leave free and hands the panels to the renderer', () => {
     const camera = renderCity();
