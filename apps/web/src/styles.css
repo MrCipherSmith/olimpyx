@@ -408,7 +408,9 @@ a:hover {
 }
 
 .secondary {
-  border-color: var(--border-strong);
+  /* --border-strong (alpha .30) measured below the 3:1 AA floor for UI-element borders against
+     --bg-card/--bg-surface; --border-glow (alpha .45) clears it. */
+  border-color: var(--border-glow);
   background: var(--bg-card);
   color: var(--text-secondary);
 }
@@ -741,7 +743,9 @@ a:hover {
   min-height: 44px;
   margin-top: 6px;
   padding: 11px;
-  border: 1px solid var(--border-strong);
+  /* --border-glow (alpha .45), not --border-strong (.30), to clear the 3:1 AA floor for form-control
+     borders against --bg-input. */
+  border: 1px solid var(--border-glow);
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-primary);
@@ -981,7 +985,9 @@ a:hover {
   width: 100%;
   min-height: 44px;
   padding: 11px 13px;
-  border: 1px solid var(--border-strong);
+  /* --border-glow (alpha .45), not --border-strong (.30), to clear the 3:1 AA floor for form-control
+     borders against --bg-input. */
+  border: 1px solid var(--border-glow);
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-primary);
@@ -1363,6 +1369,13 @@ a:hover {
   font-size: 12px;
 }
 
+.copy-feedback {
+  align-self: center;
+  color: var(--color-emerald);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .managed-agent-actions {
   display: flex;
   flex: none;
@@ -1728,7 +1741,12 @@ a:hover {
   padding: 2px 6px;
   border-radius: var(--radius-xs);
   background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent);
+  /* text-primary on tint (PROMPT §2.1): the badge background is only an 18% tint of --accent over a
+     dark card, so it stays dark regardless of which archetype colour is selected. Colouring the text
+     with --accent itself dropped as low as 4.01:1 for indigo and 3.82:1 for crimson when the parent
+     card is also selected (compounding tints) — below the 4.5:1 body-text AA floor. text-primary keeps
+     >= 4.5:1 against every accent tint used here. */
+  color: var(--text-primary);
   font-size: 11px;
   font-weight: 700;
 }
@@ -1736,13 +1754,6 @@ a:hover {
 .archetype-card strong {
   color: var(--text-primary);
   font-size: 13px;
-}
-
-.archetype-card-selected {
-  margin-top: auto;
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .archetype-preview {

@@ -95,4 +95,36 @@ describe('OlimpyxApi Q-016 owner controls', () => {
     const error = await new OlimpyxApi(ownerSession()).stopAgent('agt_1').catch(e => e);
     expect((error as QuotaExceededError).quota.retryAfterSec).toBe(900);
   });
+
+  it('rounds a fractional details.retry_after_sec up to whole seconds', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: { code: 'quota_exceeded', message: 'Quota exceeded', details: { action: 'message', scope: 'agent', limit: 60, window_sec: 3600, retry_after_sec: 41.2 } } }), { status: 429 }));
+    const error = await new OlimpyxApi(ownerSession()).stopAgent('agt_1').catch(e => e);
+    expect((error as QuotaExceededError).quota.retryAfterSec).toBe(42);
+  });
+
+  it('falls back to the Retry-After header when details.retry_after_sec is missing, non-numeric, or negative', async () => {
+    const cases: Array<[unknown, Record<string, string>, number]> = [
+      [undefined, { 'Retry-After': '90' }, 90],
+      ['not-a-number', { 'Retry-After': '61.5' }, 62],
+      [-5, { 'Retry-After': '30' }, 30],
+    ];
+    for (const [retryAfterSec, headers, expected] of cases) {
+      vi.restoreAllMocks();
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: { code: 'quota_exceeded', message: 'Quota exceeded', details: { action: 'message', scope: 'agent', limit: 60, window_sec: 3600, retry_after_sec: retryAfterSec } } }), { status: 429, headers }));
+      const error = await new OlimpyxApi(ownerSession()).stopAgent('agt_1').catch(e => e);
+      expect((error as QuotaExceededError).quota.retryAfterSec).toBe(expected);
+    }
+  });
+
+  it('defaults retryAfterSec to 0 when neither the body nor the header is a valid non-negative number', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: { code: 'quota_exceeded', message: 'Quota exceeded', details: { action: 'message', scope: 'agent', limit: 60, window_sec: 3600 } } }), { status: 429, headers: { 'Retry-After': 'not-a-number' } }));
+    const error = await new OlimpyxApi(ownerSession()).stopAgent('agt_1').catch(e => e);
+    expect((error as QuotaExceededError).quota.retryAfterSec).toBe(0);
+  });
+
+  it('marks the limit as invalid (NaN) rather than defaulting to 0 when the body omits it or sends a non-number', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: { code: 'quota_exceeded', message: 'Quota exceeded', details: { action: 'message', scope: 'agent', window_sec: 3600, retry_after_sec: 5 } } }), { status: 429 }));
+    const error = await new OlimpyxApi(ownerSession()).stopAgent('agt_1').catch(e => e);
+    expect(Number.isFinite((error as QuotaExceededError).quota.limit)).toBe(false);
+  });
 });

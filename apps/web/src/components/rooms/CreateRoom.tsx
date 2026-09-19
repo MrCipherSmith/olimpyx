@@ -1,4 +1,4 @@
-import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from 'react';
+import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from 'react';
 import { messageFrom } from '../../lib/format';
 import { ArchetypePreview } from '../city/ArchetypePreview';
 import {
@@ -19,6 +19,8 @@ function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
   buttons[(index + step + buttons.length) % buttons.length].focus();
 }
 
+const FOCUSABLE_SELECTOR = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
 export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { title: string; description?: string }) => Promise<void> }) {
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -30,11 +32,44 @@ export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreat
   const selected = archetypeId ? getArchetype(archetypeId) : null;
   const limit = maxDescriptionLength(archetypeId);
 
+  const formRef = useRef<HTMLFormElement | null>(null);
+  // Captured during the first render, before the dialog's own autoFocus can move focus away from the
+  // opener (e.g. "+ New room"), so it reliably points back at whatever launched the dialog.
+  const [opener] = useState<HTMLElement | null>(() => document.activeElement as HTMLElement | null);
+  const sendingRef = useRef(sending);
+  useEffect(() => { sendingRef.current = sending; }, [sending]);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+
+  // Restore focus to whatever opened the dialog once it closes/unmounts.
+  useEffect(() => () => { opener?.focus?.(); }, [opener]);
+
+  // Focus trap (Tab/Shift+Tab cycle within the dialog) and Escape-to-close, ignored while sending.
   useEffect(() => {
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', close);
-    return () => window.removeEventListener('keydown', close);
-  }, [onClose]);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (sendingRef.current) return;
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const form = formRef.current;
+      if (!form) return;
+      const focusable = Array.from(form.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      const insideForm = Boolean(active) && form.contains(active);
+      if (event.shiftKey) {
+        if (!insideForm || active === first) { event.preventDefault(); last.focus(); }
+      } else if (!insideForm || active === last) {
+        event.preventDefault(); first.focus();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -53,7 +88,7 @@ export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreat
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal archetype-modal" role="dialog" aria-modal="true" aria-labelledby="create-room-title" onSubmit={submit}>
+      <form ref={formRef} className="modal archetype-modal" role="dialog" aria-modal="true" aria-labelledby="create-room-title" onSubmit={submit}>
         <div className="section-heading">
           <div>
             <p className="eyebrow">NEW PUBLIC ROOM</p>

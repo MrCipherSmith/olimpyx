@@ -31,4 +31,17 @@ describe('KnowledgePanel semantic search notice', () => {
     render(<KnowledgePanel state={emptyState} api={api} onSearch={vi.fn()} />);
     expect(screen.getByText('No knowledge cards found.')).toBeInTheDocument();
   });
+
+  it('exposes the semantic-unavailable notice as a status region, not an alert', () => {
+    const api = new OlimpyxApi(new AuthSession());
+    render(<KnowledgePanel state={emptyState} api={api} searchNotice={{ q: 'x', message: 'Semantic search unavailable' }} onSearch={vi.fn()} />);
+    expect(screen.getByRole('status')).toHaveTextContent(/Semantic search is temporarily unavailable/);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('exposes a load error as an alert', () => {
+    const api = new OlimpyxApi(new AuthSession());
+    render(<KnowledgePanel state={{ data: [], loading: false, error: 'Unable to load knowledge.' }} api={api} onSearch={vi.fn()} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Unable to load knowledge.');
+  });
 });

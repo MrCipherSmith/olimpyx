@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { EffectiveLimits, OlimpyxApi, OwnerUsage, UsageCounters, UsageWindow } from '../../lib/api';
 import { empty } from '../../lib/loadState';
 import { ErrorText } from '../shared/ErrorText';
@@ -56,10 +56,17 @@ function WindowMeters({ window }: { window: UsageWindow }) {
 export function UsageCard({ api }: { api: OlimpyxApi }) {
   const [usage, setUsage] = useState(empty<OwnerUsage | null>(null));
   const [limits, setLimits] = useState(empty<EffectiveLimits | null>(null));
+  // Stale-response guard: without this, an earlier Refresh that resolves after a later one (or after
+  // unmount) could overwrite fresher state or set state on an unmounted component.
+  const loadRequestId = useRef(0);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const load = useCallback(async () => {
-    setUsage(current => ({ ...current, loading: true }));
-    setLimits(current => ({ ...current, loading: true }));
+    const requestId = ++loadRequestId.current;
+    const isCurrent = () => mountedRef.current && requestId === loadRequestId.current;
+    if (isCurrent()) { setUsage(current => ({ ...current, loading: true })); setLimits(current => ({ ...current, loading: true })); }
     const [usageResult, limitsResult] = await Promise.allSettled([api.usage(), api.limits()]);
+    if (!isCurrent()) return;
     setUsage(usageResult.status === 'fulfilled'
       ? (isOwnerUsage(usageResult.value) ? empty(usageResult.value) : { data: null, loading: false, error: 'Owner usage is unavailable right now.' })
       : { data: null, loading: false, error: friendlyError(usageResult.reason) });

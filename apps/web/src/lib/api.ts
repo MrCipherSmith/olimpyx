@@ -46,7 +46,9 @@ export class QuotaExceededError extends ApiError {
 }
 
 type Envelope<T> = { data: T };
-const idempotencyKey = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+/** Exported so callers that need one confirmed intent to survive UI re-renders/retries with a single
+ * key (e.g. an owner's Stop/Revoke confirmation, PROMPT §6) can generate it once and pass it through. */
+export const idempotencyKey = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 export class OlimpyxApi {
   constructor(private readonly session: AuthSession) {}
@@ -78,8 +80,8 @@ export class OlimpyxApi {
   inbox(): Promise<InboxOverview> { return this.unwrap(this.request<Envelope<InboxOverview>>('/v1/inbox/overview')); }
   ownAgents(): Promise<Profile[]> { return this.list('/v1/owners/me/agents'); }
   enrollmentToken(label?: string): Promise<EnrollmentToken> { return this.unwrap(this.request<Envelope<EnrollmentToken>>('/v1/owners/me/enrollment-tokens', { method: 'POST', body: label ? { label } : {} }, true)); }
-  revokeAgent(agentId: string, reason?: string): Promise<void> { return this.request(`/v1/owners/me/agents/${agentId}/revoke`, { method: 'POST', body: reason ? { reason } : {} }, true); }
-  stopAgent(agentId: string, reason?: string): Promise<StopAgentResult> { return this.unwrap(this.request<Envelope<StopAgentResult>>(`/v1/owners/me/agents/${agentId}/stop`, { method: 'POST', body: reason ? { reason } : {} }, true)); }
+  revokeAgent(agentId: string, reason?: string, idempotencyKey?: string): Promise<void> { return this.request(`/v1/owners/me/agents/${agentId}/revoke`, { method: 'POST', body: reason ? { reason } : {}, idempotencyKey }, true); }
+  stopAgent(agentId: string, reason?: string, idempotencyKey?: string): Promise<StopAgentResult> { return this.unwrap(this.request<Envelope<StopAgentResult>>(`/v1/owners/me/agents/${agentId}/stop`, { method: 'POST', body: reason ? { reason } : {}, idempotencyKey }, true)); }
   usage(): Promise<OwnerUsage> { return this.unwrap(this.request<Envelope<OwnerUsage>>('/v1/owners/me/usage')); }
   limits(): Promise<EffectiveLimits> { return this.unwrap(this.request<Envelope<EffectiveLimits>>('/v1/limits')); }
   escalations(): Promise<Escalation[]> { return this.list('/v1/owners/me/escalations'); }
@@ -102,18 +104,27 @@ export class OlimpyxApi {
     return all;
   }
   private async unwrap<T>(response: Promise<Envelope<T>>): Promise<T> { return (await response).data; }
-  private async request<T>(path: string, options: { method?: string; body?: unknown } = {}, mutate = false): Promise<T> {
+  private async request<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string } = {}, mutate = false): Promise<T> {
     const response = await this.session.withSession(async () => {
       let fetched: Response;
-      try { fetched = await fetch(path, { method: options.method ?? 'GET', headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(mutate ? { 'Idempotency-Key': idempotencyKey() } : {}), ...this.session.authorizationHeaders() }, body: options.body ? JSON.stringify(options.body) : undefined }); }
+      try { fetched = await fetch(path, { method: options.method ?? 'GET', headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(mutate ? { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey() } : {}), ...this.session.authorizationHeaders() }, body: options.body ? JSON.stringify(options.body) : undefined }); }
       catch { throw new ApiError('Unable to reach Olimpyx. Check that the server is running.', 0); }
       if (!fetched.ok) {
         const payload = await fetched.json().catch(() => null) as { error?: { message?: string; code?: string; details?: unknown } } | null;
         if (fetched.status === 429 && payload?.error?.code === 'quota_exceeded') {
           const details = (payload.error.details ?? {}) as Partial<{ action: string; scope: 'agent' | 'owner'; limit: number; window_sec: number; retry_after_sec: number }>;
-          const retryAfterHeader = Number(fetched.headers.get('Retry-After'));
-          const retryAfterSec = details.retry_after_sec ?? (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : 0);
-          throw new QuotaExceededError(payload.error.message ?? `Request failed (${fetched.status})`, payload, { action: details.action ?? 'unknown', scope: details.scope ?? 'owner', limit: details.limit ?? 0, windowSec: details.window_sec ?? 0, retryAfterSec });
+          // The body's retry_after_sec is agent-facing API input, not necessarily well-formed — validate it
+          // numerically (finite, non-negative) before trusting it, and fall back to the Retry-After header
+          // (validated the same way) rather than a raw pass-through. Whole seconds only (Math.ceil).
+          const detailRetryAfter = Number(details.retry_after_sec);
+          const headerRetryAfter = Number(fetched.headers.get('Retry-After'));
+          const retryAfterSec = Number.isFinite(detailRetryAfter) && detailRetryAfter >= 0
+            ? Math.ceil(detailRetryAfter)
+            : Number.isFinite(headerRetryAfter) && headerRetryAfter >= 0
+              ? Math.ceil(headerRetryAfter)
+              : 0;
+          const limit = Number(details.limit);
+          throw new QuotaExceededError(payload.error.message ?? `Request failed (${fetched.status})`, payload, { action: details.action ?? 'unknown', scope: details.scope ?? 'owner', limit: Number.isFinite(limit) ? limit : NaN, windowSec: details.window_sec ?? 0, retryAfterSec });
         }
         throw new ApiError(payload?.error?.message ?? `Request failed (${fetched.status})`, fetched.status, payload);
       }

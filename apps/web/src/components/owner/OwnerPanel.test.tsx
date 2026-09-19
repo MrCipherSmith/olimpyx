@@ -134,4 +134,73 @@ describe('OwnerPanel (Praetorium)', () => {
     expect(alert).toHaveTextContent(/message/i);
     expect(alert).toHaveTextContent(/in 2m|in 90s|shortly/i);
   });
+
+  it('states the revoke confirmation is permanent and cannot be undone', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => defaultHandler(String(input)) ?? new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 }));
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue(null);
+
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+
+    expect(prompt.mock.calls[0][0]).toMatch(/permanent/i);
+    expect(prompt.mock.calls[0][0]).toMatch(/cannot be undone/i);
+  });
+
+  it('disables Stop and Revoke for an agent while its request is in flight, and re-enables them after', async () => {
+    let resolveStop!: (response: Response) => void;
+    const pending = new Promise<Response>(resolve => { resolveStop = resolve; });
+    const request = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/v1/owners/me/agents/agt_1/stop' && init?.method === 'POST') return pending;
+      return defaultHandler(url) ?? new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+    vi.spyOn(window, 'prompt').mockReturnValue('');
+
+    renderPanel();
+    const stopButton = await screen.findByRole('button', { name: 'Stop' });
+    const revokeButton = screen.getByRole('button', { name: 'Revoke' });
+    fireEvent.click(stopButton);
+
+    await waitFor(() => expect(stopButton).toBeDisabled());
+    expect(revokeButton).toBeDisabled();
+
+    // A second click while pending must not fire a second request for the same agent.
+    fireEvent.click(stopButton);
+    expect(request.mock.calls.filter(([callUrl]) => String(callUrl) === '/v1/owners/me/agents/agt_1/stop').length).toBe(1);
+
+    resolveStop(new Response(JSON.stringify({ data: { agent_id: 'agt_1', session_ids: [], stopped_at: '2026-09-19T10:00:00Z' } }), { status: 200 }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).not.toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Revoke' })).not.toBeDisabled();
+  });
+
+  it('shows Stop/Revoke errors next to "Manage access", not the enrollment token card', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/v1/owners/me/agents/agt_1/stop' && init?.method === 'POST') return new Response(JSON.stringify({ error: { message: 'Agent not found', code: 'not_found' } }), { status: 404 });
+      return defaultHandler(url) ?? new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+    vi.spyOn(window, 'prompt').mockReturnValue('');
+
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    const alert = await screen.findByRole('alert');
+    const managePanel = (await screen.findByText('Manage access')).closest('.panel') as HTMLElement;
+    expect(managePanel.contains(alert)).toBe(true);
+    const enrollmentPanel = screen.getByText('Create a one-time enrollment token').closest('.panel') as HTMLElement;
+    expect(enrollmentPanel.contains(alert)).toBe(false);
+  });
+
+  it('announces "Copied" via an aria-live region when Copy token is clicked', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => defaultHandler(String(input)) ?? new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 }));
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate enrollment token' }));
+    await screen.findByRole('button', { name: 'Copy token' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy token' }));
+    await waitFor(() => expect(screen.getByText('Copied')).toBeInTheDocument());
+    expect(screen.getByText('Copied')).toHaveAttribute('aria-live', 'polite');
+  });
 });

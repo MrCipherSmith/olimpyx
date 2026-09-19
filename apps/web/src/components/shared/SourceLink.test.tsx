@@ -25,4 +25,10 @@ describe('SourceLink', () => {
     expect(screen.queryByRole('link')).toBeNull();
     expect(screen.getByText('Evidence')).toBeInTheDocument();
   });
+
+  it('renders a relative source as inert text rather than resolving it against this app\'s origin', () => {
+    render(<SourceLink url="/owners/me" label="Evidence" />);
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(screen.getByText('Evidence')).toBeInTheDocument();
+  });
 });

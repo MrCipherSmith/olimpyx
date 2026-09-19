@@ -44,6 +44,9 @@ export function App() {
     const generation = privateLoadGeneration.current;
     const sessionToken = session.token;
     const current = () => generation === privateLoadGeneration.current && sessionStore.current?.token === sessionToken;
+    // A stale "semantic search unavailable" notice from a previous session/room must not survive a
+    // fresh load or an explicit Refresh (it names a specific query that no longer applies).
+    setKnowledgeSearchNotice(null);
     const settle = async <T,>(getter: () => Promise<T>, update: Dispatch<SetStateAction<LoadState<T>>>) => {
       if (current()) update(value => ({ ...value, loading: true, error: null }));
       try { const data = await getter(); if (current()) update({ data, loading: false, error: null }); return true; }
@@ -64,8 +67,16 @@ export function App() {
     const refresh = async () => {
       if (roomRefreshInFlight.current) return;
       roomRefreshInFlight.current = true;
-      try { const next = await api.messagePage(selectedRoom.room_id); if (active) setMessages(current => ({ ...current, data: [...new Map([...current.data, ...next.data].map(message => [message.message_id, message])).values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id)), error: null })); }
-      catch (error) { if (active) setMessages(current => ({ ...current, error: messageFrom(error) })); }
+      try {
+        const next = await api.messagePage(selectedRoom.room_id);
+        if (active) {
+          setMessages(current => ({ ...current, data: [...new Map([...current.data, ...next.data].map(message => [message.message_id, message])).values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id)), error: null }));
+          // The 5s room poll is itself a real, ongoing network probe — feed its outcome into the
+          // network status too, so an outage while a room is open (with no other load in flight) shows.
+          setNetwork(previous => nextNetworkStatus([true], previous));
+        }
+      }
+      catch (error) { if (active) { setMessages(current => ({ ...current, error: messageFrom(error) })); setNetwork(previous => nextNetworkStatus([false], previous)); } }
       finally { roomRefreshInFlight.current = false; }
     };
     const timer = window.setInterval(() => void refresh(), 5000);
@@ -79,7 +90,7 @@ export function App() {
     try { const page = await api.messagePage(room.room_id); if (requestId !== roomRequestId.current) return; setMessageCursor(page.nextCursor); setMessages({ data: page.data.reverse(), loading: false, error: null }); }
     catch (error) { if (requestId === roomRequestId.current) setMessages(current => ({ ...current, loading: false, error: messageFrom(error) })); }
   };
-  const resetPrivateState = () => { privateLoadGeneration.current++; roomRequestId.current++; setRooms(empty([])); setAgents(empty([])); setCards(empty([])); setSelectedRoom(null); setMessages(empty([])); setMessageCursor(null); setCreateRoomOpen(false); setNetwork(initialNetworkStatus); };
+  const resetPrivateState = () => { privateLoadGeneration.current++; roomRequestId.current++; setRooms(empty([])); setAgents(empty([])); setCards(empty([])); setSelectedRoom(null); setMessages(empty([])); setMessageCursor(null); setCreateRoomOpen(false); setNetwork(initialNetworkStatus); setKnowledgeSearchNotice(null); };
   const authenticate = (newSession: StoredSession) => { resetPrivateState(); sessionStore.save(newSession); setSession(newSession); navigate({ view: 'overview' }); };
   const logout = async () => { try { await api.logout(); } finally { sessionStore.clear(); resetPrivateState(); setSession(null); navigate({ view: 'overview' }); } };
   const loadEarlierMessages = async () => { if (!selectedRoom || !messageCursor) return; const isCurrent = capturePrivateOperation(); const roomId = selectedRoom.room_id; const page = await api.messagePage(roomId, messageCursor); if (!isCurrent() || selectedRoom?.room_id !== roomId) return; setMessageCursor(page.nextCursor); setMessages(current => ({ ...current, data: [...page.data.reverse(), ...current.data] })); };
