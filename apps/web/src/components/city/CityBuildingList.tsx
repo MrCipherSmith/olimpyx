@@ -23,17 +23,22 @@ export function CityBuildingList({ buildings, selectedId, onSelect, emptyText }:
     <nav className="city-directory" aria-label="City buildings">
       <h3 className="eyebrow">Buildings</h3>
       <ul>
-        {buildings.map(building => (
+        {buildings.map(building => {
+          const name = building.kind === 'room' ? building.label : building.kind === 'library' ? 'Central Library' : 'Pantheon of Agents';
+          const kind = buildingKindLabel(building);
+          return (
           <li key={building.id}>
             <button type="button" className={`city-building${building.id === selectedId ? ' selected' : ''}`} aria-pressed={building.id === selectedId} data-building-id={building.id} style={accentStyle(archetypeColorVar(building.color))} onClick={() => onSelect(building.id)}>
               <span className="city-building-icon" aria-hidden="true">{buildingIcon(building)}</span>
               <span className="city-building-text">
-                <strong>{building.kind === 'room' ? building.label : building.kind === 'library' ? 'Central Library' : 'Pantheon of Agents'}</strong>
-                <small>{buildingKindLabel(building)}</small>
+                {/* Titles are ellipsised in the narrow list; the title attribute exposes the full name on hover. */}
+                <strong title={name}>{name}</strong>
+                <small title={kind}>{kind}</small>
               </span>
             </button>
           </li>
-        ))}
+          );
+        })}
       </ul>
       {emptyText && <p className="muted city-directory-empty">{emptyText}</p>}
     </nav>

@@ -1,4 +1,4 @@
-import { layoutRings, ringCountFor, ringSpec } from './isometricMath';
+import { layoutRings, painterSort, ringCountFor, ringSpec } from './isometricMath';
 import { resolveRoomArchetype, type ArchetypeCategory, type ArchetypeColor, type ArchetypeId, type RoomArchetype } from './roomArchetypes';
 
 /** Minimal room shape the city needs; both participant `Room` and guest `PublicRoom` satisfy it. */
@@ -25,7 +25,33 @@ export interface CityBuilding {
   room?: { roomId: string; title: string; description: string; messageCount: number | null };
 }
 
-export interface CityScene { buildings: CityBuilding[]; rings: number[]; forumRadius: number; outerRadius: number; }
+/** A straight road from the forum edge outwards along a precomputed direction. */
+export interface CityAvenue { cos: number; sin: number; length: number; }
+
+export interface CityScene {
+  buildings: CityBuilding[];
+  /** `buildings` in painter order (far first), sorted once per scene; renderer and hit test walk it. */
+  drawOrder: CityBuilding[];
+  /** Room buildings only, in input order. */
+  roomBuildings: CityBuilding[];
+  /** Four cardinal avenues to the city edge followed by one avenue per room (same order as roomBuildings). */
+  avenues: CityAvenue[];
+  /** The per-room subset of `avenues`, used by the decorative road pulses. */
+  roomAvenues: CityAvenue[];
+  rings: number[];
+  forumRadius: number;
+  outerRadius: number;
+}
+
+/** Derived scene data shared by buildCityScene and the single-building preview. */
+export function sceneFromBuildings(buildings: CityBuilding[], rings: number[], forumRadius: number, outerRadius: number): CityScene {
+  const roomBuildings = buildings.filter(building => building.kind === 'room');
+  const edge = outerRadius + 140;
+  const cardinal: CityAvenue[] = [0, 1, 2, 3].map(index => { const angle = index * Math.PI / 2 + Math.PI / 4; return { cos: Math.cos(angle), sin: Math.sin(angle), length: edge }; });
+  const roomAvenues: CityAvenue[] = roomBuildings.filter(building => building.angle !== null)
+    .map(building => ({ cos: Math.cos(building.angle!), sin: Math.sin(building.angle!), length: Math.hypot(building.x, building.y) }));
+  return { buildings, drawOrder: painterSort(buildings), roomBuildings, avenues: [...cardinal, ...roomAvenues], roomAvenues, rings, forumRadius, outerRadius };
+}
 
 /** Forum Centralis (PROMPT §3.Б): the Library at y = −80 and the Pantheon at y = +80 so they never overlap on the line of sight. */
 export const LIBRARY_POSITION = { x: 0, y: -80 } as const;
@@ -68,7 +94,7 @@ export function buildCityScene(rooms: readonly CityRoomInput[]): CityScene {
   const ringCount = ringCountFor(rooms.length);
   // Ring 0 is always drawn as a road, even before the first room exists.
   const rings = Array.from({ length: Math.max(1, ringCount) }, (_, index) => ringSpec(index).radius);
-  return { buildings, rings, forumRadius: FORUM_RADIUS, outerRadius: rings.at(-1)! };
+  return sceneFromBuildings(buildings, rings, FORUM_RADIUS, rings.at(-1)!);
 }
 
 /** Whether a building passes the HUD category filter; the Forum landmarks are always shown. */

@@ -126,8 +126,8 @@
   padding: 5px;
   border: 1px solid var(--border-glass);
   border-radius: var(--radius-md);
-  background: var(--bg-panel);
-  backdrop-filter: var(--glass-blur);
+  /* Solid over the live canvas: a backdrop-filter would re-blur every animated frame. */
+  background: var(--bg-panel-solid);
 }
 
 .city-camera button {
@@ -168,15 +168,10 @@
   overflow-y: auto;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: var(--radius-lg);
+  /* Opaque on purpose (no glass): text contrast must not depend on the canvas behind it, and no
+     backdrop-filter has to be recomputed for every animated frame. */
   background: var(--bg-panel-solid);
   box-shadow: var(--shadow-panel), 0 0 20px color-mix(in srgb, var(--accent) 22%, transparent);
-}
-
-@supports (backdrop-filter: blur(1px)) {
-  .city-card {
-    background: var(--bg-panel);
-    backdrop-filter: var(--glass-blur);
-  }
 }
 
 .city-card-head {

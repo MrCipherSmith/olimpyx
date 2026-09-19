@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  COS30, SIN30, clampZoom, diveCamera, fitZoom, hitTest, isoProject, layoutRings, painterSort, ringCountFor, ringSpec,
-  screenToWorld, worldToScreen, MAX_ZOOM, MIN_ZOOM, type Camera,
+  COS30, SIN30, boxInViewport, clampZoom, diveCamera, fitZoom, footprintScreenBox, hitTest, isoProject, layoutRings, painterSort, ringCountFor, ringSpec,
+  screenToWorld, shouldRefitZoom, worldToScreen, MAX_ZOOM, MIN_ZOOM, type Camera, type ScreenBox,
 } from './isometricMath';
 
 const view = { width: 1000, height: 800 };
@@ -135,7 +135,82 @@ describe('camera helpers', () => {
     const back = { id: 'back', x: 0, y: 0, size: 40, height: 100 };
     const front = { id: 'front', x: 20, y: 20, size: 40, height: 100 };
     const centre = worldToScreen(0, 0, 20, camera, view);
-    expect(hitTest([front, back], centre.x, centre.y, camera, view)?.id).toBe('front');
+    expect(hitTest(painterSort([front, back]), centre.x, centre.y, camera, view)?.id).toBe('front');
     expect(hitTest([back], 0, 0, camera, view)).toBeNull();
+  });
+
+  it('walks the draw order back to front and returns the first (topmost) hit', () => {
+    const camera = { focalX: 0, focalY: 0, zoom: 1 };
+    const a = { id: 'a', x: 0, y: 0, size: 40, height: 100 };
+    const b = { id: 'b', x: 0, y: 0, size: 40, height: 100 }; // same spot: the later entry is drawn on top
+    const centre = worldToScreen(0, 0, 20, camera, view);
+    expect(hitTest([a, b], centre.x, centre.y, camera, view)?.id).toBe('b');
+    expect(hitTest([b, a], centre.x, centre.y, camera, view)?.id).toBe('a');
+    // Early return: items before the hit are never inspected.
+    const touched: string[] = [];
+    const spy = (item: typeof a) => new Proxy(item, { get: (target, key) => { if (key === 'x') touched.push(target.id); return target[key as keyof typeof a]; } });
+    hitTest([spy({ ...a, id: 'first' }), spy({ ...b, id: 'last' })], centre.x, centre.y, camera, view);
+    expect(touched).toEqual(['last']);
+  });
+
+  it('matches painterSort order: a hit on overlapping buildings picks the nearer one', () => {
+    const camera = { focalX: 0, focalY: 0, zoom: 1 };
+    const items = [{ id: 'near', x: 30, y: 30, size: 46, height: 80 }, { id: 'far', x: -30, y: -30, size: 46, height: 80 }];
+    const middle = worldToScreen(0, 0, 40, camera, view);
+    expect(hitTest(painterSort(items), middle.x, middle.y, camera, view)?.id).toBe('near');
+  });
+});
+
+describe('worldToScreen scratch output', () => {
+  it('writes into the provided point and returns it', () => {
+    const camera = { focalX: 12, focalY: -7, zoom: 0.8 };
+    const out = { x: 0, y: 0 };
+    const result = worldToScreen(100, -40, 25, camera, view, out);
+    expect(result).toBe(out);
+    expect(out).toEqual(worldToScreen(100, -40, 25, camera, view));
+  });
+});
+
+describe('culling predicate', () => {
+  const camera = { focalX: 0, focalY: 0, zoom: 1 };
+  const box: ScreenBox = { left: 0, top: 0, right: 0, bottom: 0 };
+
+  it('keeps a building at the centre and one overhanging the edge', () => {
+    expect(boxInViewport(footprintScreenBox(0, 0, 50, 100, camera, view, box), view)).toBe(true);
+    const edge = { left: -30, top: 100, right: 10, bottom: 200 };
+    expect(boxInViewport(edge, view)).toBe(true);
+  });
+
+  it('rejects boxes fully outside the viewport, unless within the margin', () => {
+    expect(boxInViewport({ left: -80, top: 100, right: -20, bottom: 200 }, view)).toBe(false);
+    expect(boxInViewport({ left: -80, top: 100, right: -20, bottom: 200 }, view, 48)).toBe(true);
+    expect(boxInViewport({ left: 1100, top: 100, right: 1200, bottom: 200 }, view, 48)).toBe(false);
+    expect(boxInViewport({ left: 100, top: 900, right: 200, bottom: 1000 }, view, 48)).toBe(false);
+    expect(boxInViewport({ left: 100, top: -400, right: 200, bottom: -100 }, view, 48)).toBe(false);
+  });
+
+  it('footprint box contains the projected footprint and the top of the building', () => {
+    const b = footprintScreenBox(300, -100, 50, 120, { focalX: 40, focalY: 10, zoom: 0.7 }, view, box);
+    const cam = { focalX: 40, focalY: 10, zoom: 0.7 };
+    for (let index = 0; index < 16; index++) {
+      const angle = (index / 16) * 2 * Math.PI;
+      for (const z of [0, 120]) {
+        const p = worldToScreen(300 + Math.cos(angle) * 50, -100 + Math.sin(angle) * 50, z, cam, view);
+        expect(p.x).toBeGreaterThanOrEqual(b.left - 1e-9);
+        expect(p.x).toBeLessThanOrEqual(b.right + 1e-9);
+        expect(p.y).toBeGreaterThanOrEqual(b.top - 1e-9);
+        expect(p.y).toBeLessThanOrEqual(b.bottom + 1e-9);
+      }
+    }
+  });
+});
+
+describe('zoom re-fit condition', () => {
+  it('re-fits on first scene and when the ring footprint changes, not for a new rooms array of the same size', () => {
+    const one = { outerRadius: 520, rings: [520] };
+    expect(shouldRefitZoom(null, one)).toBe(true);
+    expect(shouldRefitZoom(one, { outerRadius: 520, rings: [520] })).toBe(false);
+    expect(shouldRefitZoom(one, { outerRadius: 780, rings: [520, 780] })).toBe(true);
+    expect(shouldRefitZoom({ outerRadius: 780, rings: [520, 780] }, one)).toBe(true);
   });
 });

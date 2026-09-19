@@ -1,4 +1,4 @@
-import { type MutableRefObject, useEffect, useMemo, useRef, useState } from 'react';
+import { type MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Route } from '../../lib/navigation';
 import { accentStyle } from '../shared/accentStyle';
 import { CityBuildingList, buildingIcon } from './CityBuildingList';
@@ -20,14 +20,16 @@ interface CityViewProps {
 }
 
 function usePrefersReducedMotion(): boolean {
-  const query = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  // One MediaQueryList per mount instead of a new matchMedia() on every render.
+  const query = useMemo(() => (typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null), []);
   const [reduced, setReduced] = useState(() => query?.matches ?? false);
   useEffect(() => {
     if (!query) return;
     const update = () => setReduced(query.matches);
+    update();
     query.addEventListener?.('change', update);
     return () => query.removeEventListener?.('change', update);
-  }, [query?.media]);
+  }, [query]);
   return reduced;
 }
 
@@ -45,17 +47,21 @@ export function CityView({ rooms, agents, cardCount, mode, loading = false, onNa
   // Move focus to the opened card (this also scrolls it into view on narrow screens where the list is below the map).
   useEffect(() => { if (selectedId) cardRef.current?.focus(); }, [selectedId]);
 
-  const closeCard = () => {
-    const id = selectedId;
+  // Stable identity so the card's Escape listener subscribes once per open card, not on every render.
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const closeCard = useCallback(() => {
+    const id = selectedIdRef.current;
     setSelectedId(null);
     const button = Array.from(viewRef.current?.querySelectorAll<HTMLElement>('[data-building-id]') ?? []).find(element => element.dataset.buildingId === id);
     button?.focus();
-  };
+  }, []);
 
-  const roomBuildings = scene.buildings.filter(building => building.kind === 'room');
+  const roomBuildings = scene.roomBuildings;
   const counts = useMemo(() => {
-    const result = { all: roomBuildings.length } as Record<CityFilter, number>;
-    for (const category of ROOM_CATEGORIES) result[category.id] = roomBuildings.filter(building => building.category === category.id).length;
+    const result = { all: scene.roomBuildings.length } as Record<CityFilter, number>;
+    for (const category of ROOM_CATEGORIES) result[category.id] = 0;
+    for (const building of scene.roomBuildings) if (building.category) result[building.category] += 1;
     return result;
   }, [scene]);
   const listed = scene.buildings.filter(building => matchesFilter(building, filter));
@@ -101,13 +107,13 @@ function CityCard({ building, agents, cardCount, mode, cardRef, onClose, onNavig
         <span className="city-card-icon" aria-hidden="true">{buildingIcon(building)}</span>
         <div>
           <p className="eyebrow">{building.kind === 'room' ? (mode === 'guest' ? 'Published room' : 'Room') : 'Forum Centralis'}</p>
-          <h3 id={headingId}>{building.kind === 'room' ? building.label : building.kind === 'library' ? 'Центральная Библиотека' : 'Пантеон Агентов'}</h3>
+          <h3 id={headingId}>{building.kind === 'room' ? building.label : <span lang="ru">{building.kind === 'library' ? 'Центральная Библиотека' : 'Пантеон Агентов'}</span>}</h3>
         </div>
         <button type="button" className="icon-button" onClick={onClose} aria-label="Close building card">×</button>
       </div>
       {building.kind === 'room' && building.room && building.archetype ? <>
         <dl className="city-card-facts">
-          <div><dt>Layout</dt><dd>{building.archetype.name} <span className="muted">· {building.archetype.nameEn}</span></dd></div>
+          <div><dt>Layout</dt><dd><span lang="ru">{building.archetype.name}</span> <span className="muted">· {building.archetype.nameEn}</span></dd></div>
           <div><dt>Category</dt><dd>{categoryInfo(building.archetype.category).labelEn}</dd></div>
           {building.room.messageCount !== null && <div><dt>{mode === 'guest' ? 'Published messages' : 'Messages'}</dt><dd>{building.room.messageCount}</dd></div>}
         </dl>

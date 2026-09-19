@@ -15,9 +15,16 @@ export function isoProject(x: number, y: number, z = 0): Point {
   return { x: (x - y) * COS30, y: (x + y) * SIN30 - z };
 }
 
-export function worldToScreen(x: number, y: number, z: number, camera: Camera, view: Viewport): Point {
-  const iso = isoProject(x, y, z);
-  return { x: view.width / 2 + (iso.x - camera.focalX) * camera.zoom, y: view.height / 2 + (iso.y - camera.focalY) * camera.zoom };
+/**
+ * World → screen. Pass `out` to write into a caller-owned scratch point instead of allocating one
+ * (used on the per-frame render path); the returned object is `out` in that case.
+ */
+export function worldToScreen(x: number, y: number, z: number, camera: Camera, view: Viewport, out?: Point): Point {
+  const sx = view.width / 2 + ((x - y) * COS30 - camera.focalX) * camera.zoom;
+  const sy = view.height / 2 + ((x + y) * SIN30 - z - camera.focalY) * camera.zoom;
+  if (!out) return { x: sx, y: sy };
+  out.x = sx; out.y = sy;
+  return out;
 }
 
 /** Inverse projection onto the ground plane (z = 0), accounting for the camera focal offset and zoom. */
@@ -113,15 +120,52 @@ export function diveCamera(from: Camera, to: Camera, t: number): Camera {
   };
 }
 
-/** Frontmost item whose screen box contains the point (painter order: the last drawn wins). */
-export function hitTest<T extends { x: number; y: number; size: number; height: number }>(items: readonly T[], sx: number, sy: number, camera: Camera, view: Viewport): T | null {
-  let hit: T | null = null;
-  for (const item of painterSort(items)) {
-    const base = worldToScreen(item.x, item.y, 0, camera, view);
+/**
+ * Frontmost item whose screen box contains the point. `drawOrder` must already be in painter order
+ * (see painterSort / CityScene.drawOrder): it is walked back to front and the first hit wins.
+ */
+export function hitTest<T extends { x: number; y: number; size: number; height: number }>(drawOrder: readonly T[], sx: number, sy: number, camera: Camera, view: Viewport): T | null {
+  const base = { x: 0, y: 0 };
+  for (let index = drawOrder.length - 1; index >= 0; index--) {
+    const item = drawOrder[index];
+    worldToScreen(item.x, item.y, 0, camera, view, base);
     const halfWidth = item.size * COS30 * camera.zoom;
     const halfDepth = item.size * SIN30 * camera.zoom;
     const top = base.y - (item.height * camera.zoom + halfDepth);
-    if (sx >= base.x - halfWidth && sx <= base.x + halfWidth && sy >= top && sy <= base.y + halfDepth) hit = item;
+    if (sx >= base.x - halfWidth && sx <= base.x + halfWidth && sy >= top && sy <= base.y + halfDepth) return item;
   }
-  return hit;
+  return null;
+}
+
+/* ---------------------------------------------------------------- culling */
+
+export interface ScreenBox { left: number; top: number; right: number; bottom: number; }
+
+/**
+ * Screen box of a footprint disc of world radius `reach` at (x, y) extruded up to height `top`,
+ * written into `out`. Used to cull buildings that cannot touch the viewport.
+ */
+export function footprintScreenBox(x: number, y: number, reach: number, top: number, camera: Camera, view: Viewport, out: ScreenBox): ScreenBox {
+  const cx = view.width / 2 + ((x - y) * COS30 - camera.focalX) * camera.zoom;
+  const cy = view.height / 2 + ((x + y) * SIN30 - camera.focalY) * camera.zoom;
+  const halfWidth = reach * Math.SQRT2 * COS30 * camera.zoom;
+  const halfDepth = reach * Math.SQRT2 * SIN30 * camera.zoom;
+  out.left = cx - halfWidth;
+  out.right = cx + halfWidth;
+  out.top = cy - top * camera.zoom - halfDepth;
+  out.bottom = cy + halfDepth;
+  return out;
+}
+
+/** Whether a screen box overlaps the viewport grown by `margin` pixels on every side. */
+export function boxInViewport(box: ScreenBox, view: Viewport, margin = 0): boolean {
+  return box.right >= -margin && box.left <= view.width + margin && box.bottom >= -margin && box.top <= view.height + margin;
+}
+
+/**
+ * The zoom is re-fitted only when the city footprint changes (a ring is added or removed), not on
+ * every new rooms array from polling.
+ */
+export function shouldRefitZoom(previous: { outerRadius: number; rings: readonly number[] } | null, next: { outerRadius: number; rings: readonly number[] }): boolean {
+  return !previous || previous.outerRadius !== next.outerRadius || previous.rings.length !== next.rings.length;
 }

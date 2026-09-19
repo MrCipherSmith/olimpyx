@@ -1,6 +1,7 @@
 import { useEffect, useRef, type MutableRefObject } from 'react';
-import { clampZoom, diveCamera, fitZoom, hitTest, isoProject, type Camera, type Viewport } from './isometricMath';
-import { renderCity } from './cityRenderer';
+import { clampZoom, diveCamera, fitZoom, hitTest, isoProject, shouldRefitZoom, type Camera, type Viewport } from './isometricMath';
+import { createRenderCache, renderCity } from './cityRenderer';
+import { shouldSkipFrame } from './cityLoop';
 import type { CityScene } from './cityScene';
 import { CITY_MOTION, resolveCityPalette, type CityPalette } from './cityTokens';
 import type { ArchetypeCategory } from './roomArchetypes';
@@ -43,7 +44,12 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     fitted: false,
     animation: null as Animation | null,
     palette: null as CityPalette | null,
+    cache: createRenderCache(),
     frozenTime: 0,
+    lastDraw: -Infinity,
+    /** Set by requestFrame(): the next frame must draw even inside the decorative 30 fps window. */
+    dirty: true,
+    dragging: false,
     visible: true,
     onScreen: true,
     rafId: 0,
@@ -63,6 +69,12 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
 
     const draw = (now: number) => {
       s.rafId = 0;
+      if (shouldSkipFrame({ now, lastDraw: s.lastDraw, dirty: s.dirty, animating: s.animation !== null, dragging: s.dragging })) {
+        if (animated() && shouldRun()) s.rafId = requestAnimationFrame(draw);
+        return;
+      }
+      s.dirty = false;
+      s.lastDraw = now;
       if (s.animation) {
         const progress = Math.min(1, (now - s.animation.start) / s.animation.duration);
         s.camera = diveCamera(s.animation.from, s.animation.to, progress);
@@ -74,30 +86,51 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
         scene: s.scene, camera: s.camera, view: s.view, palette: s.palette!, time: s.frozenTime, animate: animated(),
         hoveredId: s.hoveredId, selectedId: s.selectedId, filter: s.filter,
         particles: animated() ? (s.view.width < 600 ? 4 : 12) : 0,
+        dpr: s.dpr, cache: s.cache,
       });
       // Continuous loop only while something moves; otherwise wait for the next requestFrame().
       if ((animated() || s.animation) && shouldRun()) s.rafId = requestAnimationFrame(draw);
     };
-    s.requestFrame = () => { if (!s.rafId && shouldRun()) s.rafId = requestAnimationFrame(draw); };
+    s.requestFrame = () => { s.dirty = true; if (!s.rafId && shouldRun()) s.rafId = requestAnimationFrame(draw); };
     const stop = () => { if (s.rafId) cancelAnimationFrame(s.rafId); s.rafId = 0; };
 
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      const width = Math.round(rect.width);
-      const height = Math.round(rect.height);
+    /** Applies a CSS size; the backing store is only rewritten when the size or the DPR actually changed. */
+    const applySize = (cssWidth: number, cssHeight: number) => {
+      const width = Math.round(cssWidth);
+      const height = Math.round(cssHeight);
       if (!width || !height) return;
-      s.dpr = Math.min(MAX_DPR, window.devicePixelRatio || 1);
+      const dpr = Math.min(MAX_DPR, window.devicePixelRatio || 1);
+      if (width === s.view.width && height === s.view.height && dpr === s.dpr) return;
+      s.dpr = dpr;
       s.view = { width, height };
-      canvas.width = Math.round(width * s.dpr);
-      canvas.height = Math.round(height * s.dpr);
+      const backingWidth = Math.round(width * dpr);
+      const backingHeight = Math.round(height * dpr);
+      if (canvas.width !== backingWidth) canvas.width = backingWidth;
+      if (canvas.height !== backingHeight) canvas.height = backingHeight;
       if (!s.fitted) { s.camera = { focalX: 0, focalY: -20, zoom: fitZoom(s.scene.outerRadius, s.view) }; s.fitted = true; }
       stop(); s.requestFrame();
     };
-    resize();
-    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
+    const initial = canvas.getBoundingClientRect();
+    applySize(initial.width, initial.height);
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(entries => { const entry = entries[entries.length - 1]; if (entry) applySize(entry.contentRect.width, entry.contentRect.height); })
+      : null;
     resizeObserver?.observe(canvas);
-    const dprQuery = typeof window.matchMedia === 'function' ? window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`) : null;
-    dprQuery?.addEventListener?.('change', resize);
+
+    // A `(resolution: Ndppx)` query only fires once, when leaving N: re-create it for the new ratio each time.
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => { watchDpr(); applySize(s.view.width, s.view.height); };
+    const watchDpr = () => {
+      dprQuery?.removeEventListener?.('change', onDprChange);
+      dprQuery = typeof window.matchMedia === 'function' ? window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`) : null;
+      dprQuery?.addEventListener?.('change', onDprChange);
+    };
+    watchDpr();
+
+    // Label widths are measured once per building; re-measure after the display font finishes loading.
+    const fonts = typeof document !== 'undefined' ? (document as Document & { fonts?: FontFaceSet }).fonts : undefined;
+    const onFontsLoaded = () => { s.cache.labels.clear(); s.requestFrame(); };
+    fonts?.addEventListener?.('loadingdone', onFontsLoaded);
 
     const onVisibility = () => { s.visible = document.visibilityState !== 'hidden'; if (s.visible) s.requestFrame(); else stop(); };
     document.addEventListener('visibilitychange', onVisibility);
@@ -108,8 +141,8 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
 
     /* --- pointer: drag to pan, click to select, wheel to zoom --- */
     let drag: { id: number; x: number; y: number; moved: boolean } | null = null;
-    const local = (event: { clientX: number; clientY: number }) => { const rect = canvas.getBoundingClientRect(); return { x: event.clientX - rect.left, y: event.clientY - rect.top }; };
-    const pick = (x: number, y: number) => hitTest(s.scene.buildings, x, y, s.camera, s.view);
+    // offsetX/Y are relative to the canvas padding edge: no layout read (getBoundingClientRect) per move.
+    const pick = (event: PointerEvent) => hitTest(s.scene.drawOrder, event.offsetX, event.offsetY, s.camera, s.view);
     const onPointerDown = (event: PointerEvent) => { drag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }; canvas.setPointerCapture?.(event.pointerId); };
     const onPointerMove = (event: PointerEvent) => {
       if (drag && drag.id === event.pointerId) {
@@ -117,24 +150,24 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
         const dy = event.clientY - drag.y;
         if (drag.moved || Math.hypot(dx, dy) > DRAG_THRESHOLD) {
           drag.moved = true; drag.x = event.clientX; drag.y = event.clientY;
+          s.dragging = true;
           s.animation = null;
           s.camera = { ...s.camera, focalX: s.camera.focalX - dx / s.camera.zoom, focalY: s.camera.focalY - dy / s.camera.zoom };
           s.requestFrame();
         }
         return;
       }
-      const point = local(event);
-      const hovered = pick(point.x, point.y)?.id ?? null;
+      const hovered = pick(event)?.id ?? null;
       if (hovered !== s.hoveredId) { s.hoveredId = hovered; canvas.style.cursor = hovered ? 'pointer' : 'grab'; s.requestFrame(); }
     };
     const onPointerUp = (event: PointerEvent) => {
       if (!drag || drag.id !== event.pointerId) return;
       const wasDrag = drag.moved;
       drag = null;
+      s.dragging = false;
       canvas.releasePointerCapture?.(event.pointerId);
       if (wasDrag) return;
-      const point = local(event);
-      const hit = pick(point.x, point.y);
+      const hit = pick(event);
       if (hit) s.onSelect(hit.id);
     };
     const onPointerLeave = () => { if (s.hoveredId) { s.hoveredId = null; s.requestFrame(); } };
@@ -165,8 +198,10 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     return () => {
       stop();
       s.requestFrame = () => {};
+      s.dragging = false;
       resizeObserver?.disconnect();
-      dprQuery?.removeEventListener?.('change', resize);
+      dprQuery?.removeEventListener?.('change', onDprChange);
+      fonts?.removeEventListener?.('loadingdone', onFontsLoaded);
       intersection?.disconnect();
       document.removeEventListener('visibilitychange', onVisibility);
       canvas.removeEventListener('pointerdown', onPointerDown);
@@ -182,9 +217,12 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
   // Scene, filter or motion preference changed: redraw (and restart the loop if motion is now allowed).
   useEffect(() => {
     const s = state.current;
-    const sceneChanged = s.scene !== scene;
+    const previous = s.scene;
+    const sceneChanged = previous !== scene;
     s.scene = scene; s.filter = filter; s.reducedMotion = reducedMotion;
-    if (sceneChanged && !s.selectedId) s.camera = { ...s.camera, zoom: s.view.width ? fitZoom(scene.outerRadius, s.view) : s.camera.zoom };
+    if (sceneChanged) s.cache.labels.clear();
+    // Polling hands us a new rooms array (and scene) often; only a changed footprint re-fits the zoom.
+    if (sceneChanged && !s.selectedId && s.view.width && shouldRefitZoom(previous, scene)) s.camera = { ...s.camera, zoom: fitZoom(scene.outerRadius, s.view) };
     if (reducedMotion && s.animation) { s.camera = s.animation.to; s.animation = null; }
     s.requestFrame();
   }, [scene, filter, reducedMotion]);
