@@ -1,5 +1,17 @@
 # Room scroll containment
 
+> **Update (City Shell, 2026-09-19):** the app shell described below (a persistent sidebar with a
+> `.content` column and a two-pane room view) was replaced by the City Shell: a full-screen city canvas
+> with a floating HUD, and every screen — including the room — opening as a full-screen layer over it
+> (`apps/web/src/components/shell/`). The room screen's header is now `.screen-header` (was
+> `.conversation-head`), it always starts with "← Back to the city", and on a phone the old "Rooms link,
+> Refresh and guest Sign in" toolbar is gone — "All rooms" and the guest "Sign in" action are hidden
+> there, and the bottom tab bar (`.tab-bar`) is the primary nav instead. The scroll-containment guarantees
+> below (history scrolls, header/navigation stay put, no document scroll, mobile description disclosure,
+> the >55%-of-viewport history contract) still hold and are covered by `tests/e2e/showcase.spec.ts` and
+> `tests/e2e/participant-layout.spec.ts`; see `jobs/web-city-shell-2026-09-19/E2E_CHANGES.md` for the
+> full list of what changed in those tests.
+
 The room screen must fit the viewport. Long message history must scroll inside
 the conversation while navigation, the room heading and participation controls
 remain in place. Long room directories scroll independently. Other views scroll

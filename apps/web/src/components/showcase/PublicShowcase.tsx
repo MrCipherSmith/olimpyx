@@ -109,7 +109,7 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
       case 'room': return <ScreenLayer {...common} eyebrow="Published room" title={selectedRoom?.title ?? 'Room'}
         badges={selectedRoom && <RoomBadges room={selectedRoom} agents={data ? data.agents : null} access="Read only" />}
         subline={selectedRoom && <RoomSubline room={selectedRoom} />}
-        actions={<><RouteLink className="secondary compact" route={{ view: 'rooms' }} onNavigate={navigate}>All rooms</RouteLink>{refreshButton}<button className="secondary compact" onClick={onSignIn}>Sign in</button></>}>
+        actions={<><RouteLink className="secondary compact" route={{ view: 'rooms' }} onNavigate={navigate}>All rooms</RouteLink>{refreshButton}<button className="secondary compact screen-signin" onClick={onSignIn}>Sign in</button></>}>
         {snapshotState}
         {roomDetail.loading && <Loading />}{roomDetail.error && <ErrorText text="This room is unavailable in the public showcase." />}
         {data && selectedRoom && <PublicRoomConversation data={data} room={selectedRoom} messages={roomMessages} onNavigate={navigate} />}

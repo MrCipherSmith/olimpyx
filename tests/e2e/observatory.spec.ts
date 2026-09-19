@@ -1,4 +1,9 @@
 import { test, expect } from '@playwright/test';
+
+// City Shell: reduced motion keeps every screen open/close instant, and switching HUD screens now
+// requires "Back to the city" first (the HUD is inert while a screen covers the city — CityShell.tsx).
+test.use({ reducedMotion: 'reduce' });
+
 test('human owner registers, creates room, posts and observes persisted message',async({page})=>{
  test.setTimeout(60000);
  const id=Date.now().toString();
@@ -9,7 +14,8 @@ test('human owner registers, creates room, posts and observes persisted message'
  await page.getByLabel('Email',{exact:true}).fill(`browser-${id}@example.test`);
  await page.getByLabel('Password',{exact:true}).fill(`Browser-check-${id}!`);
  await page.getByRole('button',{name:'Create account',exact:true}).click();
- await expect(page.getByRole('heading',{name:'Network overview'})).toBeVisible();
+ // Signing in lands on the city overview (no dashboard screen any more).
+ await expect(page.getByRole('heading',{name:'Olimpyx city',exact:true})).toBeAttached();
  await page.getByRole('link',{name:'Rooms',exact:true}).click();
  await page.getByRole('button',{name:'New room'}).click();
  await page.getByLabel('Title',{exact:true}).fill(`Browser room ${id}`);
@@ -18,7 +24,9 @@ test('human owner registers, creates room, posts and observes persisted message'
  await page.getByRole('button',{name:'Send message',exact:true}).click();
  await expect(page.getByText(`Persistent browser message ${id}`,{exact:true})).toBeVisible();
  await page.reload();
- await page.getByRole('link',{name:'Rooms',exact:true}).click();
+ // The reload lands back on the room screen (its URL); the HUD "Rooms" nav is inert while it is open,
+ // so use the room screen's own "All rooms" action instead of "Back to the city" + "Rooms".
+ await page.getByRole('link',{name:'All rooms',exact:true}).click();
  await page.getByRole('button').filter({hasText:`Browser room ${id}`}).click();
  await expect(page.getByText(`Persistent browser message ${id}`,{exact:true})).toBeVisible();
  // Populate enough history to exercise paging and the periodic refresh.
@@ -29,6 +37,8 @@ test('human owner registers, creates room, posts and observes persisted message'
   const room=rooms.data.find((value:{title:string})=>value.title===`Browser room ${id}`);
   await Promise.all(Array.from({length:55},(_,index)=>fetch(`/v1/rooms/${room.room_id}/messages`,{method:'POST',headers:{...headers,'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({body:`History ${id} ${index}`})}).then(response=>{if(!response.ok)throw new Error('History seed failed');})));
  },{id});
+ await page.getByRole('link',{name:'Back to the city',exact:true}).click();
+ await page.getByRole('link',{name:'Rooms',exact:true}).click();
  await page.getByRole('button').filter({hasText:`Browser room ${id}`}).click();
  await page.getByRole('button',{name:'Load earlier messages',exact:true}).click();
  await expect(page.getByText(`Persistent browser message ${id}`,{exact:true})).toBeVisible();
@@ -39,8 +49,11 @@ test('human owner registers, creates room, posts and observes persisted message'
  await page.locator('article').filter({hasText:`Persistent browser message ${id}`}).getByRole('button',{name:'Report',exact:true}).click();
  await expect(page.getByRole('button',{name:'Report escalated',exact:true})).toBeVisible();
  await page.getByRole('button',{name:'Report escalated',exact:true}).click();
+ // Owner controls is a different screen: close the room first (the HUD is inert while it is open).
+ await page.getByRole('link',{name:'Back to the city',exact:true}).click();
  await page.getByRole('link',{name:'Owner controls',exact:true}).click();
  await expect(page.getByText('owner_escalation',{exact:true}).first()).toBeVisible();
+ await page.getByRole('link',{name:'Back to the city',exact:true}).click();
  await page.getByRole('button',{name:'Sign out'}).click();
  await expect(page.getByRole('button',{name:'Sign in',exact:true})).toBeVisible();
  await expect(page.getByRole('link',{name:'Owner controls',exact:true})).toHaveCount(0);

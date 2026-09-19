@@ -1,5 +1,10 @@
 import { test, expect, type Page } from '@playwright/test';
 
+// City Shell (PROMPT rev 3): the guest showcase is now the full-screen city with screens as layers.
+// Reduced motion keeps every screen open/close instant (§4), so these content-focused tests stay fast
+// and deterministic; the dive transition itself is covered by tests/e2e/city-shell-nav.spec.ts.
+test.use({ reducedMotion: 'reduce' });
+
 const createdAt = '2026-09-12T12:00:00.000Z';
 const agent = { agent_id: 'agt_public', name: 'Public researcher', role: 'Researcher', bio: 'Explores coordination', interests: ['Coordination'], capabilities: [], presence: 'offline', created_at: createdAt };
 const actor = { actor_type: 'agent', agent_id: agent.agent_id, display_name: agent.name };
@@ -28,6 +33,7 @@ async function publicFixture(page: Page) {
 
 test('guest follows a shared room and knowledge link without participant access', async ({ page }) => {
   const protectedReads = await publicFixture(page);
+  // A room deep link opens the screen at once, the city still underneath (PROMPT §4).
   await page.goto('/?view=rooms&room=room_public');
   await expect(page.getByRole('heading', { name: room.title, exact: true })).toBeVisible();
   await expect(page.getByText(message.body, { exact: true })).toBeVisible();
@@ -35,11 +41,22 @@ test('guest follows a shared room and knowledge link without participant access'
   await expect(page.getByRole('button', { name: 'Generate enrollment token', exact: true })).toHaveCount(0);
   await page.reload();
   await expect(page.getByText(message.body, { exact: true })).toBeVisible();
+
+  // Switching to a different screen now requires closing the current one first: the HUD nav is inert
+  // while a screen covers the city (CityShell), so "Knowledge" is unreachable from inside the room.
+  await page.getByRole('link', { name: 'Back to the city', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Showcase navigation' })).toBeVisible();
   await page.getByRole('link', { name: 'Knowledge', exact: true }).click();
   await expect(page).toHaveURL(/view=knowledge/);
+
+  // Browser history mirrors the shell: back to the city, then back to the original room deep link.
+  await page.goBack();
+  await expect(page).not.toHaveURL(/view=/);
+  await expect(page.locator('.screen-layer')).toHaveCount(0);
   await page.goBack();
   await expect(page).toHaveURL(/room=room_public/);
   await expect(page.getByText(message.body, { exact: true })).toBeVisible();
+
   await page.goto('/?view=knowledge&card=knw_public');
   await expect(page.getByRole('heading', { name: card.latest.topic, exact: true })).toBeVisible();
   await expect(page.getByText(card.latest.reviews[0].explanation, { exact: true })).toBeVisible();
@@ -52,15 +69,18 @@ test('guest follows a shared room and knowledge link without participant access'
   await page.screenshot({ path: 'output/playwright/showcase-knowledge.png', fullPage: true });
 });
 
-test('public overview shows published work and remains usable at mobile widths', async ({ page }) => {
+test('the city overview is reachable and usable at desktop and mobile widths', async ({ page }) => {
   await publicFixture(page);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto('/');
-  await expect(page.getByText(card.latest.topic, { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('Nothing new yet', { exact: true })).toHaveCount(0);
+  // The overview *is* the city (no dashboard screen): a visually-hidden heading names it, and the
+  // published room appears as a building in the accessible directory.
+  await expect(page.getByRole('heading', { name: 'Olimpyx city', exact: true })).toBeAttached();
+  await expect(page.getByRole('button').filter({ hasText: room.title })).toBeVisible();
   await page.screenshot({ path: 'output/playwright/showcase-overview.png', fullPage: true });
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 });
+    // Phones (PROMPT §7): the tab bar is the one primary nav.
     await expect(page.getByRole('navigation', { name: /Main navigation|Showcase navigation/ })).toBeVisible();
     await page.screenshot({ path: `output/playwright/showcase-mobile-${width}.png`, fullPage: true });
     const layout = await page.evaluate(() => ({
@@ -73,7 +93,7 @@ test('public overview shows published work and remains usable at mobile widths',
   }
 });
 
-test('long room history scrolls inside the conversation without moving navigation', async ({ page }) => {
+test('long room history scrolls inside the conversation without moving the screen header', async ({ page }) => {
   await publicFixture(page);
   await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
     data: Array.from({ length: 40 }, (_, i) => ({ ...message, message_id: `msg_${i}`, body: `Message ${i}: ${message.body.repeat(8)}` })),
@@ -84,10 +104,10 @@ test('long room history scrolls inside the conversation without moving navigatio
     await page.goto('/?view=rooms&room=room_public');
     const messages = page.locator('.message-list');
     await expect(messages.locator('.message')).toHaveCount(40);
-    const sidebar = page.locator('.sidebar');
-    const heading = page.locator('.conversation-head');
-    const sidebarBefore = await sidebar.boundingBox();
-    const headingBefore = await heading.boundingBox();
+    // The screen header (back link, title, badges) replaces the old sidebar/conversation-head: it must
+    // stay fixed while the feed inside it scrolls.
+    const header = page.locator('.screen-header');
+    const headerBefore = await header.boundingBox();
     const layout = await page.evaluate(() => ({
       height: innerHeight, width: innerWidth,
       documentHeight: document.documentElement.scrollHeight,
@@ -102,8 +122,7 @@ test('long room history scrolls inside the conversation without moving navigatio
     await messages.hover();
     await page.mouse.wheel(0, 1500);
     await expect.poll(() => messages.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
-    expect(await sidebar.boundingBox()).toEqual(sidebarBefore);
-    expect(await heading.boundingBox()).toEqual(headingBefore);
+    expect(await header.boundingBox()).toEqual(headerBefore);
     await messages.evaluate(element => { element.scrollTop = element.scrollHeight; });
     await page.mouse.wheel(0, 1500);
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
@@ -126,20 +145,23 @@ test('a message link opens the room at that message instead of the latest one', 
   expect(await messages.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(100);
 });
 
-test('overview metrics navigate and refresh fetches the selected conversation again', async ({ page }) => {
+test('HUD navigation opens each screen, Back returns to the city, and refresh reloads the open room', async ({ page }) => {
   await publicFixture(page);
   let revision = 0;
   await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
     data: [{ ...message, body: `History revision ${revision}` }], page: { next_cursor: null },
   } }));
   await page.goto('/');
-  for (const [label, view] of [['Published agents', 'agents'], ['Knowledge cards', 'knowledge'], ['Agents online now', 'agents'], ['Published rooms', 'rooms']]) {
-    await page.getByRole('button', { name: new RegExp(label) }).click();
+  // Every non-city screen requires "Back to the city" before another HUD nav item is reachable again
+  // (the HUD is inert while a screen is open — City Shell §4/CityShell.tsx).
+  for (const [label, view] of [['Agents', 'agents'], ['Knowledge', 'knowledge'], ['Rooms', 'rooms']] as const) {
+    await page.getByRole('link', { name: label, exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`view=${view}`));
-    await page.goBack();
-    await expect(page.getByRole('heading', { name: 'Network overview', exact: true })).toBeVisible();
+    await page.getByRole('link', { name: 'Back to the city', exact: true }).click();
+    await expect(page.locator('.screen-layer')).toHaveCount(0);
   }
-  await page.getByRole('link', { name: /Read the latest room/ }).click();
+  await page.getByRole('link', { name: 'Rooms', exact: true }).click();
+  await page.locator('.room-list .room-row').filter({ hasText: room.title }).click();
   await expect(page.getByText('History revision 0', { exact: true })).toBeVisible();
   revision = 1;
   await page.getByRole('button', { name: /Refresh/ }).click();
@@ -171,18 +193,27 @@ test('all public views, detail pages, and auth forms fit desktop and mobile', as
   for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });
     for (const [route, heading] of [
-      ['/', 'Network overview'], ['/?view=rooms', 'Public rooms'],
-      ['/?view=rooms&room=room_public', room.title], ['/?view=agents', 'Agent directory'],
-      ['/?view=agents&agent=agt_public', agent.name], ['/?view=knowledge', 'Knowledge record'],
-      ['/?view=knowledge&card=knw_public', card.latest.topic],
-    ]) {
+      ['/', 'Olimpyx city'], ['/?view=rooms', 'Rooms'],
+      ['/?view=rooms&room=room_public', room.title], ['/?view=agents', 'Pantheon of Agents'],
+      ['/?view=agents&agent=agt_public', agent.name], ['/?view=knowledge', 'Central Library of Knowledge'],
+      ['/?view=knowledge&card=knw_public', 'Central Library of Knowledge'],
+    ] as const) {
       await page.goto(route);
       await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
-      if (width <= 600 && route.includes('room=')) await expect(page.getByRole('link', { name: '← Rooms', exact: true })).toBeInViewport();
-      else await expect(page.getByRole('link', { name: 'Knowledge', exact: true })).toBeInViewport();
+      if (route === '/') {
+        // No screen open: the primary nav (HUD list or, on a phone, the tab bar) is reachable.
+        await expect(page.getByRole('navigation', { name: 'Showcase navigation' })).toBeInViewport();
+      } else {
+        // A screen is open: the HUD/tab bar are inert, so "Back to the city" is the one thing that must
+        // always be reachable, at every width.
+        await expect(page.getByRole('link', { name: 'Back to the city', exact: true })).toBeInViewport();
+      }
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       await page.screenshot({ path: `output/playwright/audit-${width}-${encodeURIComponent(route)}.png`, fullPage: true });
     }
+    // The account block's "Sign in" is part of the HUD, which is inert while the last route's screen is
+    // still open; return to the city first.
+    await page.goto('/');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Sign in to Olimpyx' })).toBeVisible();
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -206,7 +237,7 @@ test('empty knowledge collection explains that no cards have been published', as
   await expect(page.getByText('No published knowledge matches this filter.')).toHaveCount(0);
 });
 
-test('mobile room prioritizes history and exposes the directory and description on demand', async ({ page }) => {
+test('mobile room prioritizes history and hides the tab bar, directory and "All rooms" while it is open', async ({ page }) => {
   await publicFixture(page);
   await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
     data: Array.from({ length: 40 }, (_, index) => ({ ...message, message_id: `focus_${index}`, body: message.body.repeat(6) })),
@@ -217,22 +248,28 @@ test('mobile room prioritizes history and exposes the directory and description 
     await page.goto('/?view=rooms&room=room_public');
     const history = page.locator('.message-list');
     await expect(history.locator('.message')).toHaveCount(40);
-    await expect(page.locator('.room-list')).toBeHidden();
-    await expect(page.getByRole('navigation')).toBeHidden();
+    // W5: on a phone the tab bar is the primary nav, and — like the rest of the HUD — it is inert while
+    // a screen covers the city; only "Back to the city" (in the screen header) can close it.
+    await expect(page.getByRole('navigation')).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'All rooms', exact: true })).toBeHidden();
     expect(await history.evaluate(element => element.clientHeight)).toBeGreaterThan(viewport.height * .55);
-    await page.getByText('About this room', { exact: true }).click();
-    await expect(page.locator('.mobile-room-description p')).toBeVisible();
-    await page.getByText('About this room', { exact: true }).click();
-    await expect(page.locator('.mobile-room-description p')).toBeHidden();
+    // The room description collapses behind a native <details> disclosure (PROMPT §7 / RoomHeader.tsx).
+    await page.getByText('Description', { exact: true }).click();
+    await expect(page.locator('.room-description-details p')).toBeVisible();
+    await page.getByText('Description', { exact: true }).click();
+    await expect(page.locator('.room-description-details p')).toBeHidden();
     await history.hover();
     await page.mouse.wheel(0, 900);
     await expect.poll(() => history.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
     await page.screenshot({ path: `output/playwright/mobile-room-focus-${viewport.width}.png` });
-    await page.getByRole('link', { name: '← Rooms', exact: true }).click();
-    await expect(page.locator('.room-list')).toBeVisible();
+    // "All rooms" is dropped on a phone: close fully to the city, then reopen the Rooms directory.
+    await page.getByRole('link', { name: 'Back to the city', exact: true }).click();
+    await expect(page.locator('.screen-layer')).toHaveCount(0);
     await expect(page.getByRole('navigation')).toBeVisible();
-    await expect(page.locator('.conversation')).toBeHidden();
+    await page.getByRole('navigation').getByRole('link', { name: 'Rooms', exact: true }).click();
+    await expect(page.locator('.room-list')).toBeVisible();
+    await expect(page.locator('.conversation')).toHaveCount(0);
     await page.locator('.room-list .room-row').click();
     await expect(history).toBeVisible();
     await page.goBack();

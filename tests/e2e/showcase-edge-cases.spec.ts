@@ -1,5 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 
+// Deep links open their screen at once regardless of motion preference (DiveController: `immediate`),
+// so these tests don't need reduced motion — but it keeps the last test's "Back to the city" step fast.
+test.use({ reducedMotion: 'reduce' });
+
 const createdAt = '2026-09-12T12:00:00.000Z';
 const actor = { actor_type: 'agent' as const, agent_id: 'agt_deep', display_name: 'Deep link agent' };
 const agent = { agent_id: actor.agent_id, name: actor.display_name, role: 'Researcher', bio: 'Available through a stable public URL.', interests: ['routing'], capabilities: [], presence: 'offline' as const, created_at: createdAt };
@@ -40,22 +44,20 @@ test('unpublished selected resource shows safe recovery without revealing metada
 
   await expect(page.getByText('knw_unpublished', { exact: false })).toHaveCount(0);
   await expect(page.getByText(/not found|not available|unavailable/i)).toBeVisible();
+  // The screen header's own "Back to the city" is always present now and satisfies the same recovery
+  // intent as the old "knowledge|overview|back" link/button search.
   const recovery = page.getByRole('link', { name: /knowledge|overview|back/i }).or(page.getByRole('button', { name: /knowledge|overview|back/i }));
   await expect(recovery.first()).toBeVisible();
 });
 
-test('guest owner route recovers to public navigation or sign in instead of rendering empty owner content', async ({ page }) => {
+test('guest owner route recovers to the city instead of rendering owner content', async ({ page }) => {
   await routePublicDetails(page);
   await page.goto('/?view=owner');
 
+  // `?view=owner` is rewritten to the city for a guest (PublicShowcase's `guestRoute`): no screen opens.
   await expect(page.getByRole('heading', { name: 'Owner controls', exact: true })).toHaveCount(0);
-  await expect.poll(async () => {
-    const normalized = !new URL(page.url()).searchParams.has('view');
-    const signInForm = await page.getByRole('heading', { name: /sign in to olimpyx/i }).isVisible().catch(() => false);
-    const publicOverview = await page.getByRole('heading', { name: 'Network overview', exact: true }).isVisible().catch(() => false)
-      && await page.getByRole('navigation', { name: 'Showcase navigation', exact: true }).isVisible().catch(() => false);
-    return normalized || signInForm || publicOverview;
-  }).toBe(true);
+  await expect(page.locator('.screen-layer')).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Showcase navigation' })).toBeVisible();
 });
 
 test('authenticated read 401 clears private shell and previously rendered owner data', async ({ page }) => {
@@ -70,7 +72,10 @@ test('authenticated read 401 clears private shell and previously rendered owner 
   });
 
   await page.goto('/?view=rooms');
-  await expect(page.getByText('Previous owner private room', { exact: true })).toBeVisible();
+  // The room also names a building in the (inert, aria-hidden) city underneath the open Rooms screen;
+  // scope the lookup to the directory list so the assertion matches a single, visible element.
+  const roomList = page.locator('.room-list');
+  await expect(roomList.getByText('Previous owner private room', { exact: true })).toBeVisible();
   rejectProtectedReads = true;
   await page.getByRole('button', { name: /refresh/i }).click();
 

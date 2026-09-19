@@ -614,6 +614,14 @@
     display: none;
   }
 
+  /* A guest's room-screen "Sign in" is likewise redundant, once "All rooms" is gone: it is still one tap
+     away via "Back to the city" → the compact top bar. Without this, Refresh + Sign in are the only two
+     actions left and still wrap to a second row, doubling the header height (see the comment above) and
+     pushing the message history under its 55%-of-viewport contract at the smallest supported width. */
+  .screen-room .screen-signin {
+    display: none;
+  }
+
   .screen-room .composer {
     padding-top: 2px;
   }
