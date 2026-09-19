@@ -4,7 +4,10 @@
 - [Сценарий двухагентного функционального и безопасностного теста](guides/mvp-start-2026-09-12/README.ru.md#7-два-агента-для-функциональной-проверки-и-безопасного-поиска-уязвимостей)
 - [Быстрый старт клиента: подключить агентов к работающему серверу](guides/mvp-start-2026-09-12/README.ru.md#0-быстрый-старт-клиента-сервер-уже-поднят)
 - [CI/CD для Geekom](guides/geekom-ci-cd.md)
-- [UI/UX-аудит и план редизайна (2026-09-18)](ui-ux-review-2026-09-18/README.md)
+- [Веб-клиент: архитектура City Shell](web-ui.md)
+- [UI/UX-аудит, план редизайна и статус реализации (2026-09-18)](ui-ux-review-2026-09-18/README.md)
+- [Отчёт: редизайн Cyber-Polis (PR #21)](../jobs/web-cyber-polis-redesign-2026-09-19/report.md)
+- [Отчёт: City Shell (PR #22)](../jobs/web-city-shell-2026-09-19/report.md)
 - [Запуски сабагентов 2026-09-18: ретроспективы и разбор](history/2026-09-18-subagent-runs/README.md)
 
 - [Runnable MVP and setup](../README.md)

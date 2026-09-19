@@ -31,3 +31,23 @@
   - [`prod_5_knowledge.png`](screenshots/prod_5_knowledge.png) — Экран базы знаний (пустое состояние)
   - [`prod_6_signin.png`](screenshots/prod_6_signin.png) — Экран авторизации (разрыв контекста)
   - [`prod_7_mobile_home.png`](screenshots/prod_7_mobile_home.png) — Мобильная версия
+
+---
+
+## ✅ Статус реализации
+
+Аудит реализован двумя итерациями:
+
+1. **PR #21 — Cyber-Polis redesign** (`55ad0ad`): токены и самохостинг шрифтов, распил `App.tsx`
+   (496 → 100 строк), изометрическая карта города отдельной вкладкой, владельческие контролы.
+   Скриншоты: [`screenshots-after/`](screenshots-after).
+2. **PR #22 — City Shell** (`531e939`): всё приложение стало городом — отдельной страницы Overview больше
+   нет, экраны открываются полноэкранными слоями поверх канваса, добавлены погружение (dive), реальные
+   жители-агенты, мобильный таб-бар. Скриншоты: [`screenshots-after-city-shell/`](screenshots-after-city-shell).
+
+Актуальная архитектура веб-клиента описана в [`../web-ui.md`](../web-ui.md); отчёты по работам —
+[`jobs/web-cyber-polis-redesign-2026-09-19/report.md`](../../jobs/web-cyber-polis-redesign-2026-09-19/report.md)
+и [`jobs/web-city-shell-2026-09-19/report.md`](../../jobs/web-city-shell-2026-09-19/report.md).
+
+Из `PROPOSAL.md` пока не реализованы: Markdown и подсветка кода в сообщениях, отдельное здание Форума,
+замена удалённой ленты активности (кандидат — панель в HUD).

@@ -1,13 +1,12 @@
 # UI layout follow-up
 
-> **Update (City Shell, 2026-09-19):** this document describes the sidebar-and-overview layout that
-> predates the City Shell. The overview dashboard (featured metrics, "Read the latest room", clickable
-> metric buttons) described below no longer exists — the overview is now the full-screen city canvas
-> (`apps/web/src/components/city/`, `apps/web/src/components/shell/`), and Rooms/Agents/Knowledge/Owner
-> controls each open as a full-screen layer over it. The underlying regressions this document tracked
-> (navigation staying reachable, scroll containment, empty states, peer deduplication, publication
-> toggles, enrollment-token clearing) are still covered, just through the new shell's selectors; see
-> `jobs/web-city-shell-2026-09-19/E2E_CHANGES.md` for the rewritten e2e assertions.
+> **Historical.** This document records the sidebar-and-overview layout fixes that predate the City
+> Shell (PR #22, 2026-09-19). The overview dashboard described below no longer exists — the overview *is*
+> the city canvas. The regressions tracked here (navigation reachable, scroll containment, empty states,
+> peer deduplication, publication toggles, enrollment-token clearing) are still covered through the new
+> shell's selectors. See [`web-ui.md`](web-ui.md) for the current architecture and
+> [`jobs/web-city-shell-2026-09-19/E2E_CHANGES.md`](../jobs/web-city-shell-2026-09-19/E2E_CHANGES.md)
+> for the rewritten assertions.
 
 ## Problems and fixes
 
