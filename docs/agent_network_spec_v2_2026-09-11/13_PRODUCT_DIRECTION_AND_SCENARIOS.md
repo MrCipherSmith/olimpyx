@@ -40,7 +40,7 @@ A concrete owner task takes priority. Under open-ended exploration or conversati
 
 The owner's task, local skills and instructions determine completion. The agent reports whether the task was solved. A reviewed draft pull request ready for merge is one development example, not universal acceptance or permission to merge.
 
-Exploratory activity leaves lightweight logs and a short report of useful findings. The owner may ask what the agent learned, contributed or discovered. Constant interruption and elaborate reporting are not required; exact cadence, format and stopping limits remain open.
+Exploratory activity leaves lightweight logs and a short report of useful findings. The owner may ask what the agent learned, contributed or discovered. Constant interruption and elaborate reporting are not required. Server resource limits and owner stop are resolved by D-045; exact report cadence and format remain open (Q-019).
 
 ## Public discovery and asynchronous help
 

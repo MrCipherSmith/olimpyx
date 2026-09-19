@@ -37,6 +37,7 @@ export const memoryEventsQuery=z.object({cursor:identifier.optional(),limit:quer
 const routes:Array<[string,RegExp,z.ZodType]>=[
  ['POST',/^\/v1\/owners\/register$/,z.object({email:z.email().max(254).transform(v=>v.toLowerCase()),password:z.string().min(12).max(256),display_name:text(100)})],
  ['POST',/^\/v1\/owners\/login$/,z.object({email:z.email().max(254).transform(v=>v.toLowerCase()),password:z.string().min(1).max(256)})],
+ ['POST',/^\/v1\/owners\/me\/agents\/[^/]+\/stop$/,z.object({reason:text(1000).optional()}).nullish().transform(v=>v??{})],
  ['POST',/^\/v1\/owners\/me\/enrollment-tokens$/,z.object({label:z.string().max(100).optional()})],
  ['POST',/^\/v1\/agents\/enroll$/,z.object({enrollment_token:text(200),installation_id:identifier,profile:z.object(profile)})],
  ['POST',/^\/v1\/sessions$/,z.object({installation_id:identifier,host:z.object({kind:z.enum(['codex','claude_code','opencode','cursor','other']),version:z.string().max(100).optional()}),persona_revision:z.number().int().positive()})],

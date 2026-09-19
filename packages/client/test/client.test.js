@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { OlimpyxClient } from '../src/client.js';
+import { OlimpyxClient, OlimpyxHttpError } from '../src/client.js';
 
 function olimpyxStyleToken() {
   for (let i = 0; i < 50; i += 1) {
@@ -273,6 +273,124 @@ test('listen cancels in-flight operations via AbortSignal', async () => {
 
   setTimeout(() => controller.abort(new Error('User abort')), 20);
   await assert.rejects(listenPromise, (err) => err.message.includes('User abort') || err.message.includes('Fetch aborted by signal'));
+});
+
+// ---------------------------------------------------------------------------
+// Q-016: OlimpyxHttpError typed code/details/retryAfterSec, resource-limit
+// endpoints, inbox cursor ack, task decline, and the task.cancelled stop hint.
+// ---------------------------------------------------------------------------
+
+test('OlimpyxHttpError carries code, details, and retryAfterSec from a 429 quota response', async () => {
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test',
+    token: 't',
+    fetchImpl: async () => new Response(JSON.stringify({
+      error: {
+        message: 'Too many messages',
+        code: 'quota_exceeded',
+        details: { action: 'message', scope: 'agent', limit: 60, window_sec: 3600, retry_after_sec: 42 }
+      }
+    }), { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '42' } })
+  });
+  await assert.rejects(client.request('POST', '/v1/rooms/rom_1/messages', { body: 'hi' }), (err) => {
+    assert.ok(err instanceof OlimpyxHttpError);
+    assert.equal(err.status, 429);
+    assert.equal(err.code, 'quota_exceeded');
+    assert.equal(err.retryAfterSec, 42);
+    assert.deepEqual(err.details, { action: 'message', scope: 'agent', limit: 60, window_sec: 3600, retry_after_sec: 42 });
+    return true;
+  });
+});
+
+test('OlimpyxHttpError leaves code/details/retryAfterSec undefined when absent', async () => {
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test', token: 't',
+    fetchImpl: async () => new Response(JSON.stringify({ error: { message: 'nope' } }), { status: 404, headers: { 'content-type': 'application/json' } })
+  });
+  await assert.rejects(client.request('GET', '/v1/missing'), (err) => {
+    assert.equal(err.code, undefined);
+    assert.equal(err.details, undefined);
+    assert.equal(err.retryAfterSec, undefined);
+    return true;
+  });
+});
+
+test('stopAgent posts to the owner stop route with the reason and an idempotency key', async () => {
+  let seen;
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test', token: 'owner-t',
+    fetchImpl: async (url, init) => { seen = { url: String(url), init }; return new Response(JSON.stringify({ data: { agent_id: 'agt_1' } }), { headers: { 'content-type': 'application/json' } }); }
+  });
+  await client.stopAgent('agt_1', { reason: 'pausing for maintenance' }, 'idem-stop-1');
+  assert.equal(seen.url, 'https://example.test/v1/owners/me/agents/agt_1/stop');
+  assert.equal(seen.init.method, 'POST');
+  assert.equal(seen.init.headers['idempotency-key'], 'idem-stop-1');
+  assert.deepEqual(JSON.parse(seen.init.body), { reason: 'pausing for maintenance' });
+});
+
+test('limits, usage, and myUsage call the right read-only routes', async () => {
+  const urls = [];
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test', token: 't',
+    fetchImpl: async (url) => { urls.push(String(url)); return new Response(JSON.stringify({ data: {} }), { headers: { 'content-type': 'application/json' } }); }
+  });
+  await client.limits();
+  await client.usage();
+  await client.myUsage();
+  assert.deepEqual(urls, [
+    'https://example.test/v1/limits',
+    'https://example.test/v1/owners/me/usage',
+    'https://example.test/v1/agents/me/usage'
+  ]);
+});
+
+test('postInboxCursor posts the cursor to /v1/inbox/cursors', async () => {
+  let seen;
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test', token: 't',
+    fetchImpl: async (url, init) => { seen = { url: String(url), body: init.body }; return new Response(JSON.stringify({ data: {} }), { headers: { 'content-type': 'application/json' } }); }
+  });
+  await client.postInboxCursor('c_123');
+  assert.equal(seen.url, 'https://example.test/v1/inbox/cursors');
+  assert.deepEqual(JSON.parse(seen.body), { cursor: 'c_123' });
+});
+
+test('declineTask sends a PATCH with status cancelled and the reason as result', async () => {
+  let seen;
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test', token: 't',
+    fetchImpl: async (url, init) => { seen = { url: String(url), method: init.method, body: init.body }; return new Response(JSON.stringify({ data: { task_id: 'tsk_1', status: 'cancelled' } }), { headers: { 'content-type': 'application/json' } }); }
+  });
+  await client.declineTask('tsk_1', 'no longer able to take this on');
+  assert.equal(seen.url, 'https://example.test/v1/tasks/tsk_1');
+  assert.equal(seen.method, 'PATCH');
+  assert.deepEqual(JSON.parse(seen.body), { status: 'cancelled', result: 'no longer able to take this on' });
+});
+
+test('listen surfaces a stop hint when a task.cancelled event is delivered', async () => {
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test', token: 't',
+    fetchImpl: async () => new Response(JSON.stringify({
+      data: [{ event_id: 'evt_1', cursor: 'c1', type: 'task.cancelled', resource: { kind: 'task', id: 'tsk_1' } }],
+      page: { next_cursor: 'c1' }
+    }), { headers: { 'content-type': 'application/json' } })
+  });
+  const result = await client.listen({ cursor: 'c0', timeoutMs: 25_000, maxWaitMs: 60_000 });
+  assert.equal(result.status, 'received');
+  assert.deepEqual(result.stop, { code: 'TASK_CANCELLED', task_ids: ['tsk_1'] });
+});
+
+test('listen carries no stop hint for ordinary events, including informational agent.stop_requested', async () => {
+  const client = new OlimpyxClient({
+    serverUrl: 'https://example.test', token: 't',
+    fetchImpl: async () => new Response(JSON.stringify({
+      data: [{ event_id: 'evt_1', cursor: 'c1', type: 'agent.stop_requested', resource: { kind: 'agent', id: 'agt_1' } }],
+      page: { next_cursor: 'c1' }
+    }), { headers: { 'content-type': 'application/json' } })
+  });
+  const result = await client.listen({ cursor: 'c0', timeoutMs: 25_000, maxWaitMs: 60_000 });
+  assert.equal(result.status, 'received');
+  assert.equal(result.stop, undefined);
 });
 
 test('listen aborts backoff sleep immediately when signal is triggered', async () => {

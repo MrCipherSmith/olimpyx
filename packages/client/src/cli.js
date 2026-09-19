@@ -5,6 +5,7 @@ import process from 'node:process';
 import { OlimpyxClient } from './client.js';
 import { LocalState } from './state.js';
 import { ParticipationSession } from './session.js';
+import { loadBudget, saveBudget, enforceSendBudget, recordSend, checkSessionBudget, checkSessionBeginBudget, recordSessionEnd, OlimpyxBudgetExceededError } from './budget.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -49,11 +50,49 @@ async function tryLoadOwnerToken() {
   if (process.env.OLIMPYX_OWNER_TOKEN) return process.env.OLIMPYX_OWNER_TOKEN;
   try { return await state.loadOwnerCredential(); } catch { return null; }
 }
+// Resolves this agent's own owner id for the local budget's owner-scoping (budget.js
+// isOwnTaskRoom/evaluateHelpPolicy, PRD §3.4): `enroll`/`owner-login` normally already
+// cache it in config.json, so this is usually a plain local read with no network call.
+// Only an installation enrolled before this existed, and with an owner credential
+// available locally, triggers the one-time fetch-and-cache fallback; without an owner
+// credential this resolves to null (fails safe: an owner-created task is then not
+// treated as "own" until the owner id is known).
+async function resolveOwnerId(config) {
+  if (config.ownerId) return config.ownerId;
+  const ownerToken = await tryLoadOwnerToken();
+  if (!ownerToken) return null;
+  try {
+    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    const me = await client.request('GET', '/v1/owners/me');
+    const ownerId = me?.data?.owner_id ?? null;
+    if (ownerId) await state.saveConfig({ ...config, ownerId });
+    return ownerId;
+  } catch {
+    return null;
+  }
+}
 async function requireOwnerClient() {
   const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
   const config = await state.loadConfig();
   if (!config.serverUrl) throw new Error('Not configured. Run: olimpyx configure --server URL');
   return new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+}
+// Best-effort so the server can prune acknowledged inbox events (PRD §3.3); a failure
+// here must never interrupt the caller, which has already persisted the cursor locally.
+async function ackInboxCursor(client, cursor) {
+  if (!cursor) return;
+  try { await client.postInboxCursor(cursor); } catch { /* best-effort */ }
+}
+// listen surfaces the server's typed session-failure codes (PRD §3.2.5) as distinct
+// machine-readable codes; the CLI process exit code itself always stays 1.
+function mapListenErrorCode(error) {
+  const serverCode = error?.code;
+  if (serverCode === 'session_stopped') return 'STOP_REQUESTED';
+  if (serverCode === 'session_superseded') return 'SESSION_SUPERSEDED';
+  if (serverCode === 'agent_revoked') return 'AGENT_REVOKED';
+  if (error?.status === 403 && serverCode === 'restricted') return 'RESTRICTED';
+  if (error?.status === 401) return 'SESSION_EXPIRED';
+  return serverCode ?? error?.name ?? 'ERROR';
 }
 async function resolveMemoryAgentId(explicit) {
   const agentId = explicit ?? (await state.loadConfig()).agentId;
@@ -88,6 +127,18 @@ async function main() {
     const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: null });
     const result = await client.request('POST', '/v1/owners/login', { email, password });
     await state.init(); await state.saveOwnerCredential(result.data.access_token);
+    // Cache this agent's owner id locally (budget.js isOwnTaskRoom/evaluateHelpPolicy
+    // need it to tell "this agent's own owner" apart from any other owner in a shared
+    // room -- see PRD §3.4). Best-effort: a config write failure here must not fail login.
+    // Only adopt the logged-in owner's id when it's safe to: either no agent is enrolled
+    // yet locally (nothing to mix up), or it matches the already-cached ownerId. If an
+    // agent is already enrolled under a *different* owner, keep the existing ownerId --
+    // owner-login must never silently swap which owner an already-enrolled agent's "own
+    // owner" is believed to be.
+    const loggedInOwnerId = result.data.owner?.owner_id;
+    if (loggedInOwnerId && (!config.agentId || config.ownerId === loggedInOwnerId)) {
+      try { await state.saveConfig({ ...config, ownerId: loggedInOwnerId }); } catch { /* best-effort */ }
+    }
     output({ owner: result.data.owner, expires_at: result.data.expires_at }); return;
   }
   if (command === 'enroll') {
@@ -96,23 +147,49 @@ async function main() {
     const config = await state.loadConfig();
     const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
     const owner = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    // Always resolve this agent's own owner id from the owner token, even when config.ownerId
+    // is already cached: enroll is what actually binds this installation's agent to an owner,
+    // so a stale or previously-mismatched cached value must not be trusted here -- the owner
+    // token is already in hand, so re-resolving it via GET /v1/owners/me costs one request and
+    // guarantees ownerId always reflects the owner actually performing this enrollment.
+    let ownerId = null;
+    try {
+      const me = await owner.request('GET', '/v1/owners/me');
+      ownerId = me?.data?.owner_id ?? null;
+    } catch { /* best-effort: local budget owner-scoping falls back to not-own until resolved */ }
     const enrollment = await owner.request('POST', '/v1/owners/me/enrollment-tokens', { label: option('label', 'local CLI') }, { headers: { 'idempotency-key': crypto.randomUUID() } });
     const installationId = config.installationId ?? crypto.randomUUID();
     const result = await owner.request('POST', '/v1/agents/enroll', { enrollment_token: enrollment.data.enrollment_token, installation_id: installationId, profile }, { token: null, headers: { 'idempotency-key': crypto.randomUUID() } });
     await state.saveCredential(result.data.agent_token);
-    await state.saveConfig({ ...config, installationId, agentId: result.data.agent.agent_id, profileRevision: result.data.agent.profile_revision });
+    await state.saveConfig({ ...config, installationId, agentId: result.data.agent.agent_id, profileRevision: result.data.agent.profile_revision, ...(ownerId ? { ownerId } : {}) });
     await state.savePersona(profile, 'enrollment');
     output({ agent: result.data.agent, created_at: result.data.created_at }); return;
   }
   if (command === 'session') {
     const action = args.shift();
-    if (action === 'begin') { const callerId = option('caller-id'); if (!callerId) throw new Error('--caller-id is required'); const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return; }
+    if (action === 'begin') {
+      const callerId = option('caller-id'); if (!callerId) throw new Error('--caller-id is required');
+      // Local participation budget (PRD §3.4: enforced "on listen and session"): refuse to
+      // begin a new session, before any network call, once this agent's cumulative tracked
+      // participation minutes across sessions in the trailing 24h already meet
+      // session_minutes. Without a budget.json (or without session_minutes set) this is a
+      // no-op -- unchanged behavior.
+      const beginBudget = await checkSessionBeginBudget(state.root);
+      if (beginBudget.exhausted) {
+        throw new OlimpyxBudgetExceededError(
+          `Local session budget exhausted: cumulative session_minutes limit of ${beginBudget.limitMinutes} reached across sessions in the last 24h.`,
+          { limit: beginBudget.limitMinutes }
+        );
+      }
+      const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return;
+    }
     if (action === 'heartbeat') { const callerId = option('caller-id'); const { heartbeat } = await activeClient(callerId); output(heartbeat); return; }
     if (action === 'end') {
       const local = await state.loadSession(); if (!local) return;
       const reason = option('reason', 'agent_ended');
       if (!['agent_ended', 'host_ended', 'shutdown'].includes(reason)) throw new Error('Session end reason must be agent_ended, host_ended, or shutdown');
       const result = await (await configuredClient(local.token)).request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason });
+      await recordSessionEnd(state.root, local.session_id);
       await state.clearSession(); output(result); return;
     }
     throw new Error('session actions: begin | heartbeat | end');
@@ -323,8 +400,58 @@ async function main() {
     }
     throw new Error('knowledge subcommands: card | review | publish | archive | inspect | list');
   }
-  if (command === 'message') { const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null); const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key'); if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required'); const { client } = await activeClient(option('caller-id')); const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`; const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) }; output(await mutation(client, 'POST', path, payload, explicitKey)); return; }
-  if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); output(page); return; }
+  if (command === 'message') {
+    const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null);
+    const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key');
+    if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required');
+    const { client } = await activeClient(option('caller-id'));
+    const config = await state.loadConfig();
+    const kind = recipient ? 'direct_message' : (replyTo ? 'reply' : 'message');
+    // Only resolve this agent's owner id (which can require a network call, see
+    // resolveOwnerId) when a local budget is actually configured; AC-9 requires no
+    // budget.json to mean fully unchanged behavior.
+    const ownerId = (await loadBudget(state.root)) ? await resolveOwnerId(config) : null;
+    await enforceSendBudget(client, state.root, { agentId: config.agentId, ownerId, kind, roomId, recipientAgentId: recipient, replyToMessageId: replyTo });
+    const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
+    const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) };
+    const result = await mutation(client, 'POST', path, payload, explicitKey);
+    await recordSend(state.root);
+    output(result);
+    return;
+  }
+  if (command === 'wait') {
+    const after = option('after');
+    const callerId = option('caller-id');
+    const timeoutMs = Number(option('timeout-ms', 25_000));
+    const startTime = Date.now();
+    try {
+      const { client, local } = await activeClient(callerId);
+      // Local participation budget (PRD §3.4): `wait` doesn't enforce session_minutes itself
+      // (only `listen` does), but it must still touch the ledger's last-seen tracking so a
+      // wait-only session's elapsed time isn't silently lost -- see budget.js checkSessionBudget.
+      await checkSessionBudget(state.root, local.session_id);
+      const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs });
+      const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor;
+      await state.renewSession(callerId, { inbox_cursor: cursor });
+      await ackInboxCursor(client, cursor);
+      output(page);
+      return;
+    } catch (error) {
+      // Only a server-returned HTTP error (has a numeric `.status`) gets the same typed
+      // STOP_REQUESTED/SESSION_SUPERSEDED/... mapping `listen` uses (PRD §3.2.5); a local
+      // validation error (missing --caller-id, no local session, expired caller lease)
+      // keeps the ordinary CLI error path below.
+      if (typeof error?.status !== 'number') throw error;
+      const waited_sec = Math.round((Date.now() - startTime) / 1000);
+      const code = mapListenErrorCode(error);
+      output({
+        status: 'error',
+        error: { code, message: error.message, waited_sec, poll_cycles: 0 }
+      });
+      process.exitCode = 1;
+      return;
+    }
+  }
   if (command === 'listen') {
     const callerId = option('caller-id');
     if (!callerId) throw new Error('--caller-id is required for participant commands');
@@ -348,6 +475,28 @@ async function main() {
     const after = option('after');
     const client = await configuredClient(local.token);
 
+    // Local participation budget (PRD §3.4): session_minutes ends listen with
+    // BUDGET_EXHAUSTED. Without a budget.json this is a no-op (unchanged behavior).
+    const sessionBudgetNow = Date.now();
+    const sessionBudget = await checkSessionBudget(state.root, local.session_id, { now: sessionBudgetNow });
+    if (sessionBudget.exhausted) {
+      output({
+        status: 'error',
+        error: {
+          code: 'BUDGET_EXHAUSTED',
+          message: `Local session budget exhausted: session_minutes limit of ${sessionBudget.limitMinutes} reached.`,
+          waited_sec: 0,
+          poll_cycles: 0
+        }
+      });
+      process.exitCode = 1;
+      return;
+    }
+    const budgetRemainingMs = sessionBudget.limitMinutes
+      ? Math.max(0, sessionBudget.limitMinutes * 60_000 - sessionBudget.elapsedMinutes * 60_000)
+      : Infinity;
+    const effectiveMaxWaitMs = Math.min(maxWaitMs, budgetRemainingMs);
+
     const controller = new AbortController();
     let teardownPromise = null;
     const executeTeardown = async (sig) => {
@@ -357,6 +506,7 @@ async function main() {
       } catch (err) {
         if (process.env.DEBUG) process.stderr.write(`[teardown] failed to notify server: ${err.message}\n`);
       }
+      await recordSessionEnd(state.root, local.session_id);
       try {
         await state.clearSession();
       } catch (err) {
@@ -378,7 +528,7 @@ async function main() {
       const result = await client.listen({
         cursor: after || local.inbox_cursor,
         timeoutMs: pollTimeoutMs,
-        maxWaitMs: maxWaitMs,
+        maxWaitMs: effectiveMaxWaitMs,
         onHeartbeat: async () => {
           await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/heartbeat`, { observed_at: new Date().toISOString() });
           await state.renewSession(callerId);
@@ -386,6 +536,7 @@ async function main() {
         onCursor: async (nextCursor) => {
           if (nextCursor) {
             await state.renewSession(callerId, { inbox_cursor: nextCursor });
+            await ackInboxCursor(client, nextCursor);
           }
         },
         signal: controller.signal
@@ -394,6 +545,24 @@ async function main() {
       const finalCursor = result.page?.next_cursor ?? result.data?.at(-1)?.cursor;
       if (finalCursor) {
         await state.renewSession(callerId, { inbox_cursor: finalCursor });
+        await ackInboxCursor(client, finalCursor);
+      }
+
+      if (result.status === 'idle_timeout' && sessionBudget.limitMinutes) {
+        const recheck = await checkSessionBudget(state.root, local.session_id, { now: Date.now() });
+        if (recheck.exhausted) {
+          output({
+            status: 'error',
+            error: {
+              code: 'BUDGET_EXHAUSTED',
+              message: `Local session budget exhausted: session_minutes limit of ${recheck.limitMinutes} reached.`,
+              waited_sec: result.waited_sec,
+              poll_cycles: result.poll_cycles
+            }
+          });
+          process.exitCode = 1;
+          return;
+        }
       }
 
       output(result);
@@ -404,7 +573,7 @@ async function main() {
         return;
       }
       const waited_sec = error.waited_sec ?? Math.round((Date.now() - startTime) / 1000);
-      const code = error.status === 401 ? 'SESSION_EXPIRED' : (error.code ?? error.name ?? 'ERROR');
+      const code = mapListenErrorCode(error);
       output({
         status: 'error',
         error: {
@@ -742,10 +911,14 @@ async function main() {
       const isJson = Boolean(option('json'));
       const explicitKey = option('idempotency-key');
       const { client } = await activeClient(callerId);
+      const config = await state.loadConfig();
+      const ownerId = (await loadBudget(state.root)) ? await resolveOwnerId(config) : null;
+      await enforceSendBudget(client, state.root, { agentId: config.agentId, ownerId, kind: 'forum_post', roomId });
 
       const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
       const payload = { body, category, tags };
       const result = await mutation(client, 'POST', path, payload, explicitKey);
+      await recordSend(state.root);
       if (isJson) {
         output(result);
       } else {
@@ -842,7 +1015,88 @@ async function main() {
     process.stdout.write(`${lines.join('\n')}\n`);
     return;
   }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations\n');
+  if (command === 'agent') {
+    const action = args.shift();
+    if (action === 'stop') {
+      const agentId = args.shift();
+      if (!agentId) throw new Error('agent stop requires <agentId>');
+      const reason = option('reason');
+      const explicitKey = option('idempotency-key');
+      const client = await requireOwnerClient();
+      output(await client.stopAgent(agentId, { reason }, explicitKey));
+      return;
+    }
+    throw new Error('agent actions: stop <agentId> [--reason TEXT]');
+  }
+  if (command === 'usage') {
+    const callerId = option('caller-id');
+    if (callerId) {
+      const { client } = await activeClient(callerId);
+      output(await client.myUsage());
+    } else {
+      const client = await requireOwnerClient();
+      output(await client.usage());
+    }
+    return;
+  }
+  if (command === 'limits') {
+    const callerId = option('caller-id');
+    let client;
+    if (callerId) {
+      ({ client } = await activeClient(callerId));
+    } else {
+      const ownerToken = await tryLoadOwnerToken();
+      if (ownerToken) {
+        const config = await state.loadConfig();
+        client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+      } else {
+        client = await configuredClient();
+      }
+    }
+    output(await client.limits());
+    return;
+  }
+  if (command === 'budget') {
+    const action = args.shift();
+    if (action === 'show') {
+      output((await loadBudget(state.root)) ?? { help: 'on', contacts: [] });
+      return;
+    }
+    if (action === 'set') {
+      const help = option('help');
+      if (help !== undefined && !['on', 'contacts', 'off'].includes(help)) {
+        throw new Error('--help must be one of: on, contacts, off');
+      }
+      const contactsRaw = option('contacts');
+      const contacts = contactsRaw !== undefined ? await parseJsonOrList(contactsRaw) : undefined;
+      const messagesPerHourRaw = option('messages-per-hour');
+      const sessionMinutesRaw = option('session-minutes');
+      const patch = {
+        ...(help !== undefined ? { help } : {}),
+        ...(contacts !== undefined ? { contacts } : {}),
+        ...(messagesPerHourRaw !== undefined ? { messages_per_hour: Number(messagesPerHourRaw) } : {}),
+        ...(sessionMinutesRaw !== undefined ? { session_minutes: Number(sessionMinutesRaw) } : {})
+      };
+      output(await saveBudget(state.root, patch));
+      return;
+    }
+    throw new Error('budget actions: show | set [--help on|contacts|off] [--contacts a,b] [--messages-per-hour N] [--session-minutes N]');
+  }
+  if (command === 'task') {
+    const action = args.shift();
+    if (action === 'decline') {
+      const taskId = args.shift();
+      if (!taskId) throw new Error('task decline requires <taskId>');
+      const reason = option('reason');
+      if (!reason) throw new Error('--reason is required');
+      const explicitKey = option('idempotency-key');
+      const { client } = await activeClient(option('caller-id'));
+      output(await mutation(client, 'PATCH', `/v1/tasks/${encodeURIComponent(taskId)}`, { status: 'cancelled', result: reason }, explicitKey));
+      return;
+    }
+    throw new Error('task actions: decline <taskId> --reason TEXT');
+  }
+  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task\n');
 }
 
-main().catch((error) => { process.stderr.write(`${error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });
+main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

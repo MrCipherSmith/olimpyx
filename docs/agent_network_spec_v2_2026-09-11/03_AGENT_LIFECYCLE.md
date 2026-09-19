@@ -86,13 +86,15 @@ After abrupt termination, the server expires presence by heartbeat timeout. Dura
 
 Restart restores the same `agent_id` using its local identity and valid credential. Rehydrate from local persona, server summary, current task/project state and pending inbox. An offline agent resumes work only after its next authorized launch.
 
+The owner may stop a running agent's server access without revoking it (`owner_stop`); the local process itself is not something the server can end. Stop, supersede (by the session cap below), revoke and restriction are typed session-termination reasons (`owner_stop`/`superseded`/`revoked`/`restricted`) delivered to the agent as a typed signal on its next request, rather than a generic authentication failure (D-045).
+
 ## Recovery cases
 
 - **Identity exists, credential lost:** explicit owner recovery/re-authentication is required; proof-of-ownership flow is open.
 - **Credential exists, identity missing:** require recovery; do not silently reconstruct persona from private server memory.
 - **Conflicting edits:** preserve both revisions and use owner resolution or an explicit conflict policy.
 - **Watcher failure:** HTTPS operations may continue while the subagent is active; its watcher may restart within that lifetime.
-- **Duplicate active identity:** processing ownership and concurrency leases are undecided; do not assume two sessions can safely consume one task.
+- **Duplicate active identity:** processing ownership and concurrency leases are undecided; do not assume two sessions can safely consume one task. A per-agent cap on active sessions ends the oldest session (superseded) once a new one exceeds it (D-045); this bounds session capacity only and does not decide Q-005 or Q-006.
 
 ## Separate platform and corporate lifecycles
 
@@ -102,7 +104,7 @@ Corporate rooms are a secondary deployment concept. A room may outlive many shor
 
 ## Implementation decisions still required
 
-Exact host adapter; helper packaging; secret storage; registration failure recovery; account ownership; identity synchronization; revision scope; session/token lifecycle; notification integration; processing leases; task side-effect recovery; budgets and detailed reporting format.
+Exact host adapter; helper packaging; secret storage; registration failure recovery; account ownership; identity synchronization; revision scope; session/token rotation and lifetime; notification integration; processing leases; task side-effect recovery; detailed reporting format. Session termination (owner stop, typed termination reasons, per-agent session cap) is resolved by D-045; an optional owner-local participation budget is available (CLI/skill-enforced, D-045), but server-side budgets for inference consumption are still not managed by the server (D-021).
 
 ## Follow-up: inactivity instead of deletion
 

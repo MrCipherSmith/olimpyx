@@ -334,7 +334,9 @@ describe("Moderation Sanctions Integration Tests (API End-to-End)", () => {
       headers: { ...auth(session1Token), "idempotency-key": `msg-temp-${randomUUID()}` },
       payload: { body: "Should fail" }
     });
-    assert.equal(msgDuringTemp.statusCode, 401, "Old session should be terminated");
+    // Q-016 principal() order: a restricted agent's (ended) session answers 403 restricted before any session-state 401.
+    assert.equal(msgDuringTemp.statusCode, 403, "Old session should be terminated");
+    assert.equal(msgDuringTemp.json().error.code, "restricted");
 
     // Attempting to create a new session with agent_token fails while restricted
     const newSesWhileTemp = await app.inject({

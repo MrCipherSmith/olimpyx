@@ -41,9 +41,10 @@ async function lockedNow(client: PoolClient): Promise<string> {
   return (await client.query("SELECT clock_timestamp()::text t")).rows[0].t;
 }
 
-function quotaExceeded(what: string, limit: number, retryRaw: unknown) {
+/** Same 429 contract as limits.ts QuotaError (PRD §3.1), scoped to the agent. */
+function quotaExceeded(what: string, action: string, limit: number, retryRaw: unknown) {
   const retry = Math.max(1, Number(retryRaw) || 1);
-  return new MemoryError(429, "quota_exceeded", `${what} quota exceeded: maximum ${limit} per hour`, { retry_after_sec: retry }, { "Retry-After": String(retry) });
+  return new MemoryError(429, "quota_exceeded", `${what} quota exceeded: maximum ${limit} per hour`, { action, scope: "agent", limit, window_sec: 3600, retry_after_sec: retry }, { "Retry-After": String(retry) });
 }
 
 export const escapeLike = (value: string) => value.replace(/[\\%_]/g, (m) => `\\${m}`);
@@ -100,7 +101,7 @@ export async function writeMemory(client: PoolClient, p: Principal, agentId: str
     if (dup) return { status: 200, data: { ...memoryFrom(dup), deduplicated: true } };
   }
   const rate = (await client.query("SELECT count(*)::int n,ceil(extract(epoch FROM min(created_at)+interval '1 hour'-$2::timestamptz))::int retry FROM memories WHERE agent_id=$1 AND created_at>$2::timestamptz-interval '1 hour'", [agentId, at])).rows[0];
-  if (Number(rate.n) >= WRITES_PER_HOUR) throw quotaExceeded("Memory write", WRITES_PER_HOUR, rate.retry);
+  if (Number(rate.n) >= WRITES_PER_HOUR) throw quotaExceeded("Memory write", "memory_write", WRITES_PER_HOUR, rate.retry);
   const active = input.active ?? true;
   if (!target && active) await assertCapacity(client, agentId, input.kind);
   const mid = newId("mem");
@@ -177,7 +178,7 @@ export async function consolidate(client: PoolClient, p: Principal, agentId: str
   // Bounds are compared in SQL to keep microsecond precision; the clock is read after the lock is held.
   const at = await lockedNow(client);
   const rate = (await client.query("SELECT count(*)::int n,ceil(extract(epoch FROM min(created_at)+interval '1 hour'-$2::timestamptz))::int retry FROM memory_summaries WHERE agent_id=$1 AND created_at>$2::timestamptz-interval '1 hour'", [agentId, at])).rows[0];
-  if (Number(rate.n) >= CONSOLIDATIONS_PER_HOUR) throw quotaExceeded("Memory consolidation", CONSOLIDATIONS_PER_HOUR, rate.retry);
+  if (Number(rate.n) >= CONSOLIDATIONS_PER_HOUR) throw quotaExceeded("Memory consolidation", "memory_consolidation", CONSOLIDATIONS_PER_HOUR, rate.retry);
   const bounds = (await client.query(
     `SELECT c.cu::text cu,c.cu>x.t future,(prev.covered_until IS NOT NULL AND c.cu<prev.covered_until) too_early,coalesce(prev.revision,0)+1 revision
      FROM (SELECT $3::timestamptz t) x CROSS JOIN LATERAL (SELECT coalesce($2::timestamptz,x.t) cu) c
