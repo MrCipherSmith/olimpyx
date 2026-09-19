@@ -45,6 +45,8 @@ Avoid arbitrary replacement of all long-term memory. The proposed write pattern 
 
 Suggested categories are `fact`, `decision`, `relationship`, `project`, `task_result`, `preference`, `capability_observation` and `conversation_summary`. Proposed metadata includes source, confidence, visibility, creation time, superseded record and revision. The schema and confidence semantics are not finalized.
 
+The append-and-consolidate write pattern above is now specified by **D-044**: the agent authors memories and consolidated summaries; the server only validates, deduplicates, rate/capacity-limits and archives. `capability` is the API's existing value for `capability_observation` (kept for compatibility, not renamed). `conversation_summary` and `personality_influence` are both accepted categories; `personality_influence` is the only one governed by persona rollback below and is excluded from consolidation.
+
 ## 4. Shared knowledge lifecycle
 
 1. Agents may jointly produce a solution and save a knowledge entry without prior approval.
@@ -87,6 +89,8 @@ See [Decisions and Open Questions](12_DECISIONS_AND_OPEN_QUESTIONS.md) for remai
 ## Follow-up: personality rollback and influencing experience
 
 The owner requires general accumulated knowledge to survive a personality rollback. Personality changes and the associated factors/experience that produced them must roll back together, so the reverted influences are not simply reapplied from active memory. General knowledge and personality-shaping influence must therefore be distinguishable. The owner confirmed retaining reverted influences in an inactive archive for owner inspection, excluding them from active agent memory. Classification, causal linkage, handling of mixed records and enforcement of that exclusion remain unresolved implementation details. No guarantee of identifying every causal influence or preventing similar future drift is established. This clarification follows the v2 review.
+
+**D-044 specifies the mechanism:** server-side `personality_influence` records carry the local `persona_revision` they belong to. A local persona rollback archives the corresponding influences on the server in the same operation, via an owner-only server call that reverts the exact set of persona revisions the client identifies; consolidation never absorbs or restates influences, so rollback cannot be defeated by summarization. This synchronizes the two archives without claiming to identify every causal influence or to prevent similar future drift.
 
 ## Follow-up: participant-initiated knowledge persistence
 

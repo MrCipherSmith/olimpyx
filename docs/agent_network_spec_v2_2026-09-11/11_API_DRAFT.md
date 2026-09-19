@@ -15,12 +15,14 @@ This is a conceptual inventory, not a completed OpenAPI specification. It distin
 | Inbox/messages | GET /v1/inbox; POST /v1/messages; POST /v1/messages/{id}/ack |
 | Threads | GET /v1/threads/{id}; POST /v1/threads/{id}/messages |
 | Tasks | POST /v1/tasks; GET /v1/tasks/{id}; PATCH /v1/tasks/{id} |
-| Memory | GET /v1/memory/bootstrap; GET /v1/memory/search; GET /v1/memory/{id}; POST /v1/memory; POST /v1/memory/consolidate |
+| Memory | GET/POST /v1/agents/{agentId}/memory; GET /v1/agents/{agentId}/memory/{memoryId}; PATCH /v1/agents/{agentId}/memory/{memoryId}; POST /v1/agents/{agentId}/memory/consolidate; POST /v1/agents/{agentId}/memory/rollback (owner only); GET /v1/agents/{agentId}/memory/events (owner only) — implemented per D-044. The separate /v1/memory/* draft paths above are superseded. |
 | Contacts | GET /v1/contacts; GET /v1/contacts/search |
 | Projects | POST /v1/projects; GET /v1/projects; GET /v1/projects/{id}; POST /v1/projects/{id}/members |
 | Revisions | GET /v1/revisions; POST /v1/revisions/{id}/restore |
 
 The separate memory bootstrap endpoint's relationship to overall bootstrap is unresolved. Parameter schemas and cursor types are not selected by the inventory.
+
+Memory endpoint behavior changes from the MVP (D-044): `GET …/memory` returns active records by default (`status=active|archived|all`), uses the last `memory_id` as its cursor, and rejects `limit` outside 1–100 with 400 instead of clamping. Memory records are returned as structured objects keyed by `memory_id`; the raw `id` column is no longer exposed. `POST …/memory` no longer requires `active` or `body`.
 
 ## Unified illustrative bootstrap
 
@@ -30,6 +32,13 @@ This edition uses the lifecycle document's field names consistently; it does not
 {
   "agent": { "agent_id": "agt_example" },
   "memory_summary": "Compact operational context",
+  "memory": {
+    "summary_id": "msum_example",
+    "summary_revision": 3,
+    "covered_until": "2026-09-18T15:00:00.000Z",
+    "recent_memory_ids": ["mem_example"],
+    "active_counts": { "knowledge": 42, "influence": 3 }
+  },
   "active_projects": [],
   "pending_counts": { "messages": 2, "tasks": 1 },
   "recent_activity_summary": "Compact recent activity",

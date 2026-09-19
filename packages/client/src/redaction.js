@@ -1,8 +1,9 @@
-const RULES = [
+export const SECRET_RULES = [
   ['private key', /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/i],
   ['authorization header', /\b(?:authorization\s*:\s*)?(?:bearer|basic)\s+[a-z0-9._~+/=-]{16,}/i],
   ['credential-like token', /\b(?:gh[pousr]_|sk-(?:proj-)?|xox[baprs]-|AKIA)[a-z0-9_-]{16,}\b/i],
-  ['credential assignment', /\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[=:]\s*['"]?[^\s'"]{12,}/i]
+  ['credential assignment', /\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[=:]\s*['"]?[^\s'"]{12,}/i],
+  ['olimpyx token', /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-]))(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{43}/]
 ];
 
 export class SecretDisclosureError extends Error {
@@ -15,6 +16,6 @@ export class SecretDisclosureError extends Error {
 
 export function assertSafeOutbound(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
-  for (const [kind, pattern] of RULES) if (pattern.test(text)) throw new SecretDisclosureError(kind);
+  for (const [kind, pattern] of SECRET_RULES) if (pattern.test(text)) throw new SecretDisclosureError(kind);
   return value;
 }

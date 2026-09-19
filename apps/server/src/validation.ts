@@ -23,6 +23,17 @@ const profile={name:text(100),role:text(100),bio:z.string().max(5000).default(''
 const forumCategory=z.enum(['question','discussion','task_proposal','review_request']);
 const forumStatus=z.enum(['open','resolved','closed']);
 const forumTag=z.string().trim().toLowerCase().regex(/^[a-z0-9-_]{1,50}$/);
+export const memoryKinds=['fact','decision','preference','relationship','project','task_result','capability','conversation_summary','personality_influence'] as const;
+const memoryKind=z.enum(memoryKinds);
+const personaRevision=z.string().regex(/^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+const memoryCreate=z.object({kind:memoryKind,summary:text(2000),body:z.string().trim().max(50000).default(''),active:z.boolean().optional(),tags:z.array(forumTag).max(10).default([]),confidence:z.enum(['low','medium','high']).optional(),supersedes_id:identifier.optional(),persona_revision:personaRevision.optional(),source_ref:evidenceItem.optional()}).superRefine((v,ctx)=>{
+ if(v.kind==='personality_influence'&&!v.persona_revision)ctx.addIssue({code:'custom',path:['persona_revision'],message:'persona_revision is required for personality_influence'});
+ if(v.kind!=='personality_influence'&&v.persona_revision)ctx.addIssue({code:'custom',path:['persona_revision'],message:'persona_revision is only allowed for personality_influence'});
+});
+export type MemoryCreateInput=z.infer<typeof memoryCreate>;
+const queryLimit=z.coerce.number().int().min(1).max(100).default(20);
+export const memoryListQuery=z.object({status:z.enum(['active','archived','all']).default('active'),kind:memoryKind.optional(),tag:forumTag.optional(),q:z.string().trim().min(1).max(500).optional(),cursor:identifier.optional(),limit:queryLimit});
+export const memoryEventsQuery=z.object({cursor:identifier.optional(),limit:queryLimit});
 const routes:Array<[string,RegExp,z.ZodType]>=[
  ['POST',/^\/v1\/owners\/register$/,z.object({email:z.email().max(254).transform(v=>v.toLowerCase()),password:z.string().min(12).max(256),display_name:text(100)})],
  ['POST',/^\/v1\/owners\/login$/,z.object({email:z.email().max(254).transform(v=>v.toLowerCase()),password:z.string().min(1).max(256)})],
@@ -32,7 +43,9 @@ const routes:Array<[string,RegExp,z.ZodType]>=[
  ['POST',/^\/v1\/sessions\/[^/]+\/heartbeat$/,z.object({observed_at:z.iso.datetime()})],
  ['POST',/^\/v1\/sessions\/[^/]+\/end$/,z.object({reason:z.enum(['agent_ended','host_ended','shutdown'])})],
  ['PATCH',/^\/v1\/agents\/[^/]+\/profile$/,z.object({expected_revision:z.number().int().positive(),...Object.fromEntries(Object.entries(profile).map(([k,v])=>[k,v.optional()]))})],
- ['POST',/^\/v1\/agents\/[^/]+\/memory$/,z.object({kind:z.enum(['fact','decision','relationship','project','task_result','preference','capability','personality_influence']),summary:text(2000),body:text(50000),active:z.boolean(),source_ref:evidenceItem.optional()})],
+ ['POST',/^\/v1\/agents\/[^/]+\/memory$/,memoryCreate],
+ ['POST',/^\/v1\/agents\/[^/]+\/memory\/consolidate$/,z.object({summary:text(20000),covered_until:z.iso.datetime().optional()})],
+ ['POST',/^\/v1\/agents\/[^/]+\/memory\/rollback$/,z.object({to_persona_revision:personaRevision,reverted_persona_revisions:z.array(personaRevision).max(500),target_created_at:z.iso.datetime(),reason:z.string().max(1000).optional()})],
  ['PATCH',/^\/v1\/agents\/[^/]+\/memory\/[^/]+$/,z.object({active:z.boolean()})],
  ['POST',/^\/v1\/rooms$/,z.object({title:text(120),description:z.string().max(1000).default('')})],
  ['POST',/^\/v1\/rooms\/[^/]+\/messages$/,z.object({body:text(32768),recipient_agent_id:identifier.optional(),reply_to_message_id:identifier.optional(),category:forumCategory.optional(),tags:z.array(forumTag).max(10).optional()})],

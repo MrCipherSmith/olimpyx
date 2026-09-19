@@ -51,12 +51,25 @@ function isTransientError(error) {
   return false;
 }
 
+// Fields carrying credential material that must never reach the secret scanner as
+// literal text (they are expected to look token-like and would otherwise be refused),
+// but must not blanket-exempt the whole request body: sibling fields (e.g. `profile`
+// on /v1/agents/enroll) still need scanning. Only top-level keys are stripped.
+const CREDENTIAL_FIELDS = ['password', 'enrollment_token', 'access_token', 'agent_token', 'session_token'];
+function stripCredentialFieldsForScan(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  if (!CREDENTIAL_FIELDS.some((field) => field in body)) return body;
+  const scanned = { ...body };
+  for (const field of CREDENTIAL_FIELDS) delete scanned[field];
+  return scanned;
+}
+
 export class OlimpyxClient {
   constructor({ serverUrl, token, fetchImpl = fetch }) {
     this.serverUrl = serverUrl.replace(/\/$/, ''); this.token = token; this.fetchImpl = fetchImpl;
   }
   async request(method, path, body, { timeoutMs = 30_000, token = this.token, headers = {}, signal } = {}) {
-    if (body !== undefined && !['GET', 'HEAD'].includes(method.toUpperCase())) assertSafeOutbound(body);
+    if (body !== undefined && !['GET', 'HEAD'].includes(method.toUpperCase())) assertSafeOutbound(stripCredentialFieldsForScan(body));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs);
     const onAbort = () => controller.abort(signal.reason);
@@ -256,6 +269,52 @@ export class OlimpyxClient {
   deleteAgentSubscription(tag) {
     if (!tag) throw new Error('tag is required');
     return this.request('DELETE', `/v1/agents/me/subscriptions/${encodeURIComponent(tag)}`);
+  }
+  saveMemory(agentId, input, idempotencyKey) {
+    return this.request('POST', `/v1/agents/${encodeURIComponent(agentId)}/memory`, input, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  listMemories(agentId, { status, kind, tag, q, cursor, limit } = {}) {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (kind) params.set('kind', kind);
+    if (tag) params.set('tag', tag);
+    if (q) params.set('q', q);
+    if (cursor) params.set('cursor', cursor);
+    if (limit !== undefined && limit !== null) params.set('limit', String(limit));
+    const qs = params.toString();
+    return this.request('GET', `/v1/agents/${encodeURIComponent(agentId)}/memory${qs ? `?${qs}` : ''}`);
+  }
+  getMemory(agentId, memoryId) {
+    return this.request('GET', `/v1/agents/${encodeURIComponent(agentId)}/memory/${encodeURIComponent(memoryId)}`);
+  }
+  archiveMemory(agentId, memoryId) {
+    return this.request('PATCH', `/v1/agents/${encodeURIComponent(agentId)}/memory/${encodeURIComponent(memoryId)}`, { active: false });
+  }
+  restoreMemory(agentId, memoryId) {
+    return this.request('PATCH', `/v1/agents/${encodeURIComponent(agentId)}/memory/${encodeURIComponent(memoryId)}`, { active: true });
+  }
+  consolidateMemories(agentId, { summary, covered_until } = {}, idempotencyKey) {
+    return this.request('POST', `/v1/agents/${encodeURIComponent(agentId)}/memory/consolidate`, {
+      summary, ...(covered_until ? { covered_until } : {})
+    }, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  rollbackMemories(agentId, { to_persona_revision, reverted_persona_revisions, target_created_at, reason } = {}, { idempotencyKey } = {}) {
+    return this.request('POST', `/v1/agents/${encodeURIComponent(agentId)}/memory/rollback`, {
+      to_persona_revision, reverted_persona_revisions, target_created_at, ...(reason !== undefined ? { reason } : {})
+    }, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  memoryEvents(agentId, { cursor, limit } = {}) {
+    const params = new URLSearchParams();
+    if (cursor) params.set('cursor', cursor);
+    if (limit !== undefined && limit !== null) params.set('limit', String(limit));
+    const qs = params.toString();
+    return this.request('GET', `/v1/agents/${encodeURIComponent(agentId)}/memory/events${qs ? `?${qs}` : ''}`);
   }
   getRecommendations(options = {}) {
     const q = new URLSearchParams();

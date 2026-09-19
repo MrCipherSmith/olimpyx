@@ -1,0 +1,207 @@
+{
+  "job": "operational-memory-q-008-2026-09-18",
+  "title": "Operational-Memory Write Rules, Selective Consolidation, and Influence Rollback (Q-008)",
+  "status": "ready_for_pr",
+  "phase": "COMPLETION",
+  "horizon": "Horizon 2 (Item #8: Q-008)",
+  "branch": "feat/operational-memory-q-008",
+  "created_at": "2026-09-18T16:15:00.000Z",
+  "proposed_decision": "D-044 \u2014 Operational-memory write rules (closes Q-008)",
+  "decisions": {
+    "A1_consolidation": "Dedicated append-only memory_summaries table; covered knowledge memories archived with archived_reason='consolidated' and consolidated_into; two-tier bootstrap with MVP-identical fallback",
+    "A2_search": "PostgreSQL FTS ('simple', generated search_tsv + GIN) with escaped ILIKE fallback when numnode(tsquery)=0; recency order; keyset cursor = memory_id",
+    "A3_dedup_supersede": "SHA-256 fingerprint, 24h window, 200 deduplicated:true (skipped when supersedes_id present); supersedes_id verified (same agent, active, same kind) and applied atomically",
+    "A4_rollback": "Synchronized by persona_revision: server personality_influence rows carry persona_revision; CLI persona rollback calls POST /memory/rollback with the exact reverted revision set; pending/--sync retry",
+    "A5_quotas_secrets": "Shared SECRET_RULES (client redaction.js source + server mirror + parity test, incl. 43-char base64url token rule) -> 422; 30 writes/hour and 10 consolidations/hour -> 429; 500 active knowledge -> 409 memory_consolidation_required; 50 active influences -> 409 influence_limit_reached; per-agent advisory lock",
+    "A6_consolidation_scope": "Consolidation never archives personality_influence; skill forbids restating influences in summaries",
+    "A7_authority": "Read/write/consolidate: owner or own session; rollback, reactivation of rolled-back records, memory events: owner only; agent token rejected (unchanged)",
+    "A8_audit_and_get": "Append-only memory_events + inbox memory.rolled_back to owner and agent; GET /memory defaults to status=active (status=active|archived|all)"
+  },
+  "artifacts": {
+    "prd": "prd.md",
+    "plan": "plan.md",
+    "review": "review.md",
+    "report": "report.md",
+    "state": "state.json"
+  },
+  "phases": {
+    "discussion": {
+      "status": "completed",
+      "completed_at": "2026-09-18T16:15:00.000Z"
+    },
+    "prd": {
+      "status": "completed",
+      "revision": 3,
+      "completed_at": "2026-09-19T00:00:00.000Z"
+    },
+    "plan": {
+      "status": "completed",
+      "revision": 2,
+      "completed_at": "2026-09-18T18:00:00.000Z"
+    },
+    "review": {
+      "status": "completed",
+      "rounds": [
+        {
+          "revision": 1,
+          "verdict": "REQUEST_CHANGES",
+          "findings": {
+            "blockers": [
+              "B1",
+              "B2",
+              "B3",
+              "B4"
+            ],
+            "majors": [
+              "M1",
+              "M2",
+              "M3",
+              "M4",
+              "M5",
+              "M6",
+              "M7",
+              "M8"
+            ]
+          }
+        },
+        {
+          "revision": 2,
+          "verdict": "APPROVE",
+          "findings_addressed": [
+            "B1",
+            "B2",
+            "B3",
+            "B4",
+            "M1",
+            "M2",
+            "M3",
+            "M4",
+            "M5",
+            "M6",
+            "M7",
+            "M8",
+            "minors"
+          ]
+        }
+      ],
+      "completed_at": "2026-09-18T18:00:00.000Z"
+    },
+    "implementation": {
+      "status": "completed",
+      "completed_at": "2026-09-19T00:00:00.000Z"
+    },
+    "verification": {
+      "status": "completed",
+      "gate": "PASS",
+      "completed_at": "2026-09-19T00:00:00.000Z"
+    }
+  },
+  "intent": "implement",
+  "workspace": {
+    "project_dir": "/Users/Goodea/goodea/olimpyx",
+    "worktree": "none (user chose current dir)",
+    "branch": "feat/operational-memory-q-008",
+    "base": "main@0efcd6a",
+    "package_manager": "npm"
+  },
+  "baseline": {
+    "typecheck": "pass",
+    "server_tests": "49/49",
+    "client_tests": "63/63",
+    "db": "pgvector:pg17 @127.0.0.1:55432"
+  },
+  "plan": {
+    "steps": [
+      {
+        "id": "w1-server",
+        "agent": "general-purpose(opus)",
+        "scope": "plan Steps 0-7",
+        "status": "completed",
+        "commit": "2eccaff"
+      },
+      {
+        "id": "w1-client",
+        "agent": "general-purpose(sonnet)",
+        "scope": "plan Steps 2(client side),8,9",
+        "status": "completed",
+        "commit": "ab64f8b"
+      },
+      {
+        "id": "w1-docs",
+        "agent": "general-purpose(sonnet)",
+        "scope": "plan Step 10 (ROADMAP deferred to PR)",
+        "status": "completed",
+        "commit": "27542f1"
+      },
+      {
+        "id": "commit",
+        "agent": "orchestrator",
+        "status": "completed"
+      },
+      {
+        "id": "verify",
+        "agent": "code-verifier",
+        "status": "completed",
+        "gate": "PASS",
+        "tests": "161/161"
+      },
+      {
+        "id": "review",
+        "agent": "review-orchestrator --backend",
+        "status": "completed",
+        "verdict": "REQUEST_CHANGES",
+        "findings": {
+          "major": 3,
+          "minor": 6,
+          "info": 5
+        }
+      },
+      {
+        "id": "fix",
+        "agent": "task-implementer",
+        "status": "completed",
+        "conditional": true,
+        "commits": [
+          "fa50ce3",
+          "09fb050",
+          "082f418"
+        ],
+        "iterations": 1
+      },
+      {
+        "id": "verify-post-fix",
+        "agent": "orchestrator",
+        "status": "completed",
+        "tests": {
+          "server": "68/68",
+          "client": "91/91",
+          "web": "18/18",
+          "skipped": 0
+        }
+      },
+      {
+        "id": "re-review",
+        "agent": "review (opus)",
+        "status": "completed",
+        "verdict": "APPROVE_WITH_SUGGESTIONS",
+        "nits": 3
+      },
+      {
+        "id": "report",
+        "agent": "orchestrator",
+        "status": "completed"
+      },
+      {
+        "id": "pr",
+        "agent": "orchestrator",
+        "status": "pending_user_confirmation",
+        "conditional": "ask user"
+      }
+    ]
+  },
+  "follow_ups": [
+    "ROADMAP Horizon 2 #8 after PR merge"
+  ],
+  "nits_closed": true,
+  "pr": "https://github.com/MrCipherSmith/olimpyx/pull/17"
+}

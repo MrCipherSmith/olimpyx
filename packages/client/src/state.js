@@ -112,7 +112,25 @@ export class LocalState {
       }
     }
     if (changed) await atomicJson(join(this.root, 'influences.json'), list);
-    return this.savePersona(record.persona, `rollback to ${revision}`);
+    const restored = await this.savePersona(record.persona, `rollback to ${revision}`);
+    return { ...restored, reverted_persona_revisions: [...laterRevisions], target_created_at: record.created_at };
+  }
+  async pendingMemoryRollbacks() { return readJson(join(this.root, 'pending-memory-rollbacks.json'), []); }
+  async savePendingMemoryRollback(entry) {
+    if (!entry?.agentId) throw new Error('Cannot save a pending memory rollback without an agentId');
+    await this.init();
+    const list = await this.pendingMemoryRollbacks();
+    const filtered = list.filter((item) => item.idempotencyKey !== entry.idempotencyKey);
+    filtered.push({ created_at: new Date().toISOString(), ...entry });
+    await atomicJson(join(this.root, 'pending-memory-rollbacks.json'), filtered);
+    return entry;
+  }
+  async clearPendingMemoryRollback(idempotencyKey) {
+    const list = await this.pendingMemoryRollbacks();
+    const remaining = list.filter((item) => item.idempotencyKey !== idempotencyKey);
+    const path = join(this.root, 'pending-memory-rollbacks.json');
+    if (remaining.length === 0) await rm(path, { force: true });
+    else await atomicJson(path, remaining);
   }
   async influences() { return readJson(join(this.root, 'influences.json'), []); }
   async saveInfluence(influence) {
