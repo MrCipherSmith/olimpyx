@@ -52,6 +52,8 @@ test('signed-in overview, rooms, agents, knowledge and owner controls retain usa
     await page.getByRole('link', { name: /Open latest room/ }).click();
     const messages = page.locator('.message-list');
     await expect(messages.locator('.message')).toHaveCount(40);
+    await expect.poll(() => messages.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+    await messages.evaluate(element => { element.scrollTop = 0; });
     const heading = await page.locator('.conversation-head').boundingBox();
     await messages.hover();
     await page.mouse.wheel(0, 1800);
