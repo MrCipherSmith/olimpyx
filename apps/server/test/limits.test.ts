@@ -324,3 +324,19 @@ test("AC-3 GET /v1/limits and bootstrap report the effective values", async (t) 
   assert.equal((await app!.inject({ method: "GET", url: "/v1/limits", headers: auth(restricted.token) })).statusCode, 200, "restricted owners can still read limits");
   assert.equal((await app!.inject({ method: "GET", url: "/v1/rooms", headers: auth(restricted.token) })).statusCode, 403);
 });
+
+test("report quota for an owner principal: no per-owner allowance of its own, only the owner aggregate (PRD §3.1)", async (t) => {
+  if (!ready(t)) return;
+  const owner = await register(app!, "report-owner");
+  const agent = await newAgent(app!, owner.token, "report-agent");
+  const targets = await Promise.all([1, 2, 3, 4, 5].map(i => seedMessage(c.agentId, `owner-report-${i}`)));
+  let n = 0;
+  const report = (token: string) => app!.inject({ method: "POST", url: "/v1/reports", headers: mutate(token, key("owner-report")), payload: { target: { kind: "message", id: targets[n++] }, category: "spam", explanation: "owner report" } });
+  // The owner's own human reports are counted only against the owner aggregate (3 here, 20/h by default), shared with its agents.
+  ok(await report(owner.token));
+  ok(await report(owner.token));
+  ok(await report(agent.session));
+  assertQuota(await report(owner.token), "report", "owner", 3, 3600);
+  assertQuota(await report(agent.session), "report", "owner", 3, 3600);
+  assert.equal(LIMITS.report.owner, 20, "default owner aggregate is 20/h");
+});

@@ -3,6 +3,8 @@ import { Pool } from "pg";
 import { createHash, randomUUID } from "node:crypto";
 import { after, before, test, type TestContext } from "node:test";
 import { createApp, migrate } from "../src/app.js";
+import { loadLimits } from "../src/limits.js";
+import { ownerUsage } from "../src/usage.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
 const schema = `test_reslim_${randomUUID().replaceAll("-", "")}`;
@@ -401,4 +403,124 @@ test("AC-10 usage: window usage and 7/30-day contribution counters per agent and
   assert.equal((await app!.inject({ method: "GET", url: "/v1/agents/me/usage", headers: auth(owner.token) })).statusCode, 403);
   const showcase = await app!.inject({ method: "GET", url: "/v1/showcase" });
   assert.equal(JSON.stringify(showcase.json()).includes("counters"), false);
+});
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+test("stop serializes with an in-flight session create: no session survives a committed stop", async (t) => {
+  if (!ready(t)) return;
+  const owner = await register("stop-race-owner");
+  const agent = await newAgent(owner.token, "stop-race");
+  // Simulate POST /v1/sessions mid-transaction: it holds sessions:<agent> and has inserted, but not committed, its row.
+  const inflight = await app!.pg.connect();
+  const sid = `ses_race_${randomUUID().replaceAll("-", "")}`;
+  try {
+    await inflight.query("BEGIN");
+    await inflight.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`sessions:${agent.agentId}`]);
+    await inflight.query("INSERT INTO sessions(id,agent_id,token_hash,host,persona_revision,expires_at) VALUES($1,$2,$3,'{}'::jsonb,1,now()+interval '1 day')", [sid, agent.agentId, `th_${sid}`]);
+    const stopping = app!.inject({ method: "POST", url: `/v1/owners/me/agents/${agent.agentId}/stop`, headers: mutate(owner.token, key("stop-race")), payload: {} });
+    await sleep(300);
+    await inflight.query("COMMIT");
+    const stopped = await stopping;
+    assert.equal(stopped.statusCode, 200, stopped.body);
+    assert.ok(stopped.json().data.session_ids.includes(sid), "the stop must also end the session created concurrently");
+  } finally {
+    inflight.release();
+  }
+  const row = (await app!.pg.query("SELECT ended_at,end_reason FROM sessions WHERE id=$1", [sid])).rows[0];
+  assert.ok(row.ended_at);
+  assert.equal(row.end_reason, "owner_stop");
+  assert.equal((await app!.pg.query("SELECT count(*)::int n FROM sessions WHERE agent_id=$1 AND ended_at IS NULL", [agent.agentId])).rows[0].n, 0);
+});
+
+test("revoked_at backfill only marks restricted, kind-less rows without an expiry", async (t) => {
+  if (!ready(t)) return;
+  const backfillSchema = `test_backfill_${randomUUID().replaceAll("-", "")}`;
+  const url = new URL(baseUrl);
+  url.searchParams.set("options", `-c search_path=${backfillSchema},public`);
+  await admin!.query(`CREATE SCHEMA ${backfillSchema}`);
+  const pool = new Pool({ connectionString: url.toString() });
+  try {
+    await migrate(url.toString());
+    await pool.query("ALTER TABLE agents DROP COLUMN revoked_at");
+    await pool.query("INSERT INTO owners(id,email,password_hash,display_name) VALUES('own_bf','bf@example.test','x','bf')");
+    await pool.query(`INSERT INTO agents(id,owner_id,installation_id,name,role,restricted,restricted_until,restriction_kind) VALUES
+      ('agt_revoked','own_bf','i1','R','t',true,NULL,NULL),
+      ('agt_temp_legacy','own_bf','i2','T','t',true,now()+interval '1 hour',NULL),
+      ('agt_perm','own_bf','i3','P','t',true,NULL,'permanent'),
+      ('agt_free','own_bf','i4','F','t',false,NULL,NULL)`);
+    await migrate(url.toString());
+    const rows = new Map((await pool.query("SELECT id,revoked_at FROM agents")).rows.map(r => [r.id, r.revoked_at]));
+    assert.ok(rows.get("agt_revoked"), "restricted with neither kind nor expiry is a legacy revoke");
+    assert.equal(rows.get("agt_temp_legacy"), null, "a legacy temporary restriction (expiry set) is not a revoke");
+    assert.equal(rows.get("agt_perm"), null);
+    assert.equal(rows.get("agt_free"), null);
+  } finally {
+    await pool.end();
+    await admin!.query(`DROP SCHEMA IF EXISTS ${backfillSchema} CASCADE`);
+  }
+});
+
+test("usage: revoked agents are skipped in per-agent window usage but still count in the owner aggregate; query count is independent of agent count", async (t) => {
+  if (!ready(t)) return;
+  const owner = await register("usage-rev-owner");
+  const live = await newAgent(owner.token, "usage-live"), gone = await newAgent(owner.token, "usage-gone");
+  const post = (token: string) => app!.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(token, key("usage-rev")), payload: { body: "hello" } });
+  assert.equal((await post(live.session)).statusCode, 201);
+  assert.equal((await post(gone.session)).statusCode, 201);
+  assert.equal((await app!.inject({ method: "POST", url: `/v1/owners/me/agents/${gone.agentId}/revoke`, headers: auth(owner.token) })).statusCode, 200);
+  const data = (await app!.inject({ method: "GET", url: "/v1/owners/me/usage", headers: auth(owner.token) })).json().data;
+  const byId = new Map(data.agents.map((x: { agent_id: string }) => [x.agent_id, x]));
+  const liveUsage = byId.get(live.agentId) as { window: Record<string, { used: number }>; revoked: boolean };
+  const goneUsage = byId.get(gone.agentId) as { window: Record<string, unknown>; revoked: boolean; counters: { days_7: { messages: number } } };
+  assert.equal(liveUsage.window.message.used, 1);
+  assert.equal(goneUsage.revoked, true);
+  assert.deepEqual(goneUsage.window, {}, "no window usage is computed for a revoked agent");
+  assert.equal(goneUsage.counters.days_7.messages, 1, "contribution counters are still reported");
+  assert.equal(data.owner.window.message.used, 2, "the revoked agent's rows still count in the owner aggregate");
+
+  const countQueries = async (ownerId: string) => {
+    let n = 0;
+    const db = { query: (...args: unknown[]) => { n++; return (app!.pg.query as (...a: unknown[]) => unknown)(...args); } } as unknown as Pool;
+    await ownerUsage(db, loadLimits({}), ownerId);
+    return n;
+  };
+  const one = await register("usage-q-one"), many = await register("usage-q-many");
+  await newAgent(one.token, "usage-q-one-a");
+  for (const label of ["a", "b", "c", "d"]) await newAgent(many.token, `usage-q-many-${label}`);
+  assert.equal(await countQueries(many.ownerId), await countQueries(one.ownerId), "ownerUsage must not issue per-agent queries");
+});
+
+test("counted rows written under the quota lock carry the post-lock clock, not the transaction start", async (t) => {
+  if (!ready(t)) return;
+  const owner = await register("clock-owner");
+  const agent = await newAgent(owner.token, "clock");
+  const holdQuota = async <T>(work: () => Promise<T>) => {
+    const holder = await app!.pg.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`quota:${owner.ownerId}`]);
+      const pending = work();
+      await sleep(300);
+      const released = (await holder.query("SELECT clock_timestamp() t")).rows[0].t as Date;
+      await holder.query("COMMIT");
+      return { result: await pending, released };
+    } finally {
+      holder.release();
+    }
+  };
+  const room = await holdQuota(() => app!.inject({ method: "POST", url: "/v1/rooms", headers: mutate(agent.session, key("clock-room")), payload: { title: "Clock" } }));
+  assert.equal(room.result.statusCode, 201, room.result.body);
+  const roomCreated = (await app!.pg.query("SELECT created_at FROM rooms WHERE id=$1", [room.result.json().data.room_id])).rows[0].created_at as Date;
+  assert.ok(roomCreated.getTime() >= room.released.getTime(), `room created_at ${roomCreated.toISOString()} predates lock release ${room.released.toISOString()}`);
+
+  const message = await holdQuota(() => app!.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(agent.session, key("clock-msg")), payload: { body: "clock" } }));
+  assert.equal(message.result.statusCode, 201, message.result.body);
+  const messageCreated = (await app!.pg.query("SELECT created_at FROM messages WHERE id=$1", [message.result.json().data.message_id])).rows[0].created_at as Date;
+  assert.ok(messageCreated.getTime() >= message.released.getTime(), "message created_at predates lock release");
+
+  const sub = await holdQuota(() => app!.inject({ method: "PUT", url: "/v1/agents/me/subscriptions", headers: auth(agent.session), payload: { tags: ["clock"] } }));
+  assert.ok(sub.result.statusCode >= 200 && sub.result.statusCode < 300, sub.result.body);
+  const quotaCreated = (await app!.pg.query("SELECT max(created_at) t FROM quota_events WHERE actor_id=$1", [agent.agentId])).rows[0].t as Date;
+  assert.ok(quotaCreated.getTime() >= sub.released.getTime(), "quota_events created_at predates lock release");
 });

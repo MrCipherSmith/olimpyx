@@ -273,6 +273,73 @@ test("two concurrent pruneOnce calls: exactly one skips (global advisory lock)",
   assert.equal(afterRelease.skipped, false, "once the other replica's lock is released, pruning must proceed");
 });
 
+test("migration adds the (agent_id, last_heartbeat_at DESC) index the session prune relies on", async (t) => {
+  if (!ready(t)) return;
+  const def = (await app!.pg.query("SELECT indexdef FROM pg_indexes WHERE schemaname=$1 AND indexname='idx_sessions_agent_heartbeat'", [schema])).rows[0]?.indexdef as string | undefined;
+  assert.ok(def, "idx_sessions_agent_heartbeat must exist");
+  assert.match(def, /\(agent_id, last_heartbeat_at DESC\)/);
+});
+
+test("batched deletes: a small batch size loops until nothing is left and still reports full counts", async (t) => {
+  if (!ready(t)) return;
+  // drain anything earlier tests left behind so the counts below are exact
+  await pruneOnce(app!.pg, {});
+  const owner = await makeOwner("batch");
+  const keys = await Promise.all([1, 2, 3, 4, 5].map(i => makeIdempotencyKey(`batch${i}`, "10 days")));
+  const agent = await makeAgent(owner, "batch");
+  await makeSession(agent, { heartbeatAgo: "1 day", endedAgo: "1 day" }); // latest, kept
+  for (let i = 0; i < 3; i++) await makeSession(agent, { heartbeatAgo: `${40 + i} days`, endedAgo: `${40 + i} days` });
+  const events = [];
+  for (let i = 0; i < 3; i++) events.push(await makeInboxEvent({ agentId: agent }, "40 days"));
+  await setCheckpoint("agent", agent, events[events.length - 1]);
+  for (let i = 0; i < 3; i++) await makeQuotaEvent(owner, "30 hours");
+
+  // Spy on the statements pruneOnce issues so we can prove it deleted in several bounded batches.
+  const deletes: Record<string, number> = {};
+  const spyPool = {
+    connect: async () => {
+      const client = await app!.pg.connect();
+      const original = client.query.bind(client) as (...a: unknown[]) => unknown;
+      return new Proxy(client, {
+        get(target, prop, receiver) {
+          if (prop !== "query") return Reflect.get(target, prop, receiver);
+          return (...args: unknown[]) => {
+            const sql = String(args[0]);
+            const table = /DELETE FROM (\w+)/.exec(sql)?.[1];
+            if (table) {
+              assert.match(sql, /LIMIT/, `DELETE on ${table} must be bounded`);
+              deletes[table] = (deletes[table] ?? 0) + 1;
+            }
+            return original(...args);
+          };
+        }
+      });
+    }
+  } as unknown as Pool;
+  const result = await pruneOnce(spyPool, {}, { batchSize: 2 });
+  assert.deepEqual(result, { skipped: false, idempotency_keys: 5, sessions: 3, inbox_events: 3, quota_events: 3 });
+  // 5 rows at batch size 2 → 2 + 2 + 1, then a final short batch ends the loop: exactly 3 statements.
+  assert.equal(deletes.idempotency_keys, 3);
+  for (const table of ["sessions", "inbox_events", "quota_events"]) assert.equal(deletes[table], 2, `${table}: 2 + 1`);
+  for (const k of keys) assert.equal(await rowExists("idempotency_keys", "actor_key", k), false);
+  assert.equal(Number((await app!.pg.query("SELECT count(*) n FROM sessions WHERE agent_id=$1", [agent])).rows[0].n), 1, "only the agent's latest session remains");
+});
+
+test("OLIMPYX_RETENTION_BATCH_SIZE is validated like the other retention env vars", async (t) => {
+  if (!ready(t)) return;
+  await assert.rejects(() => pruneOnce(app!.pg, { OLIMPYX_RETENTION_BATCH_SIZE: "0" }), /OLIMPYX_RETENTION_BATCH_SIZE/);
+});
+
+test("startPruning: invalid OLIMPYX_RETENTION_* fails synchronously (startup), never touching the pool", () => {
+  let touched = false;
+  const fakePool = { connect: async () => { touched = true; throw new Error("must not connect"); } } as unknown as Pool;
+  const logger: PruneLogger = { info: () => {}, error: () => {} };
+  for (const bad of [{ OLIMPYX_RETENTION_SESSIONS_DAYS: "0" }, { OLIMPYX_RETENTION_INBOX_DAYS: "abc" }, { OLIMPYX_RETENTION_IDEMPOTENCY_DAYS: "-1" }, { OLIMPYX_RETENTION_BATCH_SIZE: "x" }]) {
+    assert.throws(() => startPruning(fakePool, bad, logger), /OLIMPYX_RETENTION_/, JSON.stringify(bad));
+  }
+  assert.equal(touched, false);
+});
+
 test("startPruning: OLIMPYX_PRUNE=off never touches the pool and stop() is a no-op", () => {
   let touched = false;
   const fakePool = {

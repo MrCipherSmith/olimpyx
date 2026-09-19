@@ -133,7 +133,7 @@ export async function migrate(databaseUrl: string) {
     DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='agents' AND column_name='revoked_at') THEN
         ALTER TABLE agents ADD COLUMN revoked_at timestamptz;
-        UPDATE agents SET revoked_at = now() WHERE restricted AND restriction_kind IS NULL AND revoked_at IS NULL;
+        UPDATE agents SET revoked_at = now() WHERE restricted AND restriction_kind IS NULL AND restricted_until IS NULL AND revoked_at IS NULL;
       END IF;
     END $$;
     ALTER TABLE sessions ADD COLUMN IF NOT EXISTS end_reason text;
@@ -166,7 +166,9 @@ export async function migrate(databaseUrl: string) {
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_sender_created ON messages(sender_type, sender_id, created_at DESC)",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_occurred ON inbox_events(occurred_at)",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_agent_seq ON inbox_events(agent_id, sequence) WHERE agent_id IS NOT NULL",
-    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_owner_seq ON inbox_events(owner_id, sequence) WHERE owner_id IS NOT NULL"
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_owner_seq ON inbox_events(owner_id, sequence) WHERE owner_id IS NOT NULL",
+    // Retention keeps each agent's latest session: the per-row "latest" probe needs this index (Q-016).
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_agent_heartbeat ON sessions(agent_id, last_heartbeat_at DESC)"
   ];
   for (const idx of indexes) {
     try {
@@ -400,7 +402,13 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   async function agentEvent(db: Db, agentId: string, type: string, payload: Record<string, unknown>) {
     await db.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload) VALUES($1,$2,$3,'agent',$2,$4)", [id("evt"), agentId, type, JSON.stringify(payload)]);
   }
-  async function endAgentSessions(db: Db, agentId: string, reason: EndReason): Promise<string[]> {
+  /**
+   * Ends every open session of the agent. Must run inside the caller's transaction: it takes the same
+   * `sessions:<agentId>` xact lock as POST /v1/sessions (lock order idem → sessions), so a session being
+   * created concurrently either commits first and is ended here, or starts after this transaction commits.
+   */
+  async function endAgentSessions(db: PoolClient, agentId: string, reason: EndReason): Promise<string[]> {
+    await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`sessions:${agentId}`]);
     return (await db.query("UPDATE sessions SET ended_at=now(), end_reason=$2 WHERE agent_id=$1 AND ended_at IS NULL RETURNING id", [agentId, reason])).rows.map(x => x.id);
   }
   function assertNoSecret(values: unknown[]) {
@@ -655,7 +663,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:201,data:await consolidate(c,a.p,a.aid,req.body as any)}))});
   app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:200,data:await rollbackInfluences(c,a.p,a.aid,req.body as any)}))});
 
-  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,now(),now()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
+  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
   app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
   app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}}});
   app.get("/v1/rooms/:roomId/messages",async(req,reply)=>{
@@ -858,8 +866,8 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         }
 
         const r = await client.query(
-          `INSERT INTO messages(id, room_id, sender_type, sender_id, sender_name, recipient_agent_id, reply_to_message_id, root_message_id, body, idempotency_actor, idempotency_key, category, tags, status, resolved_at)
-           VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+          `INSERT INTO messages(id, room_id, sender_type, sender_id, sender_name, recipient_agent_id, reply_to_message_id, root_message_id, body, idempotency_actor, idempotency_key, category, tags, status, resolved_at, created_at)
+           VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, clock_timestamp())
            ON CONFLICT(idempotency_actor, idempotency_key) WHERE idempotency_key IS NOT NULL
            DO UPDATE SET id=messages.id
            WHERE messages.reply_to_message_id IS NOT DISTINCT FROM EXCLUDED.reply_to_message_id
@@ -1390,10 +1398,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       try{
         await client.query("BEGIN");
         await enforceQuota(client,limits,p,"knowledge_card");
-        await client.query("INSERT INTO knowledge_cards(id,author_agent_id,challenge_card_id,challenge_version_id) VALUES($1,$2,$3,$4)",[cid,p.id,b.challenge_of?.card_id??null,b.challenge_of?.version_id??null]);
+        await client.query("INSERT INTO knowledge_cards(id,author_agent_id,challenge_card_id,challenge_version_id,created_at) VALUES($1,$2,$3,$4,clock_timestamp())",[cid,p.id,b.challenge_of?.card_id??null,b.challenge_of?.version_id??null]);
         const sourcesJson=JSON.stringify(normalizeEvidence(b.sources));
         const refsJson=JSON.stringify(normalizeEvidence(b.references));
-        await client.query("INSERT INTO knowledge_versions VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,NULL,now())",[vid,cid,b.topic,b.summary,b.body,sourcesJson,refsJson,p.id]);
+        await client.query("INSERT INTO knowledge_versions VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,NULL,clock_timestamp())",[vid,cid,b.topic,b.summary,b.body,sourcesJson,refsJson,p.id]);
         await client.query("UPDATE knowledge_cards SET latest_version_id=$2 WHERE id=$1",[cid,vid]);
         await client.query("COMMIT");
       }catch(e){
@@ -1499,7 +1507,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         const n=Number((await client.query("SELECT coalesce(max(version),0)+1 n FROM knowledge_versions WHERE card_id=$1",[cid])).rows[0].n);
         const sourcesJson=JSON.stringify(normalizeEvidence(b.sources));
         const refsJson=JSON.stringify(normalizeEvidence(b.references));
-        await client.query("INSERT INTO knowledge_versions(id,card_id,version,topic,summary,body,sources,refs,author_agent_id,idempotency_key,idempotency_body_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",[vid,cid,n,b.topic,b.summary,b.body,sourcesJson,refsJson,p.id,key,requestHash]);
+        await client.query("INSERT INTO knowledge_versions(id,card_id,version,topic,summary,body,sources,refs,author_agent_id,idempotency_key,idempotency_body_hash,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp())",[vid,cid,n,b.topic,b.summary,b.body,sourcesJson,refsJson,p.id,key,requestHash]);
         const changed=await client.query("UPDATE knowledge_cards SET latest_version_id=$3 WHERE id=$1 AND latest_version_id=$2",[cid,b.expected_latest_version_id,vid]);
         if(changed.rowCount!==1)throw Object.assign(new Error("Latest version changed"),{statusCode:409});
         await client.query("COMMIT");
@@ -1552,9 +1560,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         const existing=(await client.query("SELECT * FROM knowledge_reviews WHERE version_id=$1 AND reviewer_agent_id=$2 FOR UPDATE",[vid,p.id])).rows[0];
         if(existing){
           await client.query("INSERT INTO knowledge_review_revisions(review_id,revision,verdict,explanation,evidence,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",[existing.id,existing.revision,existing.verdict,existing.explanation,JSON.stringify(existing.evidence),existing.created_at]);
-          r=(await client.query("UPDATE knowledge_reviews SET verdict=$3,explanation=$4,evidence=$5,revision=revision+1,created_at=now() WHERE version_id=$1 AND reviewer_agent_id=$2 RETURNING *",[vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
+          r=(await client.query("UPDATE knowledge_reviews SET verdict=$3,explanation=$4,evidence=$5,revision=revision+1,created_at=clock_timestamp() WHERE version_id=$1 AND reviewer_agent_id=$2 RETURNING *",[vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
         }else{
-          r=(await client.query("INSERT INTO knowledge_reviews(id,version_id,reviewer_agent_id,verdict,explanation,evidence) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",[id("rev"),vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
+          r=(await client.query("INSERT INTO knowledge_reviews(id,version_id,reviewer_agent_id,verdict,explanation,evidence,created_at) VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()) RETURNING *",[id("rev"),vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
         }
         const metrics = await getReviewMetrics(vid, client);
         if (metrics.independent.confirm >= metrics.threshold) {
@@ -1586,7 +1594,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`agent:${assignee}`]);
     const cap=limits.capacity.open_tasks_per_assignee;
     if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2)",[assignee,TERMINAL_TASK])).rows[0].n)>=cap)throw new ApiError(409,"assignee_at_capacity",`The assignee already has ${cap} open tasks`,{limit:cap});
-    const r=await client.query("INSERT INTO tasks VALUES($1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,now(),now()) RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
+    const r=await client.query("INSERT INTO tasks VALUES($1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,clock_timestamp(),clock_timestamp()) RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
     await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed"});
     return{status:201,data:taskFrom(r.rows[0])}})});
   app.get("/v1/rooms/:roomId/tasks",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE room_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).roomId,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(taskFrom),page:{next_cursor:null}}});
@@ -1668,7 +1676,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       }
 
       const ownerId = subject.owner_id, agentId = subject.agent_id ?? null;
-      await client.query("INSERT INTO reports VALUES($1,$2,$3,$4,$5,$6,$7,'escalated',now(),now())", [rid, p.type, p.id, b.target.kind, b.target.id, b.category, b.explanation]);
+      await client.query("INSERT INTO reports VALUES($1,$2,$3,$4,$5,$6,$7,'escalated',clock_timestamp(),clock_timestamp())", [rid, p.type, p.id, b.target.kind, b.target.id, b.category, b.explanation]);
       await client.query("INSERT INTO incidents(id,report_id,owner_id,agent_id) VALUES($1,$2,$3,$4)", [iid, rid, ownerId, agentId]);
       await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'moderation.updated','incident',$3)", [id("evt"), ownerId, iid]);
       return { status: 201, data: { report_id: rid, status: "escalated", created_at: now() } };

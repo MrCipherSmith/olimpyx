@@ -4,6 +4,8 @@ import type { Principal } from "./types.js";
 
 // Server traffic and capacity limits (D-045 / Q-016). Counted over existing rows under a per-owner advisory lock;
 // the caller owns the transaction, which must commit the counted row. Lock order everywhere: idem → spam → quota → memory.
+// Counted rows are stamped with clock_timestamp(), not now(): now() is the transaction start, which may precede a long
+// wait on the quota lock, so a now()-stamped row could land "in the past" relative to rows another request already counted.
 
 export const QUOTA_ACTIONS = ["message", "reply", "direct_message", "help_thread", "room_create", "knowledge_card", "knowledge_version", "knowledge_review", "task_create", "report", "subscription_change"] as const;
 export type QuotaAction = typeof QUOTA_ACTIONS[number];
@@ -79,11 +81,16 @@ export class QuotaError extends ApiError {
 }
 
 const OWNER_AGENTS = "SELECT id FROM agents WHERE owner_id=$1";
-/** Agent scope: the agent's own rows. Owner scope: every agent of the owner plus the owner's own human rows. */
-const actorFilter = (prefix: string, scope: QuotaScope) => scope === "agent"
+/**
+ * Agent scope: the agent's own rows. Owner scope: every agent of the owner plus the owner's own human rows.
+ * `agents` (usage reporting only): the rows of every agent id in the array `$1`, grouped by the caller on column `a`.
+ */
+type CountScope = QuotaScope | "agents";
+const actorFilter = (prefix: string, scope: CountScope) => scope === "agent"
   ? `${prefix}_type='agent' AND ${prefix}_id=$1`
+  : scope === "agents" ? `${prefix}_type='agent' AND ${prefix}_id=ANY($1)`
   : `((${prefix}_type='agent' AND ${prefix}_id IN (${OWNER_AGENTS})) OR (${prefix}_type='owner' AND ${prefix}_id=$1))`;
-const authorFilter = (column: string, scope: QuotaScope) => scope === "agent" ? `${column}=$1` : `${column} IN (${OWNER_AGENTS})`;
+const authorFilter = (column: string, scope: CountScope) => scope === "agent" ? `${column}=$1` : scope === "agents" ? `${column}=ANY($1)` : `${column} IN (${OWNER_AGENTS})`;
 
 /** Message classes are mutually exclusive, checked in this precedence: direct message, reply, help thread, plain message. */
 export const MESSAGE_CLASS: Record<"direct_message" | "reply" | "help_thread" | "message", string> = {
@@ -95,22 +102,22 @@ export const MESSAGE_CLASS: Record<"direct_message" | "reply" | "help_thread" | 
 export const messageClassOf = (m: { recipient_agent_id?: string | null; reply_to_message_id?: string | null; category?: string | null }): keyof typeof MESSAGE_CLASS =>
   m.recipient_agent_id ? "direct_message" : m.reply_to_message_id ? "reply" : m.category ? "help_thread" : "message";
 
-/** SQL yielding one `t` timestamp per counted event since `$2`, for the actor `$1` (agent id or owner id). */
-function eventTimes(action: QuotaAction, scope: QuotaScope): string {
+/** SQL yielding one row per counted event since `$2` — its time `t` and its actor id `a` — for `$1` (agent id, owner id, or agent id array). */
+function eventTimes(action: QuotaAction, scope: CountScope): string {
   switch (action) {
     case "message": case "reply": case "direct_message": case "help_thread":
-      return `SELECT created_at t FROM messages WHERE ${actorFilter("sender", scope)} AND ${MESSAGE_CLASS[action]} AND created_at>$2`;
-    case "room_create": return `SELECT created_at t FROM rooms WHERE ${actorFilter("creator", scope)} AND created_at>$2`;
-    case "task_create": return `SELECT created_at t FROM tasks WHERE ${actorFilter("creator", scope)} AND created_at>$2`;
-    case "report": return `SELECT created_at t FROM reports WHERE ${actorFilter("reporter", scope)} AND created_at>$2`;
-    case "knowledge_card": return `SELECT created_at t FROM knowledge_cards WHERE ${authorFilter("author_agent_id", scope)} AND created_at>$2`;
-    case "knowledge_version": return `SELECT created_at t FROM knowledge_versions WHERE ${authorFilter("author_agent_id", scope)} AND version>1 AND created_at>$2`;
+      return `SELECT created_at t, sender_id a FROM messages WHERE ${actorFilter("sender", scope)} AND ${MESSAGE_CLASS[action]} AND created_at>$2`;
+    case "room_create": return `SELECT created_at t, creator_id a FROM rooms WHERE ${actorFilter("creator", scope)} AND created_at>$2`;
+    case "task_create": return `SELECT created_at t, creator_id a FROM tasks WHERE ${actorFilter("creator", scope)} AND created_at>$2`;
+    case "report": return `SELECT created_at t, reporter_id a FROM reports WHERE ${actorFilter("reporter", scope)} AND created_at>$2`;
+    case "knowledge_card": return `SELECT created_at t, author_agent_id a FROM knowledge_cards WHERE ${authorFilter("author_agent_id", scope)} AND created_at>$2`;
+    case "knowledge_version": return `SELECT created_at t, author_agent_id a FROM knowledge_versions WHERE ${authorFilter("author_agent_id", scope)} AND version>1 AND created_at>$2`;
     // Reviews are upserts that reset created_at; each archived revision keeps its own submission time.
-    case "knowledge_review": return `SELECT created_at t FROM knowledge_reviews WHERE ${authorFilter("reviewer_agent_id", scope)} AND created_at>$2
-      UNION ALL SELECT rr.created_at FROM knowledge_review_revisions rr JOIN knowledge_reviews kr ON kr.id=rr.review_id WHERE ${authorFilter("kr.reviewer_agent_id", scope)} AND rr.created_at>$2`;
-    case "subscription_change": return scope === "agent"
-      ? "SELECT created_at t FROM quota_events WHERE action='subscription_change' AND actor_type='agent' AND actor_id=$1 AND created_at>$2"
-      : "SELECT created_at t FROM quota_events WHERE action='subscription_change' AND owner_id=$1 AND created_at>$2";
+    case "knowledge_review": return `SELECT created_at t, reviewer_agent_id a FROM knowledge_reviews WHERE ${authorFilter("reviewer_agent_id", scope)} AND created_at>$2
+      UNION ALL SELECT rr.created_at, kr.reviewer_agent_id FROM knowledge_review_revisions rr JOIN knowledge_reviews kr ON kr.id=rr.review_id WHERE ${authorFilter("kr.reviewer_agent_id", scope)} AND rr.created_at>$2`;
+    case "subscription_change": return scope === "owner"
+      ? "SELECT created_at t, actor_id a FROM quota_events WHERE action='subscription_change' AND owner_id=$1 AND created_at>$2"
+      : `SELECT created_at t, actor_id a FROM quota_events WHERE action='subscription_change' AND actor_type='agent' AND actor_id${scope === "agent" ? "=$1" : "=ANY($1)"} AND created_at>$2`;
   }
 }
 
@@ -151,7 +158,7 @@ export async function enforceQuota(client: PoolClient, config: LimitsConfig, p: 
 
 /** Append-only counter row for actions without a natural countable row (today only `subscription_change`). */
 export async function recordQuotaEvent(client: PoolClient, p: Principal, action: QuotaAction) {
-  await client.query("INSERT INTO quota_events(action,actor_type,actor_id,owner_id) VALUES($1,$2,$3,$4)", [action, p.type, p.id, p.ownerId]);
+  await client.query("INSERT INTO quota_events(action,actor_type,actor_id,owner_id,created_at) VALUES($1,$2,$3,$4,clock_timestamp())", [action, p.type, p.id, p.ownerId]);
 }
 
 /** Current window usage against every limit, for one scope. */
@@ -163,4 +170,21 @@ export async function windowUsage(db: Db, config: LimitsConfig, scope: QuotaScop
     usage[action] = { used, limit: scope === "agent" ? spec.agent : spec.owner, window_sec: spec.window };
   }
   return usage;
+}
+
+type WindowUsage = Awaited<ReturnType<typeof windowUsage>>;
+
+/** Agent-scope window usage for many agents at once: one grouped query per action, independent of the number of agents. */
+export async function agentsWindowUsage(db: Db, config: LimitsConfig, agentIds: string[]): Promise<Map<string, WindowUsage>> {
+  const result = new Map<string, WindowUsage>();
+  if (!agentIds.length) return result;
+  const at = await clockNow(db);
+  for (const id of agentIds) result.set(id, {});
+  for (const action of QUOTA_ACTIONS) {
+    const spec = config.actions[action], since = new Date(at.getTime() - spec.window * 1000);
+    const counts = new Map<string, number>();
+    for (const row of (await db.query(`SELECT a, count(*)::int n FROM (${eventTimes(action, "agents")}) s GROUP BY a`, [agentIds, since])).rows) counts.set(row.a, Number(row.n));
+    for (const id of agentIds) result.get(id)![action] = { used: counts.get(id) ?? 0, limit: spec.agent, window_sec: spec.window };
+  }
+  return result;
 }

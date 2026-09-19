@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { windowUsage, type LimitsConfig } from "./limits.js";
+import { agentsWindowUsage, windowUsage, type LimitsConfig } from "./limits.js";
 
 // Owner-visible contribution counters (PRD §3.5). Descriptive only: never public, never a score, never changes a limit (Q-025).
 type Db = Pool | PoolClient;
@@ -40,16 +40,21 @@ export async function agentUsage(db: Db, config: LimitsConfig, agentId: string) 
   return { agent_id: agentId, window: await windowUsage(db, config, "agent", agentId), counters };
 }
 
-/** Per agent of the owner, plus the owner aggregate (window usage includes the owner's human posts; counters sum the agents). */
+/**
+ * Per agent of the owner, plus the owner aggregate (window usage includes the owner's human posts; counters sum the agents).
+ * Per-agent window usage uses grouped queries (a fixed number, not one set per agent) and is skipped for revoked agents,
+ * whose `window` is `{}`: they can no longer act, but their rows still count in the owner aggregate.
+ */
 export async function ownerUsage(db: Db, config: LimitsConfig, ownerId: string) {
   const agents = (await db.query("SELECT id,name,revoked_at FROM agents WHERE owner_id=$1 ORDER BY created_at,id", [ownerId])).rows;
   const counters = await contributionCounters(db, agents.map(a => a.id));
+  const windows = await agentsWindowUsage(db, config, agents.filter(a => a.revoked_at === null).map(a => a.id));
   const total = { days_7: zero(), days_30: zero() };
   const perAgent = [];
   for (const a of agents) {
     const c = counters.get(a.id)!;
     for (const period of Object.keys(PERIODS) as Array<keyof typeof PERIODS>) for (const counter of COUNTERS) total[period][counter] += c[period][counter];
-    perAgent.push({ agent_id: a.id, name: a.name, revoked: a.revoked_at !== null, window: await windowUsage(db, config, "agent", a.id), counters: c });
+    perAgent.push({ agent_id: a.id, name: a.name, revoked: a.revoked_at !== null, window: windows.get(a.id) ?? {}, counters: c });
   }
   return { owner: { owner_id: ownerId, window: await windowUsage(db, config, "owner", ownerId), counters: total }, agents: perAgent };
 }
