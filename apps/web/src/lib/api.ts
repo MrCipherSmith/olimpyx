@@ -1,7 +1,7 @@
 import { ApiError, AuthSession, type AuthUser, type StoredSession } from './auth-session';
 
 export interface Actor { actor_type: 'owner' | 'agent'; actor_id: string; display_name: string; }
-export interface Profile { agent_id: string; name: string; role: string; bio: string; interests: string[]; capabilities: string[]; presence: 'online' | 'offline'; last_seen_at: string | null; profile_revision: number; }
+export interface Profile { agent_id: string; name: string; role: string; bio: string; interests: string[]; capabilities: string[]; presence: 'online' | 'offline'; last_seen_at: string | null; profile_revision: number; revoked?: boolean; }
 export interface Room { room_id: string; slug: string; title: string; description: string; created_by: Actor; created_at: string; updated_at: string; }
 export interface Message { message_id: string; room_id: string; sender: Actor; recipient_agent_id: string | null; reply_to_message_id: string | null; body: string; created_at: string; }
 export interface Source { url: string; title?: string; accessed_at?: string; }
@@ -23,8 +23,32 @@ export interface PublicKnowledgeCard { card_id: string; created_at: string; late
 export type ShowcaseActivity = { kind: 'message'; occurred_at: string; actor: PublicActor; resource: { kind: 'room'; id: string; title: string }; summary: string } | { kind: 'knowledge'; occurred_at: string; actor: PublicActor; resource: { kind: 'knowledge_card'; id: string; title: string }; summary: string };
 export interface ShowcaseRelationship { source_agent_id: string; target_agent_id: string; interaction_count: number; last_interaction_at: string; room_ids: string[]; }
 export interface ShowcaseSnapshot { generated_at: string; counts: { agents: number; rooms: number; messages: number; knowledge_cards: number }; agents: PublicAgent[]; rooms: PublicRoom[]; knowledge_cards: PublicKnowledgeCard[]; recent_activity: ShowcaseActivity[]; relationships: ShowcaseRelationship[]; }
+
+// Q-016 owner controls (§5.6, §6): stop/usage/limits and typed 429 quota errors.
+export interface StopAgentResult { agent_id: string; session_ids: string[]; stopped_at: string; }
+export interface UsageWindowEntry { used: number; limit: number; window_sec: number; }
+export type UsageWindow = Record<string, UsageWindowEntry>;
+export interface UsageCounters { messages: number; replies_in_other_threads: number; own_threads_resolved: number; knowledge_cards: number; knowledge_versions: number; reviews_given: number; tasks_completed_for_others: number; }
+export interface UsagePeriodCounters { days_7: UsageCounters; days_30: UsageCounters; }
+export interface OwnerUsageAgent { agent_id: string; name: string; revoked: boolean; window: UsageWindow; counters: UsagePeriodCounters; }
+export interface OwnerUsage { owner: { owner_id: string; window: UsageWindow; counters: UsagePeriodCounters }; agents: OwnerUsageAgent[]; }
+export interface ActionLimit { window_sec: number; agent: number; owner: number; }
+export interface EffectiveLimits { actions: Record<string, ActionLimit>; direct_message_pair: { window_sec: number; limit: number }; capacity: { agents_per_owner: number; enrollment_tokens_per_owner: number; sessions_per_agent: number; open_tasks_per_assignee: number }; }
+export interface QuotaErrorDetails { action: string; scope: 'agent' | 'owner'; limit: number; windowSec: number; retryAfterSec: number; }
+/** Thrown for `429 quota_exceeded` responses; carries the parsed action/limit/retry-after alongside the usual ApiError fields. */
+export class QuotaExceededError extends ApiError {
+  readonly quota: QuotaErrorDetails;
+  constructor(message: string, payload: unknown, quota: QuotaErrorDetails) {
+    super(message, 429, payload);
+    this.name = 'QuotaExceededError';
+    this.quota = quota;
+  }
+}
+
 type Envelope<T> = { data: T };
-const idempotencyKey = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+/** Exported so callers that need one confirmed intent to survive UI re-renders/retries with a single
+ * key (e.g. an owner's Stop/Revoke confirmation, PROMPT §6) can generate it once and pass it through. */
+export const idempotencyKey = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 export class OlimpyxApi {
   constructor(private readonly session: AuthSession) {}
@@ -56,7 +80,10 @@ export class OlimpyxApi {
   inbox(): Promise<InboxOverview> { return this.unwrap(this.request<Envelope<InboxOverview>>('/v1/inbox/overview')); }
   ownAgents(): Promise<Profile[]> { return this.list('/v1/owners/me/agents'); }
   enrollmentToken(label?: string): Promise<EnrollmentToken> { return this.unwrap(this.request<Envelope<EnrollmentToken>>('/v1/owners/me/enrollment-tokens', { method: 'POST', body: label ? { label } : {} }, true)); }
-  revokeAgent(agentId: string, reason?: string): Promise<void> { return this.request(`/v1/owners/me/agents/${agentId}/revoke`, { method: 'POST', body: reason ? { reason } : {} }, true); }
+  revokeAgent(agentId: string, reason?: string, idempotencyKey?: string): Promise<void> { return this.request(`/v1/owners/me/agents/${agentId}/revoke`, { method: 'POST', body: reason ? { reason } : {}, idempotencyKey }, true); }
+  stopAgent(agentId: string, reason?: string, idempotencyKey?: string): Promise<StopAgentResult> { return this.unwrap(this.request<Envelope<StopAgentResult>>(`/v1/owners/me/agents/${agentId}/stop`, { method: 'POST', body: reason ? { reason } : {}, idempotencyKey }, true)); }
+  usage(): Promise<OwnerUsage> { return this.unwrap(this.request<Envelope<OwnerUsage>>('/v1/owners/me/usage')); }
+  limits(): Promise<EffectiveLimits> { return this.unwrap(this.request<Envelope<EffectiveLimits>>('/v1/limits')); }
   escalations(): Promise<Escalation[]> { return this.list('/v1/owners/me/escalations'); }
   report(input: { target: { kind: 'message' | 'profile' | 'knowledge_version'; id: string }; category: 'spam' | 'harassment' | 'unsafe' | 'other'; explanation: string }): Promise<ReportStatus> { return this.unwrap(this.request<Envelope<ReportStatus>>('/v1/reports', { method: 'POST', body: input }, true)); }
   reportStatus(reportId: string): Promise<ReportStatus> { return this.unwrap(this.request<Envelope<ReportStatus>>(`/v1/reports/${reportId}`)); }
@@ -77,12 +104,35 @@ export class OlimpyxApi {
     return all;
   }
   private async unwrap<T>(response: Promise<Envelope<T>>): Promise<T> { return (await response).data; }
-  private async request<T>(path: string, options: { method?: string; body?: unknown } = {}, mutate = false): Promise<T> {
+  private async request<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string } = {}, mutate = false): Promise<T> {
     const response = await this.session.withSession(async () => {
       let fetched: Response;
-      try { fetched = await fetch(path, { method: options.method ?? 'GET', headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(mutate ? { 'Idempotency-Key': idempotencyKey() } : {}), ...this.session.authorizationHeaders() }, body: options.body ? JSON.stringify(options.body) : undefined }); }
+      try { fetched = await fetch(path, { method: options.method ?? 'GET', headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(mutate ? { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey() } : {}), ...this.session.authorizationHeaders() }, body: options.body ? JSON.stringify(options.body) : undefined }); }
       catch { throw new ApiError('Unable to reach Olimpyx. Check that the server is running.', 0); }
-      if (!fetched.ok) { const payload = await fetched.json().catch(() => null) as { error?: { message?: string } } | null; throw new ApiError(payload?.error?.message ?? `Request failed (${fetched.status})`, fetched.status, payload); }
+      if (!fetched.ok) {
+        const payload = await fetched.json().catch(() => null) as { error?: { message?: string; code?: string; details?: unknown } } | null;
+        if (fetched.status === 429 && payload?.error?.code === 'quota_exceeded') {
+          const details = (payload.error.details ?? {}) as Partial<{ action: string; scope: 'agent' | 'owner'; limit: number; window_sec: number; retry_after_sec: number }>;
+          // The body's retry_after_sec is agent-facing API input, not necessarily well-formed — validate it
+          // numerically (a genuine `number`, finite, non-negative) before trusting it, and fall back to the
+          // Retry-After header (validated the same way) rather than a raw pass-through. `Number(null)` is 0
+          // and `Number(undefined)` is NaN, so a plain `Number(...)` coercion would silently treat a null
+          // retry_after_sec as "retry immediately" instead of falling back to the header — the typeof guard
+          // rejects non-numbers (including null) before they reach the finite/non-negative check. Whole
+          // seconds only (Math.ceil).
+          const rawDetailRetryAfter = details.retry_after_sec;
+          const detailRetryAfter = typeof rawDetailRetryAfter === 'number' && Number.isFinite(rawDetailRetryAfter) && rawDetailRetryAfter >= 0 ? rawDetailRetryAfter : null;
+          const headerRetryAfter = Number(fetched.headers.get('Retry-After'));
+          const retryAfterSec = detailRetryAfter !== null
+            ? Math.ceil(detailRetryAfter)
+            : Number.isFinite(headerRetryAfter) && headerRetryAfter >= 0
+              ? Math.ceil(headerRetryAfter)
+              : 0;
+          const limit = Number(details.limit);
+          throw new QuotaExceededError(payload.error.message ?? `Request failed (${fetched.status})`, payload, { action: details.action ?? 'unknown', scope: details.scope ?? 'owner', limit: Number.isFinite(limit) ? limit : NaN, windowSec: details.window_sec ?? 0, retryAfterSec });
+        }
+        throw new ApiError(payload?.error?.message ?? `Request failed (${fetched.status})`, fetched.status, payload);
+      }
       return fetched;
     });
     if (response.status === 204) return undefined as T;

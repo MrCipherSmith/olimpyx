@@ -119,4 +119,192 @@ describe('authenticated showcase surfaces', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Rooms' }));
     await waitFor(() => expect(screen.queryByText('Leaked old room')).not.toBeInTheDocument());
   });
+
+  it('clears a stale semantic-search-unavailable notice when Refresh reloads data', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=knowledge');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/knowledge/cards') && url.includes('search=semantic')) {
+        return new Response(JSON.stringify({ error: { message: 'Semantic search backend unavailable', code: 'embedding_unavailable' } }), { status: 503 });
+      }
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText('Search knowledge'), { target: { value: 'entropy' } });
+    fireEvent.change(screen.getByLabelText('Search mode'), { target: { value: 'semantic' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText(/Semantic search is temporarily unavailable/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '↻ Refresh' }));
+    await waitFor(() => expect(screen.queryByText(/Semantic search is temporarily unavailable/)).not.toBeInTheDocument());
+  });
+
+  it('clears a stale semantic-search-unavailable notice on sign out, so it cannot leak into the next session', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=knowledge');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/knowledge/cards') && url.includes('search=semantic')) {
+        return new Response(JSON.stringify({ error: { message: 'Semantic search backend unavailable', code: 'embedding_unavailable' } }), { status: 503 });
+      }
+      if (url === '/v1/owners/logout') return new Response(null, { status: 204 });
+      if (url === '/v1/owners/login') return new Response(JSON.stringify({ data: { owner: { owner_id: 'owner-2', email: 'new@example.test', display_name: 'New owner' }, access_token: 'new-token' } }), { status: 200 });
+      if (url.startsWith('/v1/showcase')) return new Response(JSON.stringify({ data: snapshot }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText('Search knowledge'), { target: { value: 'entropy' } });
+    fireEvent.change(screen.getByLabelText('Search mode'), { target: { value: 'semantic' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText(/Semantic search is temporarily unavailable/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    // Sign back in (a different owner) and return to Knowledge: the previous notice must not reappear.
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+    fireEvent.change(await screen.findByLabelText('Email'), { target: { value: 'new@example.test' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'long-enough-password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByText('New owner')).toBeInTheDocument();
+
+    window.history.pushState(null, '', '/?view=knowledge');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(screen.queryByText(/Semantic search is temporarily unavailable/)).not.toBeInTheDocument();
+  });
+
+  /** Installs a spy that captures the room-poll interval's 5s callback instead of waiting on it for
+   *  real, without disturbing any other interval (e.g. testing-library's own `waitFor` polling uses
+   *  setInterval too) — only a 5000ms delay is ours, everything else passes through to the real timer
+   *  functions. Returns a getter for the captured callbacks. */
+  function captureRoomPollIntervals() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const realSetInterval = window.setInterval.bind(window) as (...args: any[]) => unknown;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const realClearInterval = window.clearInterval.bind(window) as (id: any) => void;
+    const liveIntervals = new Map<unknown, () => void>();
+    vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      const id = realSetInterval(handler, timeout, ...args);
+      if (timeout === 5000) liveIntervals.set(id, handler as () => void);
+      return id;
+    }) as unknown as typeof window.setInterval);
+    vi.spyOn(window, 'clearInterval').mockImplementation(((id?: unknown) => {
+      if (id !== undefined) liveIntervals.delete(id);
+      realClearInterval(id);
+    }) as typeof window.clearInterval);
+    return liveIntervals;
+  }
+
+  const room = { room_id: 'room-1', slug: 'room-1', title: 'Room', description: '', created_by: { actor_type: 'owner', actor_id: 'owner-1', display_name: 'Owner' }, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z' };
+
+  it('feeds the 5s room-poll outcome into the network status, so a 5xx from a reachable API is shown as degraded, not offline', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+
+    let messageCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) {
+        messageCalls += 1;
+        if (messageCalls === 1) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+        return new Response(JSON.stringify({ error: { message: 'Server error' } }), { status: 500 });
+      }
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+
+    const { container } = render(<App />);
+    const networkBadge = () => container.querySelector('.network-status') as HTMLElement;
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Online'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+
+    const [poll] = liveIntervals.values();
+    await poll();
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Degraded'));
+    expect(messageCalls).toBe(2);
+  });
+
+  it('marks the network offline only when the room poll cannot reach the API at all', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+
+    let messageCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) {
+        messageCalls += 1;
+        if (messageCalls === 1) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+        throw new TypeError('Failed to fetch'); // simulates an actual network failure, not an HTTP error
+      }
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+
+    const { container } = render(<App />);
+    const networkBadge = () => container.querySelector('.network-status') as HTMLElement;
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Online'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+
+    const [poll] = liveIntervals.values();
+    await poll();
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Offline'));
+    expect(messageCalls).toBe(2);
+  });
+
+  it('a 4xx room-poll error (a reachable API correctly rejecting the request) leaves the network status unchanged', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+
+    let messageCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) {
+        messageCalls += 1;
+        if (messageCalls === 1) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+        return new Response(JSON.stringify({ error: { message: 'Forbidden' } }), { status: 403 });
+      }
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+
+    const { container } = render(<App />);
+    const networkBadge = () => container.querySelector('.network-status') as HTMLElement;
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Online'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+
+    const [poll] = liveIntervals.values();
+    await poll();
+    await waitFor(() => expect(messageCalls).toBe(2));
+    expect(networkBadge()).toHaveTextContent('Online');
+  });
+
+  it('a successful room poll does not upgrade a degraded status (set by the main load) to online', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+      // One of the main load's three endpoints keeps failing, so the initial load settles as Degraded.
+      if (url.startsWith('/v1/agents')) return new Response(JSON.stringify({ error: { message: 'Server error' } }), { status: 500 });
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+
+    const { container } = render(<App />);
+    const networkBadge = () => container.querySelector('.network-status') as HTMLElement;
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Degraded'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+
+    const [poll] = liveIntervals.values();
+    await poll();
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Degraded'));
+    expect(networkBadge()).not.toHaveTextContent('Online');
+  });
 });

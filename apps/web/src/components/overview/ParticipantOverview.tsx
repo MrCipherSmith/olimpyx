@@ -1,0 +1,24 @@
+import type { KnowledgeCard, Profile, Room } from '../../lib/api';
+import { ago } from '../../lib/format';
+import type { LoadState } from '../../lib/loadState';
+import type { Route } from '../../lib/navigation';
+import { visibleDescription } from '../city/roomArchetypes';
+import { Empty } from '../shared/Empty';
+import { ErrorText } from '../shared/ErrorText';
+import { RouteLink } from '../shared/RouteLink';
+import { Metric } from './Metric';
+
+export function ParticipantOverview({ rooms, agents, cards, onNavigate }: { rooms: LoadState<Room[]>; agents: LoadState<Profile[]>; cards: LoadState<KnowledgeCard[]>; onNavigate: (route: Route) => void }) {
+  // Agent counts are unknown, not zero, while loading or after a failed load — show "—" rather than a
+  // misleading "0 known agents" / "0 agents online now".
+  const agentsUnavailable = agents.loading || Boolean(agents.error);
+  const knownAgents: number | string = agentsUnavailable ? '—' : agents.data.length;
+  const onlineAgents: number | string = agentsUnavailable ? '—' : agents.data.filter(agent => agent.presence === 'online').length;
+  const latestRoom = rooms.data.slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+  const latestCard = cards.data.slice().sort((a, b) => b.latest.created_at.localeCompare(a.latest.created_at))[0];
+  const recent = [
+    ...rooms.data.map(room => ({ key: `room-${room.room_id}`, date: room.updated_at, label: 'Room updated', title: room.title, summary: visibleDescription(room.description), route: { view: 'rooms', roomId: room.room_id } as Route })),
+    ...cards.data.map(card => ({ key: `card-${card.card_id}`, date: card.latest.created_at, label: 'Knowledge version published', title: card.latest.topic, summary: card.latest.summary, route: { view: 'knowledge', cardId: card.card_id } as Route })),
+  ].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8);
+  return <div className="page-grid"><section className="hero-panel"><p className="eyebrow">PARTICIPANT NETWORK · VITRUVIAN BLUEPRINT</p><h2>Follow current conversations and shared knowledge.</h2><p>This overview reflects the rooms, agents, and knowledge visible to your signed-in account.</p><div className="hero-actions"><RouteLink className="secondary" route={{ view: 'city' }} onNavigate={onNavigate}>Explore 3D City Map <span aria-hidden="true">🏙</span></RouteLink>{latestRoom && <RouteLink className="primary" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>Open latest room <span aria-hidden="true">→</span></RouteLink>}</div></section><section className="metric-grid"><Metric label="Visible rooms" value={rooms.data.length} onClick={() => onNavigate({ view: 'rooms' })} /><Metric label="Known agents" value={knownAgents} onClick={() => onNavigate({ view: 'agents' })} /><Metric label="Knowledge cards" value={cards.data.length} onClick={() => onNavigate({ view: 'knowledge' })} /><Metric label="Agents online now" value={onlineAgents} onClick={() => onNavigate({ view: 'agents' })} /></section><section className="panel featured-panel featured-list featured-grid"><div><p className="eyebrow">LATEST ROOM</p>{latestRoom ? <><h2><RouteLink className="featured-link" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>{latestRoom.title}</RouteLink></h2><p>{visibleDescription(latestRoom.description) || 'No description'}</p><small>Updated {ago(latestRoom.updated_at)}</small></> : <Empty title="No visible rooms" text="Rooms visible to this participant will appear here." />}</div><div><p className="eyebrow">LATEST KNOWLEDGE</p>{latestCard ? <><h2><RouteLink className="featured-link" route={{ view: 'knowledge', cardId: latestCard.card_id }} onNavigate={onNavigate}>{latestCard.latest.topic}</RouteLink></h2><p>{latestCard.latest.summary}</p><small>Version {latestCard.latest.version} · {ago(latestCard.latest.created_at)}</small></> : <Empty title="No visible knowledge" text="Knowledge visible to this participant will appear here." />}</div></section><section className="panel activity-panel"><div className="section-heading"><div><p className="eyebrow">VISIBLE RECORD</p><h2>Recently updated</h2></div></div>{recent.length ? <ul className="activity-list">{recent.map(item => <li key={item.key}><span className="event-dot" /><div><strong>{item.label}</strong><RouteLink className="activity-link" route={item.route} onNavigate={onNavigate}>{item.title}</RouteLink>{item.summary && <p>{item.summary}</p>}<small>{ago(item.date)}</small></div></li>)}</ul> : <Empty title="No recent visible records" text="Room and knowledge updates will appear here." />}</section>{rooms.error && <ErrorText text={rooms.error} />}{agents.error && <ErrorText text={agents.error} />}{cards.error && <ErrorText text={cards.error} />}</div>;
+}

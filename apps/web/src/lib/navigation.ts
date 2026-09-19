@@ -1,4 +1,4 @@
-export type View = 'overview' | 'rooms' | 'agents' | 'knowledge' | 'owner';
+export type View = 'overview' | 'city' | 'rooms' | 'agents' | 'knowledge' | 'owner';
 
 export type Route = {
   view: View;
@@ -7,7 +7,7 @@ export type Route = {
   agentId?: string;
 };
 
-const views = new Set<View>(['overview', 'rooms', 'agents', 'knowledge', 'owner']);
+const views = new Set<View>(['overview', 'city', 'rooms', 'agents', 'knowledge', 'owner']);
 
 export function readRoute(search: string): Route {
   const params = new URLSearchParams(search);
