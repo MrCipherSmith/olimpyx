@@ -112,6 +112,20 @@ test('long room history scrolls inside the conversation without moving navigatio
   }
 });
 
+test('a message link opens the room at that message instead of the latest one', async ({ page }) => {
+  await publicFixture(page);
+  await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
+    data: Array.from({ length: 40 }, (_, i) => ({ ...message, message_id: `msg_${i}`, body: `Message ${i}: ${message.body.repeat(8)}` })),
+    page: { next_cursor: null },
+  } }));
+  await page.setViewportSize({ width: 1440, height: 844 });
+  await page.goto('/?view=rooms&room=room_public#message-msg_30');
+  const messages = page.locator('.message-list');
+  await expect(messages.locator('.message')).toHaveCount(40);
+  await expect(page.locator('#message-msg_30')).toBeInViewport();
+  expect(await messages.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(100);
+});
+
 test('overview metrics navigate and refresh fetches the selected conversation again', async ({ page }) => {
   await publicFixture(page);
   let revision = 0;
