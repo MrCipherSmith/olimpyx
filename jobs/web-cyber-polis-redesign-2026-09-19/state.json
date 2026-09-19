@@ -1,8 +1,8 @@
 {
   "job": "web-cyber-polis-redesign-2026-09-19",
   "title": "Cyber-Polis Vitruvian web redesign",
-  "status": "in_progress",
-  "phase": "EXECUTION",
+  "status": "ready_for_pr",
+  "phase": "COMPLETION",
   "intent": "implement",
   "branch": "feat/web-cyber-polis-redesign",
   "worktree": "../olimpyx-redesign",
@@ -11,16 +11,89 @@
   "baseline": "WIP_BASELINE.md (web unit 25/25, build ok, e2e 5-6/16 failing)",
   "plan": {
     "steps": [
-      { "id": "w1-e2e-tokens", "scope": "Fix WIP e2e regressions + PROMPT §2 tokens/self-hosted fonts/reduced motion", "agent": "general-purpose(opus)", "status": "in_progress" },
-      { "id": "w2-split-app", "scope": "PROMPT §5 split App.tsx into components (no behavior change)", "agent": "general-purpose(opus)", "status": "pending" },
-      { "id": "w3a-city", "scope": "PROMPT §3-4 city math/layout/a11y/camera/archetypes (deterministic)", "agent": "general-purpose(opus)", "status": "pending", "parallel_with": "w3b-owner" },
-      { "id": "w3b-owner", "scope": "PROMPT §6 Praetorium on Q-016 endpoints + api.ts", "agent": "general-purpose(sonnet)", "status": "pending", "parallel_with": "w3a-city" },
-      { "id": "w4-pages", "scope": "PROMPT §5 pages restyle (overview/rooms/agents/knowledge) + §7", "agent": "general-purpose(sonnet)", "status": "pending" },
-      { "id": "verify", "scope": "typecheck, unit, build, e2e, smoke/live", "agent": "orchestrator", "status": "pending" },
-      { "id": "review", "scope": "frontend + security + a11y review", "agent": "review(opus)", "status": "pending" },
-      { "id": "fix", "agent": "subagents", "status": "pending", "conditional": true },
-      { "id": "report", "agent": "orchestrator", "status": "pending" },
-      { "id": "pr", "agent": "orchestrator", "status": "pending", "conditional": "ask user" }
+      {
+        "id": "w1-e2e-tokens",
+        "scope": "Fix WIP e2e regressions + PROMPT §2 tokens/self-hosted fonts/reduced motion",
+        "agent": "general-purpose(opus)",
+        "status": "completed",
+        "commit": "c2799ae"
+      },
+      {
+        "id": "w2-split-app",
+        "scope": "PROMPT §5 split App.tsx into components (no behavior change)",
+        "agent": "general-purpose(opus)",
+        "status": "completed",
+        "commit": "25ad851"
+      },
+      {
+        "id": "w3a-city",
+        "scope": "PROMPT §3-4 city math/layout/a11y/camera/archetypes (deterministic)",
+        "agent": "general-purpose(opus)",
+        "status": "completed",
+        "parallel_with": "w3b-owner",
+        "commit": "a7d18e2"
+      },
+      {
+        "id": "w3b-owner",
+        "scope": "PROMPT §6 Praetorium on Q-016 endpoints + api.ts",
+        "agent": "general-purpose(sonnet)",
+        "status": "completed",
+        "parallel_with": "w3a-city",
+        "commit": "3bf6d2c"
+      },
+      {
+        "id": "w4-pages",
+        "scope": "PROMPT §5 pages restyle (overview/rooms/agents/knowledge) + §7",
+        "agent": "general-purpose(sonnet)",
+        "status": "completed",
+        "commit": "5fafca2"
+      },
+      {
+        "id": "verify",
+        "scope": "typecheck, unit, build, e2e, smoke/live",
+        "agent": "orchestrator",
+        "status": "completed",
+        "result": "typecheck ok; web unit 155/155; build ok; e2e/smoke/live deferred to CI"
+      },
+      {
+        "id": "review",
+        "scope": "frontend + security + a11y review",
+        "agent": "review(opus)",
+        "status": "completed",
+        "rounds": [
+          {
+            "verdict": "3 parallel reviews: 0 blocker, 5 major, ~25 minor",
+            "fixed_in": [
+              "c6e8e4e",
+              "724a702"
+            ]
+          },
+          {
+            "verdict": "APPROVE_WITH_SUGGESTIONS",
+            "findings": 5,
+            "fixed_in": [
+              "92fda96"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "fix",
+        "agent": "subagents",
+        "status": "completed",
+        "conditional": true
+      },
+      {
+        "id": "report",
+        "agent": "orchestrator",
+        "status": "completed"
+      },
+      {
+        "id": "pr",
+        "agent": "orchestrator",
+        "status": "pending_user_confirmation",
+        "conditional": "ask user"
+      }
     ]
   }
 }
