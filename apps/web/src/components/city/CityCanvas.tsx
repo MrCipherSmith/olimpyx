@@ -1,44 +1,79 @@
 import { useEffect, useRef, type MutableRefObject } from 'react';
-import { clampZoom, diveCamera, fitZoom, hitTest, isoProject, shouldRefitZoom, type Camera, type Viewport } from './isometricMath';
-import { createRenderCache, renderCity } from './cityRenderer';
+import { clampZoom, diveCamera, fitZoom, hitTest, shouldRefitZoom, type Camera, type ScreenBox, type Viewport } from './isometricMath';
+import { DIVE_ZOOM, FOCUS_ZOOM, divePointCamera, easeIn, hudSafeFit, lerpCamera, occludersFrom, type DiveCameraMove } from './cameraMath';
+import { clearLabelCache, createRenderCache, labelAt, renderCity } from './cityRenderer';
 import { shouldSkipFrame } from './cityLoop';
 import type { CityScene } from './cityScene';
 import { CITY_MOTION, resolveCityPalette, type CityPalette } from './cityTokens';
+import { DEFAULT_INHABITANT_CAP, INHABITANT_TRANSITION_MS, planInhabitants, type InhabitantActivityInput, type InhabitantAgentInput, type InhabitantPlan } from './inhabitants';
 import type { ArchetypeCategory } from './roomArchetypes';
+
+/** Stable empty defaults (City Shell §6): a caller that has no agents/activity yet never retriggers the
+ * inhabitants effect just because a fresh `[]` literal was passed in. */
+const EMPTY_AGENTS: readonly InhabitantAgentInput[] = [];
+const EMPTY_ACTIVITY: readonly InhabitantActivityInput[] = [];
+/** Below this canvas width, fewer figures walk the roads (same threshold as the decorative particle count). */
+const SMALL_SCREEN_WIDTH = 600;
+const SMALL_SCREEN_INHABITANT_CAP = 12;
 
 /** Imperative camera controls used by the HUD buttons (keyboard-accessible alternatives to drag/wheel). */
 export interface CityCameraController {
   zoomBy: (factor: number) => void;
   panBy: (dx: number, dy: number) => void;
   reset: () => void;
+  /** Whether a camera move would be seen: a 2D context, a laid-out canvas, a visible document. */
+  canAnimate: () => boolean;
+  /** Camera moves of the dive / back transition (components/shell/diveMachine.ts). */
+  dive: (move: DiveCameraMove) => void;
 }
+
+/** HUD panels over the city whose rectangles the scene fit and the labels avoid (PROMPT §2), including the
+ * phone's bottom tab bar. */
+const HUD_PANEL_SELECTOR = '.hud, .tab-bar';
 
 interface CityCanvasProps {
   scene: CityScene;
+  /** Highlighted building (the dive target); the camera itself is driven by `controller.dive`. */
   selectedId: string | null;
   filter: ArchetypeCategory | 'all';
   label: string;
   reducedMotion: boolean;
+  /** Stop the loop while a screen layer covers the whole city; resume with one fresh frame. */
+  paused?: boolean;
   controller: MutableRefObject<CityCameraController | null>;
   onSelect: (id: string) => void;
+  /** Real agents to walk the roads (City Shell §6); omitted draws none. */
+  agents?: readonly InhabitantAgentInput[];
+  /** Real, already-loaded agent↔room links (recent activity, relationships or loaded messages). */
+  activity?: readonly InhabitantActivityInput[];
 }
 
 const MAX_DPR = 2;
 const DRAG_THRESHOLD = 5;
 
-interface Animation { from: Camera; to: Camera; start: number; duration: number; }
+interface Animation { from: Camera; to: Camera; start: number; duration: number; path: (from: Camera, to: Camera, t: number) => Camera; }
 
 /**
  * Owns the single requestAnimationFrame loop of the city. The loop runs only while motion is allowed, the
  * document is visible and the canvas intersects the viewport; with reduced motion frames are drawn on demand
  * and camera moves are instant. Everything is cancelled and unsubscribed on unmount.
  */
-export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, controller, onSelect }: CityCanvasProps) {
+export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, paused = false, controller, onSelect, agents = EMPTY_AGENTS, activity = EMPTY_ACTIVITY }: CityCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const state = useRef({
-    scene, selectedId, filter, reducedMotion, onSelect,
+    scene, selectedId, filter, reducedMotion, onSelect, agents, activity,
+    inhabitants: null as InhabitantPlan | null,
     hoveredId: null as string | null,
     camera: { focalX: 0, focalY: 0, zoom: 0.5 } as Camera,
+    /** The camera is at the HUD-safe whole-city fit (not moved by the user): refit it on resize/HUD changes. */
+    auto: true,
+    /** The view to go back to after a dive; `auto` re-fits instead of restoring a stale camera. */
+    saved: null as { camera: Camera; auto: boolean } | null,
+    /** A dive owns the camera: user pan/zoom/hover are ignored until it returns. */
+    locked: false,
+    /** HUD panel rectangles in canvas CSS pixels (see cameraMath.occludersFrom). */
+    occluders: [] as ScreenBox[],
+    hasContext: false,
     view: { width: 0, height: 0 } as Viewport,
     dpr: 1,
     fitted: false,
@@ -52,8 +87,11 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     dragging: false,
     visible: true,
     onScreen: true,
+    paused,
     rafId: 0,
     requestFrame: () => {},
+    stop: () => {},
+    replanInhabitants: () => {},
   });
   state.current.onSelect = onSelect;
 
@@ -63,9 +101,22 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     if (!canvas || !ctx) return;
     const s = state.current;
     s.palette = resolveCityPalette(canvas);
+    s.hasContext = true;
+    const fit = () => hudSafeFit(s.scene.outerRadius, s.view, s.occluders);
+    // One clock for plan and frames: the rAF timestamp is on the performance.now() timeline, and with reduced
+    // motion the frames use the frozen time, so a new figure starts exactly at its deterministic phase.
+    // Passing the plan on screen keeps every surviving figure's anchor (agent list refetches, activity polls,
+    // viewport-driven cap changes, scene rebuilds): nothing jumps; a re-pathed figure glides (instant with
+    // reduced motion).
+    const replanInhabitants = () => {
+      const cap = s.view.width > 0 && s.view.width < SMALL_SCREEN_WIDTH ? SMALL_SCREEN_INHABITANT_CAP : DEFAULT_INHABITANT_CAP;
+      const now = s.reducedMotion ? s.frozenTime : performance.now();
+      s.inhabitants = planInhabitants(s.agents, s.activity, s.scene, now, cap, s.inhabitants, s.reducedMotion ? 0 : INHABITANT_TRANSITION_MS);
+    };
+    s.replanInhabitants = replanInhabitants;
 
     const animated = () => !s.reducedMotion;
-    const shouldRun = () => s.visible && s.onScreen && s.view.width > 0;
+    const shouldRun = () => s.visible && s.onScreen && !s.paused && s.view.width > 0;
 
     const draw = (now: number) => {
       s.rafId = 0;
@@ -77,26 +128,33 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
       s.lastDraw = now;
       if (s.animation) {
         const progress = Math.min(1, (now - s.animation.start) / s.animation.duration);
-        s.camera = diveCamera(s.animation.from, s.animation.to, progress);
+        // Land exactly on the target (no float drift from the eased/log-space path).
+        s.camera = progress >= 1 ? s.animation.to : s.animation.path(s.animation.from, s.animation.to, progress);
         if (progress >= 1) s.animation = null;
       }
       if (animated()) s.frozenTime = now;
       ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
-      renderCity(ctx, {
+      // `occluders`: HUD panel rectangles in canvas CSS pixels, measured on resize only; the renderer moves
+      // labels off them.
+      const frame = {
         scene: s.scene, camera: s.camera, view: s.view, palette: s.palette!, time: s.frozenTime, animate: animated(),
         hoveredId: s.hoveredId, selectedId: s.selectedId, filter: s.filter,
         particles: animated() ? (s.view.width < 600 ? 4 : 12) : 0,
         dpr: s.dpr, cache: s.cache,
+        inhabitants: s.inhabitants,
         // A camera dive (s.animation) or an active drag changes the camera every frame; bypass the
         // static-layer cache for those (see RenderFrame.cameraMoving) instead of rebuilding + blitting
         // it on every single frame.
         cameraMoving: s.animation !== null || s.dragging,
-      });
+        occluders: s.occluders,
+      };
+      renderCity(ctx, frame);
       // Continuous loop only while something moves; otherwise wait for the next requestFrame().
       if ((animated() || s.animation) && shouldRun()) s.rafId = requestAnimationFrame(draw);
     };
     s.requestFrame = () => { s.dirty = true; if (!s.rafId && shouldRun()) s.rafId = requestAnimationFrame(draw); };
     const stop = () => { if (s.rafId) cancelAnimationFrame(s.rafId); s.rafId = 0; };
+    s.stop = stop;
 
     /** Applies a CSS size; the backing store is only rewritten when the size or the DPR actually changed. */
     const applySize = (cssWidth: number, cssHeight: number) => {
@@ -111,9 +169,51 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
       const backingHeight = Math.round(height * dpr);
       if (canvas.width !== backingWidth) canvas.width = backingWidth;
       if (canvas.height !== backingHeight) canvas.height = backingHeight;
-      if (!s.fitted) { s.camera = { focalX: 0, focalY: -20, zoom: fitZoom(s.scene.outerRadius, s.view) }; s.fitted = true; }
+      measureOccluders();
+      if (!s.fitted) { s.camera = fit(); s.auto = true; s.fitted = true; }
+      else if (s.auto && !s.locked) { s.animation = null; s.camera = fit(); }
+      // The figure cap depends on the canvas width (PROMPT §7: fewer figures on phones); re-plan whenever
+      // it (or the DPR-driven backing size) actually changes.
+      replanInhabitants();
       stop(); s.requestFrame();
     };
+
+    /* --- HUD-safe margins: the panels over the canvas, measured on resize (canvas or panel) and when panels
+       mount or unmount --- */
+    const panelObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => onPanelsChanged()) : null;
+    const observed = new Set<Element>();
+    // `.city-shell` is preferred: in the app it is an ancestor of both this canvas (via `.city-view`) and
+    // the HUD/tab-bar panels (via the sibling `.city-shell-hud`), so it is the one root that actually
+    // contains every occluder. `.city-view` alone (the nearer match, e.g. in a standalone render with no
+    // shell) would miss panels that live outside it.
+    const hudRoot = canvas.closest('.city-shell') ?? canvas.closest('.city-view');
+    const queryPanels = () => (hudRoot ? Array.from(hudRoot.querySelectorAll<HTMLElement>(HUD_PANEL_SELECTOR)) : []);
+    /** Observes new panels and stops observing the ones that left the document (no retained detached nodes). */
+    const syncObserved = (panels: readonly Element[]) => {
+      for (const panel of observed) if (!panel.isConnected || !panels.includes(panel)) { observed.delete(panel); panelObserver?.unobserve(panel); }
+      for (const panel of panels) if (!observed.has(panel)) { observed.add(panel); panelObserver?.observe(panel); }
+    };
+    const measureOccluders = () => {
+      const panels = queryPanels();
+      syncObserved(panels);
+      s.occluders = occludersFrom(canvas.getBoundingClientRect(), panels.map(panel => panel.getBoundingClientRect()));
+    };
+    const onPanelsChanged = () => {
+      if (!s.view.width) return;
+      measureOccluders();
+      if (s.auto && !s.locked && !s.animation) s.camera = fit();
+      s.requestFrame();
+    };
+    // A panel that mounts or unmounts without resizing anything (the directory panel, the phone tab bar)
+    // changes the free area too. Only a changed panel set costs a layout read; other DOM churn is one query.
+    const panelMutations = hudRoot && typeof MutationObserver !== 'undefined'
+      ? new MutationObserver(() => {
+        const panels = queryPanels();
+        if (panels.length === observed.size && panels.every(panel => observed.has(panel))) return;
+        onPanelsChanged();
+      })
+      : null;
+    if (hudRoot) panelMutations?.observe(hudRoot, { childList: true, subtree: true });
     const initial = canvas.getBoundingClientRect();
     applySize(initial.width, initial.height);
     const resizeObserver = typeof ResizeObserver !== 'undefined'
@@ -133,7 +233,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
 
     // Label widths are measured once per building; re-measure after the display font finishes loading.
     const fonts = typeof document !== 'undefined' ? (document as Document & { fonts?: FontFaceSet }).fonts : undefined;
-    const onFontsLoaded = () => { s.cache.labels.clear(); s.requestFrame(); };
+    const onFontsLoaded = () => { clearLabelCache(s.cache); s.requestFrame(); };
     fonts?.addEventListener?.('loadingdone', onFontsLoaded);
 
     const onVisibility = () => { s.visible = document.visibilityState !== 'hidden'; if (s.visible) s.requestFrame(); else stop(); };
@@ -146,8 +246,9 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     /* --- pointer: drag to pan, click to select, wheel to zoom --- */
     let drag: { id: number; x: number; y: number; moved: boolean } | null = null;
     // offsetX/Y are relative to the canvas padding edge: no layout read (getBoundingClientRect) per move.
-    const pick = (event: PointerEvent) => hitTest(s.scene.drawOrder, event.offsetX, event.offsetY, s.camera, s.view);
-    const onPointerDown = (event: PointerEvent) => { drag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }; canvas.setPointerCapture?.(event.pointerId); };
+    // A click on a building's label or hover card opens that building, like a click on the building itself.
+    const pick = (event: PointerEvent) => { const labelled = labelAt(s.cache, event.offsetX, event.offsetY); return (labelled ? s.scene.buildings.find(b => b.id === labelled) : undefined) ?? hitTest(s.scene.drawOrder, event.offsetX, event.offsetY, s.camera, s.view); };
+    const onPointerDown = (event: PointerEvent) => { if (s.locked) return; drag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }; canvas.setPointerCapture?.(event.pointerId); };
     const onPointerMove = (event: PointerEvent) => {
       if (drag && drag.id === event.pointerId) {
         const dx = event.clientX - drag.x;
@@ -156,12 +257,13 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
           drag.moved = true; drag.x = event.clientX; drag.y = event.clientY;
           s.dragging = true;
           s.animation = null;
+          s.auto = false;
           s.camera = { ...s.camera, focalX: s.camera.focalX - dx / s.camera.zoom, focalY: s.camera.focalY - dy / s.camera.zoom };
           s.requestFrame();
         }
         return;
       }
-      const hovered = pick(event)?.id ?? null;
+      const hovered = s.locked ? null : pick(event)?.id ?? null;
       if (hovered !== s.hoveredId) { s.hoveredId = hovered; canvas.style.cursor = hovered ? 'pointer' : 'grab'; s.requestFrame(); }
     };
     const onPointerUp = (event: PointerEvent) => {
@@ -170,14 +272,16 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
       drag = null;
       s.dragging = false;
       canvas.releasePointerCapture?.(event.pointerId);
-      if (wasDrag) return;
+      if (wasDrag || s.locked) return;
       const hit = pick(event);
       if (hit) s.onSelect(hit.id);
     };
     const onPointerLeave = () => { if (s.hoveredId) { s.hoveredId = null; s.requestFrame(); } };
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+      if (s.locked) return;
       s.animation = null;
+      s.auto = false;
       s.camera = { ...s.camera, zoom: clampZoom(s.camera.zoom * Math.exp(-event.deltaY * 0.0015)) };
       s.requestFrame();
     };
@@ -188,22 +292,52 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     canvas.addEventListener('pointerleave', onPointerLeave);
     canvas.addEventListener('wheel', onWheel, { passive: false });
 
-    const moveTo = (target: Camera) => {
-      if (s.reducedMotion) { s.animation = null; s.camera = target; }
-      else s.animation = { from: s.camera, to: target, start: performance.now(), duration: CITY_MOTION.diveMs };
+    const animateTo = (target: Camera, duration: number, path: Animation['path']) => {
+      if (s.reducedMotion || duration <= 0) { s.animation = null; s.camera = target; }
+      else s.animation = { from: s.camera, to: target, start: performance.now(), duration, path };
+      s.requestFrame();
+    };
+    const moveTo = (target: Camera, auto = false) => {
+      if (s.locked) return;
+      s.auto = auto;
+      animateTo(target, CITY_MOTION.diveMs, diveCamera);
+    };
+    const saveReturn = () => { if (!s.saved) s.saved = { camera: s.animation?.to ?? s.camera, auto: s.auto }; };
+    const dive = (move: DiveCameraMove) => {
+      switch (move.kind) {
+        case 'focus': saveReturn(); s.locked = true; animateTo(divePointCamera(move.point, FOCUS_ZOOM), move.ms, lerpCamera); break;
+        case 'dive': s.locked = true; animateTo(divePointCamera(move.point, DIVE_ZOOM), move.ms, (from, to, t) => lerpCamera(from, to, t, easeIn)); break;
+        case 'hold': saveReturn(); s.locked = true; s.animation = null; break;
+        case 'cover': saveReturn(); s.locked = true; s.animation = null; if (move.point && !s.reducedMotion) s.camera = divePointCamera(move.point, DIVE_ZOOM); break;
+        case 'return': {
+          const saved = s.saved;
+          s.saved = null;
+          s.locked = false;
+          s.auto = saved?.auto ?? true;
+          animateTo(!saved || saved.auto ? fit() : saved.camera, move.ms, lerpCamera);
+          break;
+        }
+      }
       s.requestFrame();
     };
     controller.current = {
       zoomBy: factor => moveTo({ ...(s.animation?.to ?? s.camera), zoom: clampZoom((s.animation?.to ?? s.camera).zoom * factor) }),
       panBy: (dx, dy) => { const base = s.animation?.to ?? s.camera; moveTo({ ...base, focalX: base.focalX + dx / base.zoom, focalY: base.focalY + dy / base.zoom }); },
-      reset: () => moveTo({ focalX: 0, focalY: -20, zoom: fitZoom(s.scene.outerRadius, s.view) }),
+      reset: () => moveTo(fit(), true),
+      canAnimate: () => s.hasContext && s.view.width > 0 && s.view.height > 0 && s.visible && s.onScreen,
+      dive,
     };
 
     return () => {
       stop();
       s.requestFrame = () => {};
+      s.stop = () => {};
       s.dragging = false;
       resizeObserver?.disconnect();
+      panelObserver?.disconnect();
+      panelMutations?.disconnect();
+      observed.clear();
+      s.hasContext = false;
       dprQuery?.removeEventListener?.('change', onDprChange);
       fonts?.removeEventListener?.('loadingdone', onFontsLoaded);
       intersection?.disconnect();
@@ -223,25 +357,33 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
     const s = state.current;
     const previous = s.scene;
     const sceneChanged = previous !== scene;
-    s.scene = scene; s.filter = filter; s.reducedMotion = reducedMotion;
-    if (sceneChanged) s.cache.labels.clear();
-    // Polling hands us a new rooms array (and scene) often; only a changed footprint re-fits the zoom.
-    if (sceneChanged && !s.selectedId && s.view.width && shouldRefitZoom(previous, scene)) s.camera = { ...s.camera, zoom: fitZoom(scene.outerRadius, s.view) };
+    const inhabitantInputsChanged = sceneChanged || s.agents !== agents || s.activity !== activity;
+    s.scene = scene; s.filter = filter; s.reducedMotion = reducedMotion; s.agents = agents; s.activity = activity;
+    // Measured labels, name tags and cards of the old scene: dropped so removed buildings never pile up.
+    if (sceneChanged) clearLabelCache(s.cache);
+    // Polling hands us a new rooms array (and scene) often; only a changed footprint re-fits the camera
+    // (the whole HUD-safe fit while the user has not moved it, else just the zoom). Never during a dive.
+    if (sceneChanged && !s.locked && s.view.width && shouldRefitZoom(previous, scene)) {
+      s.animation = null;
+      s.camera = s.auto ? hudSafeFit(scene.outerRadius, s.view, s.occluders) : { ...s.camera, zoom: fitZoom(scene.outerRadius, s.view) };
+    }
     if (reducedMotion && s.animation) { s.camera = s.animation.to; s.animation = null; }
+    // A new room list can change where a room building sits (rings reflow), and a fresh agents/activity
+    // fetch can change who is on the roads or which room they are linked to: re-plan (City Shell §6).
+    if (inhabitantInputsChanged) s.replanInhabitants();
     s.requestFrame();
-  }, [scene, filter, reducedMotion]);
+  }, [scene, filter, reducedMotion, agents, activity]);
 
-  // Selection: two-phase dive (glide, then zoom) to the building; instant under reduced motion.
+  useEffect(() => {
+    const s = state.current;
+    s.paused = paused;
+    if (paused) s.stop(); else s.requestFrame();
+  }, [paused]);
+
+  // Selection only highlights; the dive moves the camera through controller.dive.
   useEffect(() => {
     const s = state.current;
     s.selectedId = selectedId;
-    const building = selectedId ? s.scene.buildings.find(item => item.id === selectedId) : null;
-    if (building) {
-      const iso = isoProject(building.x, building.y, building.height / 2);
-      const target: Camera = { focalX: iso.x, focalY: iso.y, zoom: clampZoom(Math.max(s.camera.zoom, 1.15)) };
-      if (s.reducedMotion) { s.animation = null; s.camera = target; }
-      else s.animation = { from: s.camera, to: target, start: performance.now(), duration: CITY_MOTION.diveMs };
-    }
     s.requestFrame();
   }, [selectedId]);
 

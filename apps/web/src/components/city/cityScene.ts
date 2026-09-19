@@ -4,11 +4,12 @@ import { resolveRoomArchetype, type ArchetypeCategory, type ArchetypeColor, type
 /** Minimal room shape the city needs; both participant `Room` and guest `PublicRoom` satisfy it. */
 export interface CityRoomInput { room_id: string; title: string; description?: string | null; message_count?: number; }
 
-export type CityShape = 'library' | 'pantheon' | ArchetypeId;
+export type CityLandmarkKind = 'library' | 'pantheon' | 'praetorium';
+export type CityShape = CityLandmarkKind | ArchetypeId;
 
 export interface CityBuilding {
   id: string;
-  kind: 'library' | 'pantheon' | 'room';
+  kind: CityLandmarkKind | 'room';
   shape: CityShape;
   label: string;
   color: ArchetypeColor;
@@ -34,29 +35,53 @@ export interface CityScene {
   drawOrder: CityBuilding[];
   /** Room buildings only, in input order. */
   roomBuildings: CityBuilding[];
+  /** The Pantheon landmark, looked up once per scene (inhabitants start there; the "+N" floats above it). */
+  pantheon: CityBuilding | null;
   /** Four cardinal avenues to the city edge followed by one avenue per room (same order as roomBuildings). */
   avenues: CityAvenue[];
   /** The per-room subset of `avenues`, used by the decorative road pulses. */
   roomAvenues: CityAvenue[];
   rings: number[];
   forumRadius: number;
+  /** Half side of the square Forum platform (world units); 0 when the scene has no plaza (preview). */
+  plazaHalf: number;
   outerRadius: number;
 }
 
+export interface CitySceneOptions {
+  /** Owner only: adds the Praetorium (entrance to Owner controls). Guests never get it. */
+  includePraetorium?: boolean;
+}
+
 /** Derived scene data shared by buildCityScene and the single-building preview. */
-export function sceneFromBuildings(buildings: CityBuilding[], rings: number[], forumRadius: number, outerRadius: number): CityScene {
+export function sceneFromBuildings(buildings: CityBuilding[], rings: number[], forumRadius: number, outerRadius: number, plazaHalf = 0): CityScene {
   const roomBuildings = buildings.filter(building => building.kind === 'room');
   const edge = outerRadius + 140;
   const cardinal: CityAvenue[] = [0, 1, 2, 3].map(index => { const angle = index * Math.PI / 2 + Math.PI / 4; return { cos: Math.cos(angle), sin: Math.sin(angle), length: edge }; });
   const roomAvenues: CityAvenue[] = roomBuildings.filter(building => building.angle !== null)
     .map(building => ({ cos: Math.cos(building.angle!), sin: Math.sin(building.angle!), length: Math.hypot(building.x, building.y) }));
-  return { buildings, drawOrder: painterSort(buildings), roomBuildings, avenues: [...cardinal, ...roomAvenues], roomAvenues, rings, forumRadius, outerRadius };
+  const pantheon = buildings.find(building => building.kind === 'pantheon') ?? null;
+  return { buildings, drawOrder: painterSort(buildings), roomBuildings, pantheon, avenues: [...cardinal, ...roomAvenues], roomAvenues, rings, forumRadius, plazaHalf, outerRadius };
 }
 
-/** Forum Centralis (PROMPT §3.Б): the Library at y = −80 and the Pantheon at y = +80 so they never overlap on the line of sight. */
-export const LIBRARY_POSITION = { x: 0, y: -80 } as const;
-export const PANTHEON_POSITION = { x: 0, y: 80 } as const;
+/**
+ * Forum Centralis (City Shell §3): the Library and the Pantheon stand side by side on one horizontal line of
+ * the screen. Both sit on x + y = 0, so their isoY is equal, and |isoX| = 250·cos30 ≈ 216.5 (the prototype's
+ * (−135, 75) / (135, −75) rotated onto the screen horizontal). The owner-only Praetorium stands at the front
+ * of the plaza on the screen's vertical axis (isoX = 0), clear of both.
+ */
+export const LIBRARY_POSITION = { x: -125, y: 125 } as const;
+export const PANTHEON_POSITION = { x: 125, y: -125 } as const;
+export const PRAETORIUM_POSITION = { x: 92, y: 92 } as const;
 export const FORUM_RADIUS = 240;
+/** Half side of the square Forum platform; its corners (arches) sit on the screen axes. */
+export const PLAZA_HALF = 200;
+
+export const LANDMARK_NAMES: Record<CityLandmarkKind, string> = {
+  library: 'Central Library',
+  pantheon: 'Pantheon of Agents',
+  praetorium: 'Praetorium',
+};
 
 export const ROOM_HEIGHT: Record<ArchetypeId, number> = {
   lab_observatory: 96, archive_data_vault: 70, crypto_proving_grounds: 62,
@@ -65,12 +90,15 @@ export const ROOM_HEIGHT: Record<ArchetypeId, number> = {
   command_citadel: 88, surveillance_panopticon: 104, logistics_nexus: 52,
 };
 
-export function buildCityScene(rooms: readonly CityRoomInput[]): CityScene {
+export function buildCityScene(rooms: readonly CityRoomInput[], options: CitySceneOptions = {}): CityScene {
   const slots = layoutRings(rooms.length);
   const buildings: CityBuilding[] = [
     { id: 'library', kind: 'library', shape: 'library', label: 'Центральная Библиотека', color: 'indigo', ...LIBRARY_POSITION, size: 56, height: 150, ring: null, angle: null },
     { id: 'pantheon', kind: 'pantheon', shape: 'pantheon', label: 'Пантеон Агентов', color: 'gold', ...PANTHEON_POSITION, size: 58, height: 118, ring: null, angle: null },
   ];
+  if (options.includePraetorium === true) {
+    buildings.push({ id: 'praetorium', kind: 'praetorium', shape: 'praetorium', label: 'Преторий', color: 'amber', ...PRAETORIUM_POSITION, size: 44, height: 100, ring: null, angle: null });
+  }
   rooms.forEach((room, index) => {
     const slot = slots[index];
     const { archetype, description } = resolveRoomArchetype(room);
@@ -94,7 +122,7 @@ export function buildCityScene(rooms: readonly CityRoomInput[]): CityScene {
   const ringCount = ringCountFor(rooms.length);
   // Ring 0 is always drawn as a road, even before the first room exists.
   const rings = Array.from({ length: Math.max(1, ringCount) }, (_, index) => ringSpec(index).radius);
-  return sceneFromBuildings(buildings, rings, FORUM_RADIUS, rings.at(-1)!);
+  return sceneFromBuildings(buildings, rings, FORUM_RADIUS, rings.at(-1)!, PLAZA_HALF);
 }
 
 /** Whether a building passes the HUD category filter; the Forum landmarks are always shown. */

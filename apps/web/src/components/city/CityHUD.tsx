@@ -1,3 +1,4 @@
+import { PHONE_QUERY, useMediaQuery } from '../shell/useMediaQuery';
 import type { CityCameraController } from './CityCanvas';
 import { ROOM_CATEGORIES, type ArchetypeCategory } from './roomArchetypes';
 
@@ -16,28 +17,40 @@ export function CityFilters({ filter, counts, onChange }: { filter: CityFilter; 
   );
 }
 
-/** Online indicator backed by the `presence` field of the agents the viewer can already see elsewhere. */
-export function CityPresence({ agents }: { agents: ReadonlyArray<{ presence: 'online' | 'offline' }> }) {
-  const online = agents.filter(agent => agent.presence === 'online').length;
+/**
+ * Bottom-left legend of the key Forum buildings; each entry opens that building's screen. The Praetorium
+ * entry appears only when the scene has one (signed-in owner), never for a guest.
+ */
+export function CityLegend({ onOpen, praetorium = false }: { onOpen: (buildingId: string) => void; praetorium?: boolean }) {
   return (
-    <p className="city-presence" title="From agent presence reported by the API">
-      <span className={`city-presence-dot${online ? ' online' : ''}`} aria-hidden="true" />
-      {agents.length ? <><strong>{online}</strong> of {agents.length} agents online</> : 'No agents visible'}
-    </p>
+    <div className="hud hud-legend" role="group" aria-label="Key buildings">
+      <button type="button" className="hud-legend-item legend-library" onClick={() => onOpen('library')}><span aria-hidden="true">◈</span>Library</button>
+      <button type="button" className="hud-legend-item legend-pantheon" onClick={() => onOpen('pantheon')}><span aria-hidden="true">⦾</span>Pantheon</button>
+      {praetorium && <button type="button" className="hud-legend-item legend-praetorium" onClick={() => onOpen('praetorium')}><span aria-hidden="true">⛨</span>Praetorium</button>}
+    </div>
   );
 }
 
+/**
+ * Bottom-right camera control: keyboard-accessible alternatives to drag and wheel. Phones (PROMPT §7) get
+ * a compact zoom-only control (drag/pinch cover panning there); the full D-pad stays for desktop and tablet.
+ */
 export function CityCameraControls({ controller }: { controller: { current: CityCameraController | null } }) {
   const act = (fn: (camera: CityCameraController) => void) => () => { if (controller.current) fn(controller.current); };
+  const phone = useMediaQuery(PHONE_QUERY);
   return (
-    <div className="city-camera" role="group" aria-label="Map camera">
-      <button type="button" onClick={act(c => c.zoomBy(1.25))} aria-label="Zoom in">+</button>
-      <button type="button" onClick={act(c => c.reset())} aria-label="Reset view">⊙</button>
-      <button type="button" onClick={act(c => c.zoomBy(0.8))} aria-label="Zoom out">−</button>
-      <button type="button" className="city-pan-up" onClick={act(c => c.panBy(0, -120))} aria-label="Pan up">▲</button>
-      <button type="button" className="city-pan-left" onClick={act(c => c.panBy(-120, 0))} aria-label="Pan left">◀</button>
-      <button type="button" className="city-pan-right" onClick={act(c => c.panBy(120, 0))} aria-label="Pan right">▶</button>
-      <button type="button" className="city-pan-down" onClick={act(c => c.panBy(0, 120))} aria-label="Pan down">▼</button>
+    <div className={`hud city-camera${phone ? ' city-camera-compact' : ''}`} role="group" aria-label="Map camera">
+      {!phone && <>
+        <button type="button" className="city-pan-up" onClick={act(c => c.panBy(0, -120))} aria-label="Pan up">▲</button>
+        <button type="button" className="city-pan-left" onClick={act(c => c.panBy(-120, 0))} aria-label="Pan left">◀</button>
+      </>}
+      <button type="button" className="city-reset" onClick={act(c => c.reset())} aria-label="Reset view">⊙</button>
+      {!phone && <>
+        <button type="button" className="city-pan-right" onClick={act(c => c.panBy(120, 0))} aria-label="Pan right">▶</button>
+        <button type="button" className="city-pan-down" onClick={act(c => c.panBy(0, 120))} aria-label="Pan down">▼</button>
+      </>}
+      <button type="button" className="city-zoom-in" onClick={act(c => c.zoomBy(1.25))} aria-label="Zoom in">+</button>
+      <button type="button" className="city-zoom-out" onClick={act(c => c.zoomBy(0.8))} aria-label="Zoom out">−</button>
     </div>
   );
 }

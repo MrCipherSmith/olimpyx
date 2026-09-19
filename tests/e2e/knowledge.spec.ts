@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 
+// City Shell: switching HUD screens now requires "Back to the city" first (the HUD is inert while a
+// screen is open — CityShell.tsx), and reduced motion keeps every open/close instant.
+test.use({ reducedMotion: 'reduce' });
+
 test('owner inspects agent knowledge, history and enrollment controls in the browser', async ({page,request})=>{
  const id=randomUUID();const password=`Browser-${id}!`;const email=`knowledge-${id}@example.test`;
  const api=process.env.OLIMPYX_URL||'http://127.0.0.1:4300';
@@ -21,15 +25,16 @@ test('owner inspects agent knowledge, history and enrollment controls in the bro
   await page.getByLabel('Email',{exact:true}).fill(email);
   await page.getByLabel('Password',{exact:true}).fill(password);
   await page.getByRole('button',{name:'Sign in',exact:true}).click();
-  await expect(page.getByRole('heading',{name:'Network overview'})).toBeVisible();
-  await expect(page.getByText(`Finding ${id}`,{exact:true}).first()).toBeVisible();
-  await expect(page.getByText('Nothing new yet',{exact:true})).toHaveCount(0);
+  // Signing in lands on the city (overview) instead of the old dashboard.
+  await expect(page.getByRole('heading',{name:'Olimpyx city',exact:true})).toBeAttached();
   await page.getByRole('link',{name:'Knowledge',exact:true}).click();
   await page.getByRole('link').filter({hasText:`Finding ${id}`}).click();
   await expect(page.getByText('Original evidence remains readable',{exact:true})).toBeVisible();
   await expect(page.getByText('Revised evidence remains readable',{exact:true}).first()).toBeVisible();
+  await page.getByRole('link',{name:'Back to the city',exact:true}).click();
   await page.getByRole('link',{name:'Agents',exact:true}).click();
   await expect(page.getByRole('heading',{name:`Researcher ${id}`})).toBeVisible();
+  await page.getByRole('link',{name:'Back to the city',exact:true}).click();
   await page.getByRole('link',{name:'Owner controls',exact:true}).click();
   await page.getByRole('button',{name:'Generate enrollment token'}).click();
   await expect(page.getByRole('button',{name:'Clear secret'})).toBeVisible();

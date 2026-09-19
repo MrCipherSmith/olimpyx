@@ -1,0 +1,223 @@
+import { act, cleanup, render } from '@testing-library/react';
+import { createRef } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CityCanvas, type CityCameraController } from './CityCanvas';
+import { CityView } from './CityView';
+import { DIVE_ZOOM, FOCUS_ZOOM, divePointCamera, hudSafeFit } from './cameraMath';
+import { buildCityScene } from './cityScene';
+import type { RenderFrame } from './cityRenderer';
+import type { InhabitantActivityInput, InhabitantAgentInput, InhabitantOnlineFigure } from './inhabitants';
+
+const frames: Array<RenderFrame & { occluders?: unknown }> = [];
+vi.mock('./cityRenderer', async importOriginal => ({
+  ...(await importOriginal<typeof import('./cityRenderer')>()),
+  renderCity: (_ctx: unknown, frame: RenderFrame) => { frames.push({ ...frame, camera: { ...frame.camera } }); },
+}));
+
+const rooms = [{ room_id: 'r1', title: 'Signal Lab' }];
+const scene = buildCityScene(rooms);
+const CANVAS = { left: 0, top: 0, right: 1440, bottom: 900, width: 1440, height: 900 };
+const PANELS: Record<string, { left: number; top: number; width: number; height: number }> = {
+  'hud-legend': { left: 20, top: 834, width: 240, height: 46 },
+  'hud-directory': { left: 1130, top: 20, width: 290, height: 670 },
+  'city-camera': { left: 1292, top: 710, width: 128, height: 170 },
+  'tab-bar': { left: 0, top: 836, width: 1440, height: 64 },
+  'hud-main': { left: 20, top: 834, width: 240, height: 46 },
+};
+
+let rafCallbacks: FrameRequestCallback[] = [];
+const flush = (at = performance.now() + 10_000) => act(() => { rafCallbacks.splice(0).forEach(callback => callback(at)); });
+const lastCamera = () => frames.at(-1)!.camera;
+
+beforeEach(() => {
+  frames.length = 0;
+  rafCallbacks = [];
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({ setTransform: vi.fn() }) as never);
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { rafCallbacks.push(callback); return rafCallbacks.length; });
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const key = Object.keys(PANELS).find(name => this.classList.contains(name));
+    const box = key ? PANELS[key] : this instanceof HTMLCanvasElement ? CANVAS : { left: 0, top: 0, width: 0, height: 0 };
+    return { ...box, right: box.left + box.width, bottom: box.top + box.height, x: box.left, y: box.top, toJSON: () => ({}) } as DOMRect;
+  });
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+function renderCity() {
+  const camera = createRef<CityCameraController>() as { current: CityCameraController | null };
+  render(<CityView rooms={rooms} scene={scene} camera={camera} mode="participant" onNavigate={vi.fn()} />);
+  flush();
+  return camera.current!;
+}
+
+describe('CityCanvas picking', () => {
+  const tap = (canvas: HTMLCanvasElement, x: number, y: number) => {
+    for (const type of ['pointerdown', 'pointerup']) {
+      const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y });
+      Object.defineProperties(event, { pointerId: { value: 1 }, offsetX: { value: x }, offsetY: { value: y } });
+      act(() => { canvas.dispatchEvent(event); });
+    }
+  };
+
+  it('opens a building when its label is clicked, even away from the building itself', () => {
+    const onNavigate = vi.fn();
+    render(<CityView rooms={rooms} scene={scene} mode="participant" onNavigate={onNavigate} />);
+    flush();
+    const canvas = document.querySelector('canvas')!;
+    tap(canvas, 8, 8); // empty corner: no building, no label
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    const cache = frames.at(-1)!.cache!;
+    const room = scene.buildings.find(building => building.room?.roomId === 'r1')!;
+    cache.placed[0] = { ...cache.placed[0], visible: true, left: 0, top: 0, right: 20, bottom: 20, building: room } as never;
+    cache.placedCount = 1;
+    tap(canvas, 8, 8);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('CityCanvas camera', () => {
+  it('fits the city into the area the HUD panels leave free and hands the panels to the renderer', () => {
+    const camera = renderCity();
+    expect(camera.canAnimate()).toBe(true);
+    const frame = frames.at(-1)!;
+    expect(frame.occluders).toEqual([
+      { left: 20, top: 834, right: 260, bottom: 880 },
+      { left: 1130, top: 20, right: 1420, bottom: 690 },
+      { left: 1292, top: 710, right: 1420, bottom: 880 },
+    ]);
+    expect(frame.camera).toEqual(hudSafeFit(scene.outerRadius, { width: 1440, height: 900 }, frame.occluders as never));
+  });
+
+  it('runs the dive moves, locks user camera input meanwhile, and returns to the previous view', () => {
+    const camera = renderCity();
+    camera.zoomBy(1.25);
+    flush();
+    const before = lastCamera();
+    const point = { x: scene.buildings[0].x, y: scene.buildings[0].y, z: 75 };
+
+    act(() => camera.dive({ kind: 'focus', point, ms: 650 }));
+    camera.panBy(500, 0); // ignored while the dive owns the camera
+    flush();
+    expect(lastCamera()).toEqual(divePointCamera(point, FOCUS_ZOOM));
+    expect(frames.at(-1)!.cameraMoving).toBe(false); // the animation has finished at this timestamp
+
+    act(() => camera.dive({ kind: 'dive', point, ms: 550 }));
+    flush(performance.now() + 275); // half-way: moving, the static layer is bypassed
+    expect(frames.at(-1)!.cameraMoving).toBe(true);
+    expect(lastCamera().zoom).toBeGreaterThan(FOCUS_ZOOM);
+    expect(lastCamera().zoom).toBeLessThan(DIVE_ZOOM);
+    flush();
+    expect(lastCamera()).toEqual(divePointCamera(point, DIVE_ZOOM));
+
+    act(() => camera.dive({ kind: 'return', ms: 650 }));
+    flush();
+    expect(lastCamera()).toEqual(before);
+  });
+
+  it('returns to a fresh HUD-safe fit when the view before the dive was the fit', () => {
+    const camera = renderCity();
+    const fitted = lastCamera();
+    act(() => camera.dive({ kind: 'hold' }));
+    act(() => camera.dive({ kind: 'cover', point: { x: 0, y: 0, z: 0 } }));
+    flush();
+    expect(lastCamera().zoom).toBe(DIVE_ZOOM);
+    act(() => camera.dive({ kind: 'return', ms: 0 }));
+    flush();
+    expect(lastCamera()).toEqual(fitted);
+  });
+});
+
+describe('CityCanvas HUD panels', () => {
+  /** ResizeObserver stand-in recording what is observed, so detached panels can be checked for release. */
+  class RecordingResizeObserver {
+    static instances: RecordingResizeObserver[] = [];
+    observed = new Set<Element>();
+    unobserved: Element[] = [];
+    constructor(public callback: ResizeObserverCallback) { RecordingResizeObserver.instances.push(this); }
+    observe(target: Element) { this.observed.add(target); }
+    unobserve(target: Element) { this.observed.delete(target); this.unobserved.push(target); }
+    disconnect() { this.observed.clear(); }
+  }
+
+  const controller = { current: null as CityCameraController | null };
+  // Nested like the real app (CityShell.tsx): `.city-shell-hud` (hud-main, the phone tab bar) is a
+  // *sibling* of `.city-view` (which wraps the canvas), never an ancestor of it — both hang off
+  // `.city-shell`. A hudRoot resolved from the nearer `.city-view` alone would miss both panels.
+  function Shell({ legend = true, tabBar = true }: { legend?: boolean; tabBar?: boolean }) {
+    return (
+      <div className="city-shell">
+        <div className="city-shell-hud">
+          {legend && <div className="hud hud-main" />}
+          {tabBar && <nav className="tab-bar" />}
+        </div>
+        <section className="city-view">
+          <CityCanvas scene={scene} selectedId={null} filter="all" label="City" reducedMotion={false} controller={controller} onSelect={vi.fn()} />
+        </section>
+      </div>
+    );
+  }
+
+  beforeEach(() => { RecordingResizeObserver.instances = []; vi.stubGlobal('ResizeObserver', RecordingResizeObserver); });
+
+  it('keeps labels and the fit off the phone tab bar although it sits outside .city-view', () => {
+    render(<Shell legend={false} />);
+    flush();
+    expect(frames.at(-1)!.occluders).toEqual([{ left: 0, top: 836, right: 1440, bottom: 900 }]);
+  });
+
+  it('measures hud-main and the tab bar although both sit outside .city-view, and stops observing a HUD panel once it unmounts', async () => {
+    const view = render(<Shell />);
+    flush();
+    const hudMain = document.querySelector('.hud-main')!;
+    const tabBar = document.querySelector('.tab-bar')!;
+    const panelObserver = RecordingResizeObserver.instances.find(observer => observer.observed.has(hudMain))!;
+    expect(panelObserver).toBeDefined();
+    expect(panelObserver.observed.has(tabBar)).toBe(true);
+    expect(frames.at(-1)!.occluders).toEqual([
+      { left: 20, top: 834, right: 260, bottom: 880 },
+      { left: 0, top: 836, right: 1440, bottom: 900 },
+    ]);
+
+    view.rerender(<Shell legend={false} />);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); // MutationObserver delivery
+    flush();
+    expect(panelObserver.unobserved).toContain(hudMain);
+    expect(panelObserver.observed.has(hudMain)).toBe(false);
+    expect(frames.at(-1)!.occluders).toEqual([{ left: 0, top: 836, right: 1440, bottom: 900 }]);
+  });
+});
+
+describe('CityCanvas inhabitants replans', () => {
+  const agents: InhabitantAgentInput[] = [{ agent_id: 'a1', name: 'Athena', presence: 'online' }];
+  const roomScene = buildCityScene([{ room_id: 'r1', title: 'Signal Lab' }, { room_id: 'r2', title: 'Forge' }]);
+  const controller = { current: null as CityCameraController | null };
+  const canvas = (activity: InhabitantActivityInput[]) => (
+    <CityCanvas scene={roomScene} selectedId={null} filter="all" label="City" reducedMotion={false} controller={controller} onSelect={vi.fn()} agents={agents} activity={activity} />
+  );
+  const figure = () => frames.at(-1)!.inhabitants!.figures[0] as InhabitantOnlineFigure;
+
+  it('plans on the frame clock and keeps the anchor when the same activity is polled again', () => {
+    const view = render(canvas([{ agentId: 'a1', roomId: 'r1' }]));
+    flush();
+    const first = figure();
+    // Same clock as the rAF frames (performance.now), not the Unix epoch of Date.now().
+    expect(Math.abs(first.phaseAnchor - performance.now())).toBeLessThan(60_000);
+    view.rerender(canvas([{ agentId: 'a1', roomId: 'r1' }]));
+    flush();
+    expect(figure().phaseAnchor).toBe(first.phaseAnchor);
+    expect(figure().transition).toBeUndefined();
+  });
+
+  it('re-paths only a figure whose linked room changed, gliding from where it was', () => {
+    const view = render(canvas([{ agentId: 'a1', roomId: 'r1' }]));
+    flush();
+    const first = figure();
+    view.rerender(canvas([{ agentId: 'a1', roomId: 'r2' }]));
+    flush();
+    const moved = figure();
+    expect(moved.phaseAnchor).toBe(first.phaseAnchor);
+    expect(moved.to).not.toEqual(first.to);
+    expect(moved.transition).toBeDefined();
+  });
+});

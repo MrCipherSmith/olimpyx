@@ -1,0 +1,1083 @@
+/* =========================================================================
+   CITY SHELL (PROMPT §2, §4, §5): the city canvas fills the viewport, HUD
+   panels float over it and every screen is a full-screen layer on top.
+   There is no document scroll: HUD panels and screen bodies scroll inside.
+   ========================================================================= */
+
+:root {
+  --hud-gap: 20px;
+  --hud-camera-height: 170px;
+  --tab-bar-height: 64px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.city-shell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: var(--bg-base);
+}
+
+.city-shell-main, .city-shell-world {
+  position: absolute;
+  inset: 0;
+}
+
+/* HUD panels: opaque on purpose (no glass). Text contrast must not depend on the canvas behind it, and
+   no backdrop-filter has to be recomputed on every animated frame. */
+.hud {
+  position: absolute;
+  z-index: 20;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  background: var(--bg-panel-solid);
+  box-shadow: var(--shadow-panel);
+}
+
+/* --- Main HUD card (top left) --- */
+
+.city-shell-hud {
+  position: absolute;
+  z-index: 20;
+  top: var(--hud-gap);
+  left: var(--hud-gap);
+}
+
+.hud-main {
+  position: static;
+  display: flex;
+  width: 300px;
+  max-height: calc(100dvh - var(--hud-gap) * 2 - 64px);
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.hud-brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-glass);
+}
+
+.hud-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.hud-brand .brand-mark {
+  font-size: 20px;
+}
+
+.hud-brand-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-xs);
+  background: var(--tint-cyan);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.hud-main .network-status {
+  margin: 0;
+}
+
+.hud-eyebrow {
+  margin: 0;
+}
+
+.hud-note {
+  margin: -6px 0 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.hud-nav {
+  display: grid;
+  gap: 4px;
+}
+
+.hud-link {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+
+.hud-link:hover {
+  border-color: var(--border-glass);
+  background: var(--tint-cyan);
+  color: var(--text-primary);
+}
+
+.hud-link[aria-current="page"] {
+  border-color: var(--border-glow);
+  background: var(--tint-cyan-strong);
+  color: var(--text-primary);
+  box-shadow: var(--glow-cyan);
+}
+
+.hud-link-icon {
+  width: 18px;
+  color: var(--color-cyan);
+  font-size: 15px;
+  text-align: center;
+}
+
+.hud-link-label {
+  flex: 1;
+}
+
+.hud-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.hud-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.hud-stats div {
+  display: flex;
+  gap: 5px;
+}
+
+.hud-stats dt {
+  color: var(--text-muted);
+}
+
+.hud-stats dd {
+  margin: 0;
+  color: var(--color-cyan);
+  font-weight: 700;
+}
+
+.hud-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-glass);
+}
+
+.hud-account > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.hud-account strong, .hud-account small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-account strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.hud-account small {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.hud-account .icon-button {
+  margin-left: 0;
+}
+
+.hud-alert {
+  top: var(--hud-gap);
+  left: 50%;
+  width: min(420px, calc(100% - 2 * var(--hud-gap)));
+  padding: 4px 12px;
+  transform: translateX(-50%);
+}
+
+/* --- Screen layers --- */
+
+.screen-layer {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  background: var(--bg-app);
+  animation: screen-in var(--motion-base) var(--ease-out);
+}
+
+@keyframes screen-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.screen-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  padding: 12px clamp(16px, 2.5vw, 28px);
+  border-bottom: 1px solid var(--border-glass);
+  background: var(--bg-panel-solid);
+}
+
+.screen-back {
+  display: inline-flex;
+  flex: none;
+  min-height: 40px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.screen-back:hover {
+  border-color: var(--color-cyan);
+  background: var(--tint-cyan-strong);
+  color: var(--text-primary);
+}
+
+.screen-title-block {
+  min-width: 0;
+  flex: 1;
+  padding-left: 16px;
+  border-left: 1px solid var(--border-glass);
+}
+
+.screen-title-block .eyebrow {
+  margin-bottom: 2px;
+}
+
+.screen-title-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.screen-title-row h1 {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: clamp(18px, 1.8vw, 22px);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+/* The heading receives focus programmatically; show the ring for keyboard users only. */
+.screen-title-row h1:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.screen-subline .room-description {
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* Phone room header (PROMPT §7): the description collapses behind a disclosure so the header stays
+   compact and the message history clears the 55%-of-viewport contract. Expanded text is shown in full. */
+.room-description-details summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.room-description-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.room-description-details summary::before {
+  content: '▸ ';
+}
+
+.room-description-details[open] summary::before {
+  content: '▾ ';
+}
+
+.screen-subline .room-description-details .room-description {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: initial;
+}
+
+.screen-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.screen-actions a.secondary {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.screen-body {
+  min-height: 0;
+  flex: 1;
+  padding: clamp(16px, 2.5vw, 28px) max(clamp(16px, 2.5vw, 28px), calc((100% - 1400px) / 2));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Room header badges: archetype colour, online agents from presence, access. */
+.archetype-badge {
+  --accent: var(--color-cyan);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.screen-online {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.screen-online i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-slate);
+}
+
+.screen-online.online {
+  color: var(--color-emerald);
+}
+
+.screen-online.online i {
+  background: var(--color-emerald);
+  box-shadow: 0 0 6px var(--color-emerald);
+}
+
+/* Room directory: the list uses the whole screen width. */
+.room-directory .section-heading {
+  align-items: center;
+}
+
+.room-directory .section-heading .eyebrow {
+  margin: 0;
+}
+
+.room-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+/* Room: the feed fills the layer and scrolls inside .message-list; the composer stays put. */
+.screen-room .screen-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.screen-room .conversation {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.screen-room .message-list {
+  min-height: 0;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+.screen-room .composer, .screen-room .conversation > .permission-note {
+  flex: none;
+}
+
+.screen-room .conversation > .permission-note {
+  margin-bottom: 0;
+}
+
+.screen-room .composer textarea {
+  max-height: 18dvh;
+}
+
+/* =========================================================================
+   ≤ 900px shared: tablets (601–900) and phones (≤ 600) both keep the city
+   full-bleed behind floating HUD panels (PROMPT §7) — only the desktop's
+   ≤ 900px stacked-page fallback goes away. Screen-layer polish (compact
+   header/body) applies at both widths; the HUD/nav split is width-specific
+   below.
+   ========================================================================= */
+
+@media (max-width: 900px) {
+  :root {
+    --hud-gap: 12px;
+  }
+
+  .screen-header {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .screen-title-block {
+    flex-basis: 100%;
+    order: 3;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .screen-body {
+    padding: 12px;
+  }
+
+  .screen-room .screen-body {
+    padding: 8px;
+  }
+
+  .screen-room .conversation {
+    padding: 12px;
+  }
+
+  /* Building directory collapsed by default (state, in CityView): keep it compact here too. */
+  .hud-directory {
+    width: 240px;
+  }
+}
+
+/* =========================================================================
+   Tablets (601–900px, PROMPT §7): the same floating HUD as desktop, made
+   compact so panels never overlap each other or each other's reachable
+   controls, and the network badge can no longer push the nav out of view
+   (the PR #21 regression this fixes).
+   ========================================================================= */
+
+@media (min-width: 601px) and (max-width: 900px) {
+  .hud-main {
+    width: 232px;
+    max-height: calc(100dvh - var(--hud-gap) * 2 - 48px);
+    padding: 10px;
+    gap: 8px;
+  }
+
+  /* The brand row wraps to two lines rather than squeezing the nav out of the card's max-height. */
+  .hud-brand-row {
+    flex-wrap: wrap;
+    padding-bottom: 8px;
+  }
+
+  .hud-stats {
+    display: none;
+  }
+
+  .hud-link {
+    min-height: 36px;
+    padding: 5px 8px;
+  }
+
+  .city-camera {
+    grid-template-columns: repeat(3, 32px);
+    grid-template-rows: repeat(3, 32px) 28px;
+  }
+
+  /* Centered-on-viewport, the guest "Refresh failed" banner reaches under the (top-right) building
+     directory at this width; keep it in the gap between the two top panels instead. At the narrow end of
+     this range (601px) that gap itself is only ~81px wide — too narrow to read — so floor it with max():
+     the banner then briefly overlaps the (lower-priority, likely-empty) building directory instead of
+     collapsing to a sliver. */
+  .hud-alert {
+    left: calc(var(--hud-gap) * 3 + 232px);
+    max-width: max(220px, calc(100vw - (var(--hud-gap) * 4) - 232px - 240px));
+    transform: none;
+  }
+}
+
+/* =========================================================================
+   Phones (≤ 600px, PROMPT §7): a compact top bar (brand + network + account)
+   replaces the HUD card; navigation moves to a bottom tab bar; the legend is
+   dropped; the camera control loses its D-pad; the building directory
+   becomes a reachable sheet above the tab bar. The city itself stays full
+   screen behind all of it.
+   ========================================================================= */
+
+@media (max-width: 600px) {
+  :root {
+    /* .city-camera-compact's rendered footprint (padding 8px + a single 40px row/column, see below): used
+       to stack the building directory sheet above it instead of overlapping (both sit above the tab bar). */
+    --camera-compact-height: 56px;
+    /* The compact top bar (.hud-main below) wraps to two rows at this width — brand row, then account row
+       — not the single ~56px row a fixed offset would assume: padding (8+8) + brand row (~24) + gap (8) +
+       account row (a .secondary.compact button, min-height 38) ≈ 86px, measured at 85px in practice.
+       Kept as a variable (rather than a literal in .hud-alert) so it reads as a deliberate, named quantity;
+       it still isn't a live measurement, so a content/font change that grows either row can drift it stale
+       again — see the note where it is used below. */
+    --phone-topbar-height: 88px;
+  }
+
+  .city-shell-hud {
+    top: 0;
+    right: 0;
+    left: 0;
+    padding: 0;
+  }
+
+  /* The guest "Refresh failed" banner floats independently of the HUD; keep it below the compact top
+     bar instead of over the brand/account controls. The old fixed 56px assumed a single-row top bar, but
+     it wraps to two (~90px) at this width, so the banner sat under the account row instead of below it;
+     --phone-topbar-height (above) tracks the two-row height instead. A future fix that measures the top
+     bar's actual rendered height (e.g. a ResizeObserver on .hud-main setting this variable inline) would
+     make this robust to content/locale/font-size changes that a fixed number can't anticipate. */
+  .hud-alert {
+    top: calc(var(--phone-topbar-height) + env(safe-area-inset-top) + var(--hud-gap));
+  }
+
+  /* Room screen (PROMPT §7): a compact header and composer so the message history clears the
+     55%-of-viewport contract at 390×700 and 320×568. */
+  .screen-header {
+    padding: 4px 10px;
+    gap: 6px;
+  }
+
+  /* "Room" / "Forum · …" — the tab bar and title already say where we are. */
+  .screen-title-block .eyebrow {
+    display: none;
+  }
+
+  .screen-title-row {
+    gap: 4px 8px;
+  }
+
+  /* Room screen only (PROMPT §7/§8): the title stays a single line (ellipsis instead of wrapping to
+     2–3 lines) and the network-presence line and archetype label text are dropped — together these are
+     what let the message history clear 60% of the viewport at 320×568 and 390×700 even with a long room
+     title. Back + actions keep their own row (the ≤900px rule above already gives the title its own full
+     -width row below them); the badge/presence markup itself is unchanged (RoomHeader.tsx) — this is a
+     phone-only visual fold, not a data loss, and the archetype badge keeps its accessible name via
+     aria-label (see RoomHeader.tsx) after its text is hidden here. Other screens (Rooms, Library,
+     Pantheon, Praetorium) keep the same layout — their titles are short and fixed, so there is nothing to
+     reclaim there. */
+  .screen-room .screen-title-row {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .screen-room .screen-title-row h1 {
+    overflow: hidden;
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  /* Network presence ("N of M agents online in the network") stays on tablet/desktop; on a phone the
+     room header only has room for the essentials, and this is derived, network-wide information rather
+     than something specific to the room. */
+  .screen-room .screen-online {
+    display: none;
+  }
+
+  .screen-room .archetype-badge {
+    flex: none;
+    padding: 3px 6px;
+  }
+
+  /* Icon-only archetype badge; RoomHeader.tsx gives the badge an aria-label with the full name so the
+     accessible name survives even though the visible text is hidden here. */
+  .screen-room .archetype-badge-label {
+    display: none;
+  }
+
+  .screen-room .public-badge {
+    flex: none;
+  }
+
+  .screen-room .screen-subline {
+    margin-top: 2px;
+  }
+
+  .room-description-details summary {
+    padding: 1px 0;
+  }
+
+  /* The room screen's own header row (back + actions) is squeezed a little further than the shared
+     ≤900px header: min-height 40px (base .screen-back / button sizing, styles.css) is comfortably above
+     the 24px WCAG 2.5.5 AA floor, so 36px still clears it with margin while buying back a few more px of
+     history. Scoped to the room screen only — every other phone header keeps the standard sizing. */
+  .screen-room .screen-header {
+    gap: 4px;
+    padding: 3px 10px;
+  }
+
+  .screen-room .screen-back {
+    min-height: 36px;
+    padding: 5px 10px;
+  }
+
+  /* "All rooms" collapses to an icon-only compact button rather than disappearing. It duplicates the tab
+     bar's Rooms tab, but the tab bar is covered and inert while this screen is open (CityShell.tsx) — only
+     "Back to the city" reaches it — so this stays the one-tap way back to the room list. Verified to keep
+     Back + All rooms + Refresh on one row and clear the 55%-of-viewport history contract at 320×568.
+     The label text stays in the DOM (its accessible name — RouteLink renders a plain <a>text</a>, with no
+     span to move a .visually-hidden class onto) but is pushed out of the clipped box with text-indent
+     instead of `font-size: 0`: Chromium drops a text run with a computed font-size of 0 from the
+     accessible-name computation entirely, which silently turns this into an unlabelled button. The ::before
+     icon is taken out of flow so the parent's text-indent doesn't push it off too. */
+  .screen-room .screen-actions a {
+    position: relative;
+    width: 38px;
+    min-width: 38px;
+    height: 38px;
+    padding: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-indent: -999px;
+  }
+
+  .screen-room .screen-actions a::before {
+    /* Fallback for browsers that don't parse the `/ ''` alt-text syntax below: without it, the whole
+       `content` declaration is invalid and dropped, leaving this ::before with no glyph at all. A browser
+       that does support alt text overrides this with the next declaration. */
+    content: '#';
+    /* The `/ ''` alt text stops this generated glyph from also joining the accessible name (which would
+       otherwise read "# All rooms"): the plain "All rooms" text (still in the DOM, see above) is enough. */
+    content: '#' / '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    font-size: 15px;
+    line-height: 1;
+    transform: translate(-50%, -50%);
+  }
+
+  /* A guest's room-screen "Sign in" stays dropped: the compact top bar's own account controls are hidden
+     too (see .hud-account > div below), so, unlike "All rooms", there is no icon-sized affordance to give
+     it here. It is still one tap away via "Back to the city" → the compact top bar's "Sign in" button. */
+  .screen-room .screen-signin {
+    display: none;
+  }
+
+  .screen-room .composer {
+    padding-top: 2px;
+  }
+
+  /* Shorter than the sitewide 44px-min textarea (styles.css): the composer's own `rows={2}` (Composer.tsx)
+     otherwise costs ~60px here, which is the difference between clearing 60% of the viewport at 320×568
+     and not. `resize: vertical` (styles.css) is unchanged, so anyone who wants more room can still drag it
+     open; the shrink is a phone-only default, not a cap. */
+  .screen-room .composer textarea {
+    height: 44px;
+    padding: 8px 10px;
+  }
+
+  .screen-room .composer .primary.compact {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  /* The hint ("Visible to registered participants") is dropped so Send message stays on the textarea's
+     row instead of stacking under it — the sitewide ≤ 560px composer rule below is for the narrower
+     sidebar contexts (auth, modals), not this full-screen room layer. */
+  .screen-room .composer small {
+    display: none;
+  }
+
+  .screen-room .composer > div {
+    margin-top: 4px;
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+
+  .screen-room .composer > div .primary {
+    width: auto;
+    min-width: 130px;
+  }
+
+  .hud-main {
+    width: auto;
+    max-height: none;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: max(8px, env(safe-area-inset-top)) 12px 8px;
+    border-radius: 0;
+    border-width: 0 0 1px;
+  }
+
+  /* Its own full-width row: at phone widths there is not enough room for the brand, the real network
+     status and the account controls on one line without the status text overlapping them. */
+  .hud-brand-row {
+    flex: 1 1 100%;
+    min-width: 0;
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+
+  /* No legend, no stats, no eyebrow/note copy, no HUD nav list: the tab bar is the one primary nav. */
+  .hud-eyebrow, .hud-note, .hud-stats, .hud-nav {
+    display: none;
+  }
+
+  .hud-account {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .hud-account > div {
+    display: none;
+  }
+
+  /* --- Bottom tab bar: the phone's one primary nav (PROMPT §7) --- */
+
+  .tab-bar {
+    position: fixed;
+    z-index: 25;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    height: var(--tab-bar-height);
+    padding: 4px max(4px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(4px, env(safe-area-inset-left));
+    border-top: 1px solid var(--border-glass);
+    background: var(--bg-panel-solid);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .tab-bar-item {
+    display: flex;
+    min-width: 44px;
+    min-height: 44px;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .tab-bar-icon {
+    color: var(--color-cyan);
+    font-size: 18px;
+  }
+
+  .tab-bar-item[aria-current="page"] {
+    background: var(--tint-cyan-strong);
+    box-shadow: var(--glow-cyan);
+    color: var(--text-primary);
+  }
+
+  /* --- Compact camera: zoom and reset only, drag/pinch cover panning --- */
+
+  .city-camera-compact {
+    grid-template-columns: repeat(3, 40px);
+    grid-template-rows: 40px;
+  }
+
+  .city-camera-compact button {
+    min-height: 40px;
+  }
+
+  .city-camera-compact .city-zoom-in { grid-column: 1; grid-row: 1; }
+  .city-camera-compact .city-reset { grid-column: 2; grid-row: 1; }
+  .city-camera-compact .city-zoom-out { grid-column: 3; grid-row: 1; }
+
+  /* --- Building directory: a reachable sheet above the tab bar, collapsed by default --- */
+
+  /* Stacked above the compact camera (not beside it): both anchor to the same bottom-right strip above
+     the tab bar, and the sheet spans the full width, so sharing that strip would overlap the camera at
+     390 and 320px. */
+  .hud-directory-sheet {
+    top: auto;
+    right: 8px;
+    bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--camera-compact-height) + var(--hud-gap) + 8px);
+    left: 8px;
+    width: auto;
+    max-height: 50dvh;
+  }
+
+  /* Leave room so the directory sheet and the camera control clear the tab bar. */
+  .city-camera {
+    bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--hud-gap));
+  }
+
+  /* The conversation's own padding is on top of the header/composer budget; keep it tight so the
+     55%-of-viewport history contract holds at 320×568 too. */
+  .screen-room .conversation {
+    padding: 6px;
+  }
+}
+
+@media (max-width: 560px) {
+  .screen-actions {
+    flex: 1;
+  }
+
+  .room-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Small phones (PROMPT §7, 320×568): the access badge is the least essential of the three room badges —
+   drop it so the title row wraps to one fewer line and the header stays short enough for the message
+   history to still clear 55% of the viewport. */
+@media (max-width: 360px) {
+  .screen-room .screen-title-row .public-badge {
+    display: none;
+  }
+}
+
+/* =========================================================================
+   DIVE / BACK TRANSITION (PROMPT §4): target lock while the camera focuses,
+   then the full-screen packet-dive overlay over the city and the screen.
+   Both are decorative (aria-hidden); the overlay blocks input only while shown.
+   ========================================================================= */
+
+.dive-overlay {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at center, color-mix(in srgb, var(--color-cyan) 25%, transparent) 0%, color-mix(in srgb, var(--bg-base) 98%, transparent) 75%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dive-overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dive-overlay-label {
+  text-align: center;
+  opacity: 0;
+  transform: scale(0.75);
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+.dive-overlay-label.shown {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.dive-overlay-label p {
+  margin: 0;
+}
+
+.dive-overlay-kicker {
+  margin-bottom: 4px;
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.dive-overlay-name {
+  max-width: min(720px, calc(100vw - 32px));
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: clamp(20px, 2.4vw, 26px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dive-overlay-sub {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Target lock: centred on the canvas, where the focusing camera puts the building. */
+.target-lock {
+  position: absolute;
+  z-index: 15;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: target-lock-in 350ms cubic-bezier(0.15, 0.85, 0.2, 1) both;
+}
+
+.target-lock-frame {
+  position: relative;
+  display: grid;
+  width: 112px;
+  height: 112px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--color-cyan) 45%, transparent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--glow-cyan);
+}
+
+.target-lock-frame i {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-color: var(--color-cyan);
+  border-style: solid;
+  border-width: 0;
+}
+
+.target-lock-frame i:nth-child(1) { top: -6px; left: -6px; border-top-width: 2px; border-left-width: 2px; }
+.target-lock-frame i:nth-child(2) { top: -6px; right: -6px; border-top-width: 2px; border-right-width: 2px; }
+.target-lock-frame i:nth-child(3) { bottom: -6px; left: -6px; border-bottom-width: 2px; border-left-width: 2px; }
+.target-lock-frame i:nth-child(4) { right: -6px; bottom: -6px; border-right-width: 2px; border-bottom-width: 2px; }
+
+.target-lock-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-cyan);
+}
+
+.target-lock-text {
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  padding: 6px 12px;
+  overflow: hidden;
+  border: 1px solid var(--color-cyan);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-solid);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+@keyframes target-lock-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(1.6) rotate(-45deg); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0deg); }
+}
+
+/* The city comes back with a short fade whenever a screen closes (instant close under reduced motion). */
+.city-shell:not(.screen-open) .city-shell-world {
+  animation: city-return 160ms ease-out;
+}
+
+@keyframes city-return {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+
+/* Reduced motion: no camera animation, no lock animation; screens still open and close with a short
+   opacity fade (the motion tokens are 0ms there, so it is set explicitly). */
+@media (prefers-reduced-motion: reduce) {
+  /* The sitewide reduced-motion rule (styles.css) sets every transition/animation duration to 0.01ms with
+     !important, which would otherwise beat these (unqualified, later) overrides regardless of source order
+     and collapse this short fade to nothing; match it with !important so the screen/overlay keep their
+     120ms fade instead of the sitewide near-instant cut. */
+  .screen-layer {
+    animation-duration: 120ms !important;
+  }
+
+  .target-lock {
+    animation: none;
+  }
+
+  .dive-overlay, .dive-overlay-label {
+    transition-duration: 120ms !important;
+  }
+}
