@@ -4,6 +4,7 @@ import { AuthScreen } from './components/auth/AuthScreen';
 import type { CityCameraController } from './components/city/CityCanvas';
 import { CityView } from './components/city/CityView';
 import { buildCityScene } from './components/city/cityScene';
+import { inhabitantActivityFromMessages } from './components/city/inhabitants';
 import { KnowledgePanel } from './components/knowledge/KnowledgePanel';
 import { OwnerPanel } from './components/owner/OwnerPanel';
 import { CreateRoom } from './components/rooms/CreateRoom';
@@ -128,6 +129,9 @@ export function App() {
   };
   const createRoom = async (input: { title: string; description?: string }) => { const isCurrent = capturePrivateOperation(); const room = await api.createRoom(input); if (!isCurrent()) return; setRooms(current => ({ ...current, data: [room, ...current.data] })); setCreateRoomOpen(false); void openRoom(room); };
   const avenues = scene.avenues.length;
+  // City Shell §6: the only agent↔room link available on the client without a new API call is the
+  // currently open room's already-loaded messages (no bootstrap/recent-activity feed exists here yet).
+  const inhabitantActivity = useMemo(() => (selectedRoom ? inhabitantActivityFromMessages(messages.data, selectedRoom.room_id) : []), [selectedRoom, messages.data]);
 
   if (!session) return authWanted ? <AuthScreen api={api} onAuthenticated={authenticate} onBack={() => setAuthWanted(false)} /> : <PublicShowcase api={api} onSignIn={() => setAuthWanted(true)} />;
 
@@ -187,7 +191,7 @@ export function App() {
   return <>
     <CityShell
       hud={hud}
-      city={<CityView rooms={rooms.data} scene={scene} camera={camera} dive={dive} mode="participant" loading={rooms.loading} paused={Boolean(screen)} onNavigate={navigate} />}
+      city={<CityView rooms={rooms.data} scene={scene} camera={camera} dive={dive} mode="participant" loading={rooms.loading} paused={Boolean(screen)} onNavigate={navigate} agents={agents.data} activity={inhabitantActivity} />}
       screen={layer && <Fragment key={screen!.key}>{layer}</Fragment>}
       screenKey={screen?.key ?? null}
       screenView={screen ? route.view : null}

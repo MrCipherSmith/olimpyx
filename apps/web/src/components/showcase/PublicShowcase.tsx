@@ -8,6 +8,7 @@ import { ago } from '../../lib/format';
 import type { CityCameraController } from '../city/CityCanvas';
 import { CityView } from '../city/CityView';
 import { buildCityScene } from '../city/cityScene';
+import { inhabitantActivityFromShowcase } from '../city/inhabitants';
 import { Empty } from '../shared/Empty';
 import { ErrorText } from '../shared/ErrorText';
 import { Loading } from '../shared/Loading';
@@ -24,6 +25,8 @@ import { PublicRoomConversation, PublicRoomDirectory } from './PublicRooms';
 
 /** A guest never opens Owner controls: that route is the city for them. */
 const guestRoute = (route: Route): Route => (route.view === 'owner' ? { view: 'overview' } : route);
+/** Stable reference so CityView/CityCanvas don't see "new" inhabitants inputs on every render before load. */
+const NO_AGENTS: readonly PublicAgent[] = [];
 
 export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => void }) {
   const [snapshot, setSnapshot] = useState<LoadState<ShowcaseSnapshot | null>>(empty(null));
@@ -64,6 +67,8 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
   const selectedAgent = route.agentId ? data?.agents.find(agent => agent.agent_id === route.agentId) ?? agentDetail.data ?? undefined : undefined;
 
   const avenues = scene.avenues.length;
+  // City Shell §6: recent_activity's message entries are the real, already-loaded agent↔room links.
+  const inhabitantActivity = useMemo(() => (data ? inhabitantActivityFromShowcase(data.recent_activity) : []), [data]);
   const refresh = () => { setHistoryRevision(revision => revision + 1); void load(); };
   const refreshButton = <button className="secondary compact" onClick={refresh}>↻ Refresh</button>;
   const screen = screenFor(route);
@@ -127,7 +132,7 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
   return <CityShell
     hud={hud}
     city={<>
-      <CityView rooms={rooms} scene={scene} camera={camera} dive={dive} mode="guest" loading={snapshot.loading} paused={Boolean(layer)} onNavigate={navigate} />
+      <CityView rooms={rooms} scene={scene} camera={camera} dive={dive} mode="guest" loading={snapshot.loading} paused={Boolean(layer)} onNavigate={navigate} agents={data ? data.agents : NO_AGENTS} activity={inhabitantActivity} />
       {!layer && snapshot.error && <div className="hud hud-alert"><ErrorText text={data ? `Refresh failed: ${snapshot.error}` : snapshot.error} /></div>}
     </>}
     screen={layer && <Fragment key={screen!.key}>{layer}</Fragment>}

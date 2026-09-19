@@ -5,6 +5,7 @@ import { worldToScreen } from './isometricMath';
 import { painterSort } from './isometricMath';
 import type { CityPalette } from './cityTokens';
 import { shouldSkipFrame, DECORATIVE_FRAME_MS } from './cityLoop';
+import { planInhabitants } from './inhabitants';
 
 describe('truncateLabel', () => {
   it('collapses whitespace and keeps short labels as is', () => {
@@ -328,5 +329,108 @@ describe('Praetorium rendering', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('inhabitants (agents on the roads, City Shell §6)', () => {
+  const scene = buildCityScene([{ room_id: 'rom_a', title: 'Room A' }]);
+  const view = { width: 800, height: 500 };
+  const camera = { focalX: 0, focalY: 0, zoom: 0.6 };
+  const palette = { ground: '#000', cyan: '#0ff', textMuted: '#888', text: '#fff', panel: '#111', gold: '#fa0' } as CityPalette;
+
+  it('draws a glyph and a real name tag for online and offline agents, without shadowBlur', () => {
+    const assigned = new Set<string>();
+    const calls: Record<string, number> = {};
+    const layerCalls: Record<string, number> = {};
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx(layerCalls, [], assigned) as never);
+    try {
+      const texts: string[] = [];
+      const ctx = recordingCtx(calls, texts, assigned);
+      const cache = createRenderCache();
+      const inhabitants = planInhabitants(
+        [{ agent_id: 'a1', name: 'Athena', presence: 'online' }, { agent_id: 'a2', name: 'Boreas', presence: 'offline' }],
+        [], scene, 0,
+      );
+      renderCity(ctx, { scene, camera, view, palette, time: 0, animate: false, hoveredId: null, selectedId: null, filter: 'all', particles: 0, dpr: 1, cache, inhabitants });
+      expect(assigned.has('shadowBlur')).toBe(false);
+      expect(texts).toContain('Athena');
+      expect(texts).toContain('Boreas');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('never invents a metric: no figures are drawn without a plan, and nothing crashes when the frame omits `inhabitants`', () => {
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx({}) as never);
+    try {
+      const ctx = recordingCtx({});
+      const cache = createRenderCache();
+      expect(() => renderCity(ctx, { scene, camera, view, palette, time: 0, animate: false, hoveredId: null, selectedId: null, filter: 'all', particles: 0, dpr: 1, cache })).not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('shows a single "+N" near the Pantheon for real agents beyond the cap, never a per-agent count', () => {
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx({}) as never);
+    try {
+      const texts: string[] = [];
+      const ctx = recordingCtx({}, texts);
+      const cache = createRenderCache();
+      const agents = Array.from({ length: 45 }, (_, index) => ({ agent_id: `a${String(index).padStart(2, '0')}`, name: `Agent ${index}`, presence: 'online' as const }));
+      const inhabitants = planInhabitants(agents, [], scene, 0);
+      expect(inhabitants.overflow).toBe(5);
+      renderCity(ctx, { scene, camera, view, palette, time: 0, animate: false, hoveredId: null, selectedId: null, filter: 'all', particles: 0, dpr: 1, cache, inhabitants });
+      expect(texts).toContain('+5');
+      expect(texts.filter(text => text === '+5')).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('culls a figure far outside the viewport instead of drawing it off-screen', () => {
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx({}) as never);
+    try {
+      const texts: string[] = [];
+      const ctx = recordingCtx({}, texts);
+      const cache = createRenderCache();
+      // No activity: the online agent wanders Pantheon <-> forum, both near world (0, 0)-(125, -125) — a
+      // camera panned thousands of units away leaves it, and its label, off-screen.
+      const inhabitants = planInhabitants([{ agent_id: 'a1', name: 'Athena', presence: 'online' }], [], scene, 0);
+      renderCity(ctx, { scene, camera: { focalX: 20000, focalY: 20000, zoom: 1 }, view, palette, time: 0, animate: false, hoveredId: null, selectedId: null, filter: 'all', particles: 0, dpr: 1, cache, inhabitants });
+      expect(texts).not.toContain('Athena');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps a figure static across frames when the clock is frozen (reduced motion)', () => {
+    const inhabitants = planInhabitants([{ agent_id: 'a1', name: 'Athena', presence: 'online' }], [], scene, 0);
+    /** Renders one frame at `time` into its own recording context and returns the figure's glyph
+     * position: the last arc() call (inhabitants draw last, after every building shape). */
+    const glyphAt = (time: number) => {
+      const positions: Array<{ x: number; y: number }> = [];
+      const gradient = { addColorStop: vi.fn() };
+      const layerSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx({}) as never);
+      const ctx = new Proxy({
+        measureText: () => ({ width: 40 }),
+        createRadialGradient: () => gradient, createLinearGradient: () => gradient,
+        arc: (x: number, y: number) => { positions.push({ x, y }); },
+      } as Record<string, unknown>, {
+        get: (target, prop: string) => (prop in target ? target[prop] : () => {}),
+        set: () => true,
+      }) as unknown as CanvasRenderingContext2D;
+      try {
+        renderCity(ctx, { scene, camera, view, palette, time, animate: false, hoveredId: null, selectedId: null, filter: 'all', particles: 0, dpr: 1, cache: createRenderCache(), inhabitants });
+      } finally {
+        layerSpy.mockRestore();
+      }
+      expect(positions.length).toBeGreaterThan(0);
+      return positions.at(-1);
+    };
+    const frozenTime = 4000; // reduced motion: the caller freezes frame.time instead of advancing it
+    expect(glyphAt(frozenTime)).toEqual(glyphAt(frozenTime));
+    // Cross-check: the figure does move once the clock actually advances.
+    expect(glyphAt(frozenTime + 5000)).not.toEqual(glyphAt(frozenTime));
   });
 });

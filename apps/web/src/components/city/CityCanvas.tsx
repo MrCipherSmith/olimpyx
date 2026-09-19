@@ -5,7 +5,16 @@ import { createRenderCache, labelAt, renderCity } from './cityRenderer';
 import { shouldSkipFrame } from './cityLoop';
 import type { CityScene } from './cityScene';
 import { CITY_MOTION, resolveCityPalette, type CityPalette } from './cityTokens';
+import { DEFAULT_INHABITANT_CAP, planInhabitants, type InhabitantActivityInput, type InhabitantAgentInput, type InhabitantPlan } from './inhabitants';
 import type { ArchetypeCategory } from './roomArchetypes';
+
+/** Stable empty defaults (City Shell §6): a caller that has no agents/activity yet never retriggers the
+ * inhabitants effect just because a fresh `[]` literal was passed in. */
+const EMPTY_AGENTS: readonly InhabitantAgentInput[] = [];
+const EMPTY_ACTIVITY: readonly InhabitantActivityInput[] = [];
+/** Below this canvas width, fewer figures walk the roads (same threshold as the decorative particle count). */
+const SMALL_SCREEN_WIDTH = 600;
+const SMALL_SCREEN_INHABITANT_CAP = 12;
 
 /** Imperative camera controls used by the HUD buttons (keyboard-accessible alternatives to drag/wheel). */
 export interface CityCameraController {
@@ -32,6 +41,10 @@ interface CityCanvasProps {
   paused?: boolean;
   controller: MutableRefObject<CityCameraController | null>;
   onSelect: (id: string) => void;
+  /** Real agents to walk the roads (City Shell §6); omitted draws none. */
+  agents?: readonly InhabitantAgentInput[];
+  /** Real, already-loaded agent↔room links (recent activity, relationships or loaded messages). */
+  activity?: readonly InhabitantActivityInput[];
 }
 
 const MAX_DPR = 2;
@@ -44,10 +57,11 @@ interface Animation { from: Camera; to: Camera; start: number; duration: number;
  * document is visible and the canvas intersects the viewport; with reduced motion frames are drawn on demand
  * and camera moves are instant. Everything is cancelled and unsubscribed on unmount.
  */
-export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, paused = false, controller, onSelect }: CityCanvasProps) {
+export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, paused = false, controller, onSelect, agents = EMPTY_AGENTS, activity = EMPTY_ACTIVITY }: CityCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const state = useRef({
-    scene, selectedId, filter, reducedMotion, onSelect,
+    scene, selectedId, filter, reducedMotion, onSelect, agents, activity,
+    inhabitants: null as InhabitantPlan | null,
     hoveredId: null as string | null,
     camera: { focalX: 0, focalY: 0, zoom: 0.5 } as Camera,
     /** The camera is at the HUD-safe whole-city fit (not moved by the user): refit it on resize/HUD changes. */
@@ -76,6 +90,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     rafId: 0,
     requestFrame: () => {},
     stop: () => {},
+    replanInhabitants: () => {},
   });
   state.current.onSelect = onSelect;
 
@@ -87,6 +102,14 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     s.palette = resolveCityPalette(canvas);
     s.hasContext = true;
     const fit = () => hudSafeFit(s.scene.outerRadius, s.view, s.occluders);
+    // `now` (real wall-clock time) only anchors each online figure's deterministic starting phase — see
+    // planInhabitants; the figure's own id keeps its path stable across replans (agent list refetches,
+    // viewport-driven cap changes, scene rebuilds).
+    const replanInhabitants = () => {
+      const cap = s.view.width > 0 && s.view.width < SMALL_SCREEN_WIDTH ? SMALL_SCREEN_INHABITANT_CAP : DEFAULT_INHABITANT_CAP;
+      s.inhabitants = planInhabitants(s.agents, s.activity, s.scene, Date.now(), cap);
+    };
+    s.replanInhabitants = replanInhabitants;
 
     const animated = () => !s.reducedMotion;
     const shouldRun = () => s.visible && s.onScreen && !s.paused && s.view.width > 0;
@@ -114,6 +137,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
         hoveredId: s.hoveredId, selectedId: s.selectedId, filter: s.filter,
         particles: animated() ? (s.view.width < 600 ? 4 : 12) : 0,
         dpr: s.dpr, cache: s.cache,
+        inhabitants: s.inhabitants,
         // A camera dive (s.animation) or an active drag changes the camera every frame; bypass the
         // static-layer cache for those (see RenderFrame.cameraMoving) instead of rebuilding + blitting
         // it on every single frame.
@@ -144,6 +168,9 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       measureOccluders();
       if (!s.fitted) { s.camera = fit(); s.auto = true; s.fitted = true; }
       else if (s.auto && !s.locked) { s.animation = null; s.camera = fit(); }
+      // The figure cap depends on the canvas width (PROMPT §7: fewer figures on phones); re-plan whenever
+      // it (or the DPR-driven backing size) actually changes.
+      replanInhabitants();
       stop(); s.requestFrame();
     };
 
@@ -303,7 +330,8 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     const s = state.current;
     const previous = s.scene;
     const sceneChanged = previous !== scene;
-    s.scene = scene; s.filter = filter; s.reducedMotion = reducedMotion;
+    const inhabitantInputsChanged = sceneChanged || s.agents !== agents || s.activity !== activity;
+    s.scene = scene; s.filter = filter; s.reducedMotion = reducedMotion; s.agents = agents; s.activity = activity;
     if (sceneChanged) s.cache.labels.clear();
     // Polling hands us a new rooms array (and scene) often; only a changed footprint re-fits the camera
     // (the whole HUD-safe fit while the user has not moved it, else just the zoom). Never during a dive.
@@ -312,8 +340,11 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       s.camera = s.auto ? hudSafeFit(scene.outerRadius, s.view, s.occluders) : { ...s.camera, zoom: fitZoom(scene.outerRadius, s.view) };
     }
     if (reducedMotion && s.animation) { s.camera = s.animation.to; s.animation = null; }
+    // A new room list can change where a room building sits (rings reflow), and a fresh agents/activity
+    // fetch can change who is on the roads or which room they are linked to: re-plan (City Shell §6).
+    if (inhabitantInputsChanged) s.replanInhabitants();
     s.requestFrame();
-  }, [scene, filter, reducedMotion]);
+  }, [scene, filter, reducedMotion, agents, activity]);
 
   useEffect(() => {
     const s = state.current;

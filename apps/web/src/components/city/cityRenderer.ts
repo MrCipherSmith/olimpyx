@@ -10,6 +10,7 @@
 import { COS30, SIN30, boxInViewport, footprintScreenBox, worldToScreen, type Camera, type Point, type ScreenBox, type Viewport } from './isometricMath';
 import { matchesFilter, sceneFromBuildings, type CityBuilding, type CityScene } from './cityScene';
 import type { CityPalette } from './cityTokens';
+import { inhabitantPosition, type InhabitantFigure, type InhabitantPlan } from './inhabitants';
 import type { ArchetypeCategory } from './roomArchetypes';
 
 export interface RenderFrame {
@@ -35,6 +36,8 @@ export interface RenderFrame {
   cameraMoving?: boolean;
   /** Screen rects (CSS px, canvas coordinates) of HUD panels over the canvas; labels are moved off them. */
   occluders?: readonly Rect[];
+  /** Real agents walking the avenues (City Shell §6); absent/null draws none. */
+  inhabitants?: InhabitantPlan | null;
 }
 
 type Ctx = CanvasRenderingContext2D;
@@ -81,10 +84,13 @@ export interface CityRenderCache {
   /** Label boxes of the last frame (a pool reused every frame); read by labelAt() for label clicks. */
   placed: PlacedLabel[];
   placedCount: number;
+  /** Inhabitant name-tag boxes of the last frame (a pool reused every frame), so they never overlap a
+   * building label or each other; see drawInhabitants(). */
+  figureBoxes: Rect[];
 }
 
 export function createRenderCache(): CityRenderCache {
-  return { layer: undefined, labels: new Map(), cards: new Map(), placed: [], placedCount: 0 };
+  return { layer: undefined, labels: new Map(), cards: new Map(), placed: [], placedCount: 0, figureBoxes: [] };
 }
 
 /** The ground + roads layer is rebuilt only when the camera, scene, palette, viewport or DPR changed. */
@@ -121,6 +127,7 @@ export function renderCity(ctx: Ctx, frame: RenderFrame): void {
   }
   if (frame.animate && frame.particles > 0) drawDrones(painter);
   drawLabels(painter);
+  if (frame.inhabitants) drawInhabitants(painter, frame.inhabitants);
   ctx.restore();
 }
 
@@ -1321,4 +1328,133 @@ function drawCard(p: Painter, label: PlacedLabel) {
   ctx.font = CARD_SUB_FONT; ctx.fillStyle = accent;
   ctx.fillText(entry.sub, centreX, label.top + 26);
   ctx.globalAlpha = 1;
+}
+
+/* ------------------------------------------------------------------ inhabitants (agents on the roads, City Shell §6) */
+
+const INHABITANT_FONT = `600 10px ${LABEL_FONT_FAMILY}`;
+const INHABITANT_LABEL_MAX = 18;
+const INHABITANT_LABEL_PADDING = 10;
+const INHABITANT_LABEL_HEIGHT = 16;
+const INHABITANT_LIFT = 14;
+const INHABITANT_GLYPH_RADIUS = 3;
+const INHABITANT_GLYPH_Z = 6;
+const OVERFLOW_LIFT = LABEL_LIFT * 3;
+const EMPTY_PLACED: readonly PlacedLabel[] = [];
+const INHABITANT_POINT = point();
+const OVERFLOW_POINT = point();
+const INHABITANT_BOX: Rect = { left: 0, top: 0, right: 0, bottom: 0 };
+
+/** Measures (and caches) an agent's truncated name tag; untrusted text, only ever drawn with fillText. */
+function inhabitantLabelEntry(ctx: Ctx, cache: CityRenderCache | undefined, figure: InhabitantFigure): LabelEntry {
+  const key = `agent|${figure.id}`;
+  const cached = cache?.labels.get(key);
+  if (cached && cached.source === figure.name) return cached;
+  const text = truncateLabel(figure.name, INHABITANT_LABEL_MAX);
+  ctx.font = INHABITANT_FONT;
+  const entry: LabelEntry = { source: figure.name, text, width: ctx.measureText(text).width + INHABITANT_LABEL_PADDING };
+  cache?.labels.set(key, entry);
+  return entry;
+}
+
+/** Same vertical-nudge strategy as place() (labels above), generalised to plain rectangles so it can test
+ * against both the already-placed building labels and the inhabitant boxes placed earlier this frame,
+ * without needing a full PlacedLabel/CityBuilding for every figure. Writes the box into `out` on success. */
+function placeInhabitantBox(
+  anchorX: number, anchorY: number, width: number, height: number,
+  buildingLabels: readonly PlacedLabel[], buildingCount: number,
+  figureBoxes: readonly Rect[], figureCount: number,
+  occluders: readonly Rect[], out: Rect,
+): boolean {
+  const baseLeft = anchorX - width / 2;
+  const baseTop = anchorY - height / 2;
+  const step = height + LABEL_GAP * 2;
+  for (let index = 0; index < NUDGES.length; index++) {
+    const top = baseTop + NUDGES[index] * step;
+    const left = baseLeft; const right = baseLeft + width; const bottom = top + height;
+    let blocked = false;
+    for (let i = 0; i < occluders.length && !blocked; i++) blocked = overlaps(left, top, right, bottom, occluders[i], OCCLUDER_GAP);
+    for (let i = 0; i < buildingCount && !blocked; i++) { const b = buildingLabels[i]; if (b.visible) blocked = overlaps(left, top, right, bottom, b, LABEL_GAP); }
+    for (let i = 0; i < figureCount && !blocked; i++) blocked = overlaps(left, top, right, bottom, figureBoxes[i], LABEL_GAP);
+    if (!blocked) { out.left = left; out.top = top; out.right = right; out.bottom = bottom; return true; }
+  }
+  return false;
+}
+
+function rectSlot(pool: Rect[], index: number): Rect {
+  let slot = pool[index];
+  if (!slot) { slot = { left: 0, top: 0, right: 0, bottom: 0 }; pool[index] = slot; }
+  return slot;
+}
+
+/**
+ * Draws the real agents walking the city's avenues: a small glyph at its current position (from
+ * inhabitantPosition, computed from the figure's precomputed path and the frame clock — no re-planning
+ * and no per-frame allocation of the figure list itself) plus its real name, laid out with the same
+ * collision-avoidance as building labels so neither ever covers the other or a HUD panel. Online agents
+ * glow softly (a pre-rendered sprite, never shadowBlur); offline agents are dimmed and motionless. A
+ * "+N" near the Pantheon accounts for real agents beyond the cap — never presented as a metric.
+ */
+function drawInhabitants(painter: Painter, inhabitants: InhabitantPlan) {
+  const { ctx, frame, at, zoom } = painter;
+  const { palette, view, cache } = frame;
+  const buildingLabels = cache ? cache.placed : EMPTY_PLACED;
+  const buildingCount = cache ? cache.placedCount : 0;
+  const figureBoxes = cache ? cache.figureBoxes : [];
+  const occluders = frame.occluders ?? NO_OCCLUDERS;
+  const showLabels = zoom >= ROOM_LABEL_MIN_ZOOM;
+  const labelHeight = (zoom < 0.5 ? 10 : 11) + 6;
+  let figureCount = 0;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const figure of inhabitants.figures) {
+    const world = inhabitantPosition(figure, frame.time);
+    const spot = at(world.x, world.y, INHABITANT_GLYPH_Z, INHABITANT_POINT);
+    if (spot.x < -CULL_MARGIN || spot.x > view.width + CULL_MARGIN || spot.y < -CULL_MARGIN || spot.y > view.height + CULL_MARGIN) continue;
+    const color = figure.online ? palette.cyan : palette.textMuted;
+    if (figure.online) drawGlow(ctx, color, spot.x, spot.y, Math.max(2, 7 * zoom), 0.45);
+    ctx.globalAlpha = figure.online ? 0.95 : 0.4;
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(spot.x, spot.y, Math.max(1, INHABITANT_GLYPH_RADIUS * zoom), 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    if (!showLabels) continue;
+    const entry = inhabitantLabelEntry(ctx, cache, figure);
+    const box = rectSlot(figureBoxes, figureCount);
+    if (!placeInhabitantBox(spot.x, spot.y - INHABITANT_LIFT, entry.width, labelHeight, buildingLabels, buildingCount, figureBoxes, figureCount, occluders, box)) continue;
+    figureCount++;
+    ctx.font = INHABITANT_FONT;
+    ctx.globalAlpha = figure.online ? 0.92 : 0.55;
+    ctx.fillStyle = palette.panel;
+    ctx.beginPath(); ctx.roundRect(box.left, box.top, entry.width, labelHeight, 4); ctx.fill();
+    ctx.globalAlpha = figure.online ? 0.85 : 0.4; ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = figure.online ? palette.text : palette.textMuted;
+    ctx.fillText(entry.text, box.left + entry.width / 2, (box.top + box.bottom) / 2 + 0.5);
+  }
+  if (inhabitants.overflow > 0) drawInhabitantOverflow(painter, inhabitants.overflow, buildingLabels, buildingCount, figureBoxes, figureCount, occluders);
+}
+
+/** "+N" beacon near the Pantheon for real agents beyond the cap; placed with the same collision system. */
+function drawInhabitantOverflow(
+  painter: Painter, overflow: number,
+  buildingLabels: readonly PlacedLabel[], buildingCount: number,
+  figureBoxes: readonly Rect[], figureCount: number, occluders: readonly Rect[],
+) {
+  const { ctx, frame, at } = painter;
+  const pantheon = frame.scene.buildings.find(building => building.kind === 'pantheon');
+  if (!pantheon) return;
+  const anchor = at(pantheon.x, pantheon.y, pantheon.height + OVERFLOW_LIFT, OVERFLOW_POINT);
+  const { view } = frame;
+  if (anchor.x < -CULL_MARGIN || anchor.x > view.width + CULL_MARGIN || anchor.y < -CULL_MARGIN || anchor.y > view.height + CULL_MARGIN) return;
+  const text = `+${overflow}`;
+  ctx.font = INHABITANT_FONT;
+  const width = ctx.measureText(text).width + INHABITANT_LABEL_PADDING;
+  if (!placeInhabitantBox(anchor.x, anchor.y, width, INHABITANT_LABEL_HEIGHT, buildingLabels, buildingCount, figureBoxes, figureCount, occluders, INHABITANT_BOX)) return;
+  const box = INHABITANT_BOX;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.globalAlpha = 0.95; ctx.fillStyle = frame.palette.panel;
+  ctx.beginPath(); ctx.roundRect(box.left, box.top, width, INHABITANT_LABEL_HEIGHT, 5); ctx.fill();
+  ctx.globalAlpha = 1; ctx.strokeStyle = frame.palette.gold; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = frame.palette.gold;
+  ctx.fillText(text, box.left + width / 2, (box.top + box.bottom) / 2 + 0.5);
 }
