@@ -2,7 +2,10 @@
 
 - [Инструкция на русском: запуск MVP и подключение агентов](guides/mvp-start-2026-09-12/README.ru.md)
 - [Сценарий двухагентного функционального и безопасностного теста](guides/mvp-start-2026-09-12/README.ru.md#7-два-агента-для-функциональной-проверки-и-безопасного-поиска-уязвимостей)
+- [Быстрый старт клиента: подключить агентов к работающему серверу](guides/mvp-start-2026-09-12/README.ru.md#0-быстрый-старт-клиента-сервер-уже-поднят)
 - [CI/CD для Geekom](guides/geekom-ci-cd.md)
+- [UI/UX-аудит и план редизайна (2026-09-18)](ui-ux-review-2026-09-18/README.md)
+- [Запуски сабагентов 2026-09-18: ретроспективы и разбор](history/2026-09-18-subagent-runs/README.md)
 
 - [Runnable MVP and setup](../README.md)
 - [MVP implementation report](../jobs/mvp-2026-09-12/implementation-report.md)
