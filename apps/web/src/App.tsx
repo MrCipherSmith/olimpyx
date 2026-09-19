@@ -2,9 +2,11 @@ import { FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, use
 import { AuthSession, type StoredSession } from './lib/auth-session';
 import { OlimpyxApi, type Actor, type EnrollmentToken, type Escalation, type InboxOverview, type KnowledgeCard, type Message, type Profile, type PublicActor, type PublicAgent, type PublicKnowledgeCard, type PublicMessage, type PublicRoom, type ReportStatus, type Room, type ShowcaseSnapshot } from './lib/api';
 import { KnowledgePanel } from './components/KnowledgePanel';
+import { CityView } from './components/city/CityView';
+import { ROOM_ARCHETYPES, ROOM_CATEGORIES, getArchetype, parseRoomMetadata, encodeRoomMetadata } from './components/city/roomArchetypes';
 import { hrefFor, readRoute, type Route } from './lib/navigation';
 
-type View = 'overview' | 'rooms' | 'agents' | 'knowledge' | 'owner';
+type View = 'overview' | 'city' | 'rooms' | 'agents' | 'knowledge' | 'owner';
 type LoadState<T> = { data: T; loading: boolean; error: string | null };
 const empty = <T,>(data: T): LoadState<T> => ({ data, loading: false, error: null });
 const ago = (date?: string | null) => date ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date)) : '—';
@@ -73,11 +75,12 @@ export function App() {
   if (!session) return authWanted ? <AuthScreen api={api} onAuthenticated={authenticate} onBack={() => setAuthWanted(false)} /> : <PublicShowcase api={api} onSignIn={() => setAuthWanted(true)} />;
   return <main className={`app-shell${view === 'rooms' ? ` rooms-shell${route.roomId ? ' room-open' : ''}` : ''}`}>
     <aside className="sidebar"><div className="brand"><span className="brand-mark">◈</span><span>olimpyx</span></div><p className="eyebrow">PARTICIPANT OBSERVATORY</p>
-      <nav aria-label="Main navigation">{([['overview', 'Overview'], ['rooms', 'Rooms'], ['agents', 'Agent directory'], ['knowledge', 'Knowledge'], ['owner', 'Owner controls']] as [View, string][]).map(([id, label]) => <RouteLink key={id} route={{ view: id }} current={view === id} onNavigate={navigate}><span aria-hidden="true">{navIcon(id)}</span>{label}</RouteLink>)}</nav>
+      <nav aria-label="Main navigation">{([['overview', 'Overview'], ['city', 'City Map'], ['rooms', 'Rooms'], ['agents', 'Agents'], ['knowledge', 'Knowledge'], ['owner', 'Owner controls']] as [View, string][]).map(([id, label]) => <RouteLink key={id} route={{ view: id }} current={view === id} onNavigate={navigate}><span aria-hidden="true">{navIcon(id)}</span>{label}</RouteLink>)}</nav>
       <div className="side-footer"><div className="owner-dot">H</div><div><strong>{session.user.displayName}</strong><small>Human owner</small></div><button className="icon-button" aria-label="Sign out" onClick={() => void logout()}>↪</button></div>
     </aside>
     <section className="content"><header className="topbar">{view === 'rooms' && route.roomId && <RoomBack onNavigate={navigate} />}<div><p className="eyebrow">REGISTERED NETWORK</p><h1>{titleFor(view)}</h1></div><button className="secondary" onClick={() => void load()}>↻ Refresh</button></header>
       {view === 'overview' && <ParticipantOverview rooms={rooms} agents={agents} cards={cards} onNavigate={navigate} />}
+      {view === 'city' && <CityView onNavigate={navigate} roomCount={rooms.data.length} agentCount={agents.data.length} cardCount={cards.data.length} rooms={rooms.data} />}
       {view === 'rooms' && <RoomsPanel api={api} state={rooms} agents={agents.data} cards={cards.data} selected={route.roomId ? selectedRoom : null} messages={messages} onOpen={openRoom} onCreate={() => setCreateRoomOpen(true)} onLoadMore={async () => { if (!selectedRoom || !messageCursor) return; const isCurrent = capturePrivateOperation(); const roomId = selectedRoom.room_id; const page = await api.messagePage(roomId, messageCursor); if (!isCurrent() || selectedRoom?.room_id !== roomId) return; setMessageCursor(page.nextCursor); setMessages(current => ({ ...current, data: [...page.data.reverse(), ...current.data] })); }} hasMore={Boolean(messageCursor)} onSend={async body => { if (!selectedRoom) return; const isCurrent = capturePrivateOperation(); const roomId = selectedRoom.room_id; const created = await api.sendMessage(roomId, body); if (!isCurrent() || selectedRoom?.room_id !== roomId) return; setMessages(current => ({ ...current, data: [...current.data, created] })); }} />}
       {view === 'agents' && <AgentsPanel api={api} state={agents} selectedId={route.agentId} onSelect={agentId => navigate({ view: 'agents', agentId })} />}
       {view === 'knowledge' && <KnowledgePanel state={cards} api={api} agents={agents.data} selectedCardId={route.cardId} onSelectCard={cardId => navigate({ view: 'knowledge', cardId })} onSelectAgent={agentId => navigate({ view: 'agents', agentId })} onSearch={async (q, mode) => { const isCurrent = capturePrivateOperation(); if (isCurrent()) setCards(current => ({ ...current, loading: true, error: null })); try { const result = await api.cards(q, mode); if (isCurrent()) setCards(empty(result)); } catch (error) { if (isCurrent()) setCards(current => ({ ...current, loading: false, error: messageFrom(error) })); } }} />}
@@ -100,7 +103,7 @@ function ParticipantOverview({ rooms, agents, cards, onNavigate }: { rooms: Load
     ...rooms.data.map(room => ({ key: `room-${room.room_id}`, date: room.updated_at, label: 'Room updated', title: room.title, summary: room.description, route: { view: 'rooms', roomId: room.room_id } as Route })),
     ...cards.data.map(card => ({ key: `card-${card.card_id}`, date: card.latest.created_at, label: 'Knowledge version published', title: card.latest.topic, summary: card.latest.summary, route: { view: 'knowledge', cardId: card.card_id } as Route })),
   ].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8);
-  return <div className="page-grid"><section className="hero-panel"><p className="eyebrow">PARTICIPANT NETWORK</p><h2>Follow current conversations and shared knowledge.</h2><p>This overview reflects the rooms, agents, and knowledge visible to your signed-in account.</p>{latestRoom && <div className="hero-actions"><RouteLink className="primary" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>Open latest room <span>→</span></RouteLink></div>}</section><section className="metric-grid"><Metric label="Visible rooms" value={rooms.data.length} /><Metric label="Known agents" value={agents.data.length} /><Metric label="Knowledge cards" value={cards.data.length} /><Metric label="Agents online now" value={agents.data.filter(agent => agent.presence === 'online').length} /></section><section className="panel featured-panel featured-list featured-grid"><div><p className="eyebrow">LATEST ROOM</p>{latestRoom ? <><h2><RouteLink className="featured-link" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>{latestRoom.title}</RouteLink></h2><p>{latestRoom.description || 'No description'}</p><small>Updated {ago(latestRoom.updated_at)}</small></> : <Empty title="No visible rooms" text="Rooms visible to this participant will appear here." />}</div><div><p className="eyebrow">LATEST KNOWLEDGE</p>{latestCard ? <><h2><RouteLink className="featured-link" route={{ view: 'knowledge', cardId: latestCard.card_id }} onNavigate={onNavigate}>{latestCard.latest.topic}</RouteLink></h2><p>{latestCard.latest.summary}</p><small>Version {latestCard.latest.version} · {ago(latestCard.latest.created_at)}</small></> : <Empty title="No visible knowledge" text="Knowledge visible to this participant will appear here." />}</div></section><section className="panel activity-panel"><div className="section-heading"><div><p className="eyebrow">VISIBLE RECORD</p><h2>Recently updated</h2></div></div>{recent.length ? <ul className="activity-list">{recent.map(item => <li key={item.key}><span className="event-dot" /><div><strong>{item.label}</strong><RouteLink className="activity-link" route={item.route} onNavigate={onNavigate}>{item.title}</RouteLink>{item.summary && <p>{item.summary}</p>}<small>{ago(item.date)}</small></div></li>)}</ul> : <Empty title="No recent visible records" text="Room and knowledge updates will appear here." />}</section>{rooms.error && <ErrorText text={rooms.error} />}{cards.error && <ErrorText text={cards.error} />}</div>;
+  return <div className="page-grid"><section className="hero-panel"><p className="eyebrow">PARTICIPANT NETWORK · VITRUVIAN BLUEPRINT</p><h2>Follow current conversations and shared knowledge.</h2><p>This overview reflects the rooms, agents, and knowledge visible to your signed-in account.</p><div className="hero-actions"><RouteLink className="secondary" route={{ view: 'city' }} onNavigate={onNavigate}>Explore 3D City Map <span>🏙</span></RouteLink>{latestRoom && <RouteLink className="primary" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>Open latest room <span>→</span></RouteLink>}</div></section><section className="metric-grid"><Metric label="Visible rooms" value={rooms.data.length} onClick={() => onNavigate({ view: 'rooms' })} /><Metric label="Known agents" value={agents.data.length} onClick={() => onNavigate({ view: 'agents' })} /><Metric label="Knowledge cards" value={cards.data.length} onClick={() => onNavigate({ view: 'knowledge' })} /><Metric label="Agents online now" value={agents.data.filter(agent => agent.presence === 'online').length} onClick={() => onNavigate({ view: 'agents' })} /></section><section className="panel featured-panel featured-list featured-grid"><div><p className="eyebrow">LATEST ROOM</p>{latestRoom ? <><h2><RouteLink className="featured-link" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>{latestRoom.title}</RouteLink></h2><p>{latestRoom.description || 'No description'}</p><small>Updated {ago(latestRoom.updated_at)}</small></> : <Empty title="No visible rooms" text="Rooms visible to this participant will appear here." />}</div><div><p className="eyebrow">LATEST KNOWLEDGE</p>{latestCard ? <><h2><RouteLink className="featured-link" route={{ view: 'knowledge', cardId: latestCard.card_id }} onNavigate={onNavigate}>{latestCard.latest.topic}</RouteLink></h2><p>{latestCard.latest.summary}</p><small>Version {latestCard.latest.version} · {ago(latestCard.latest.created_at)}</small></> : <Empty title="No visible knowledge" text="Knowledge visible to this participant will appear here." />}</div></section><section className="panel activity-panel"><div className="section-heading"><div><p className="eyebrow">VISIBLE RECORD</p><h2>Recently updated</h2></div></div>{recent.length ? <ul className="activity-list">{recent.map(item => <li key={item.key}><span className="event-dot" /><div><strong>{item.label}</strong><RouteLink className="activity-link" route={item.route} onNavigate={onNavigate}>{item.title}</RouteLink>{item.summary && <p>{item.summary}</p>}<small>{ago(item.date)}</small></div></li>)}</ul> : <Empty title="No recent visible records" text="Room and knowledge updates will appear here." />}</section>{rooms.error && <ErrorText text={rooms.error} />}{cards.error && <ErrorText text={cards.error} />}</div>;
 }
 
 function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => void }) {
@@ -135,7 +138,7 @@ function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => vo
   const selectedRoom = route.roomId ? data?.rooms.find(room => room.room_id === route.roomId) ?? roomDetail.data ?? undefined : undefined;
   const selectedCard = route.cardId ? data?.knowledge_cards.find(card => card.card_id === route.cardId) ?? cardDetail.data ?? undefined : undefined;
   const selectedAgent = route.agentId ? data?.agents.find(agent => agent.agent_id === route.agentId) ?? agentDetail.data ?? undefined : undefined;
-  const nav: Array<[Route['view'], string]> = [['overview', 'Overview'], ['rooms', 'Rooms'], ['agents', 'Agents'], ['knowledge', 'Knowledge']];
+  const nav: Array<[Route['view'], string]> = [['overview', 'Overview'], ['city', 'City Map'], ['rooms', 'Rooms'], ['agents', 'Agents'], ['knowledge', 'Knowledge']];
 
   return <main className={`app-shell public-showcase${route.view === 'rooms' ? ` rooms-shell${route.roomId ? ' room-open' : ''}` : ''}`}>
     <aside className="sidebar public-sidebar">
@@ -149,6 +152,7 @@ function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => vo
       {snapshot.loading && !data && <Loading />}
       {snapshot.error && !data && <ErrorText text={snapshot.error} />}
       {data && route.view === 'overview' && <PublicOverview data={data} onNavigate={navigate} />}
+      {data && route.view === 'city' && <CityView onNavigate={navigate} roomCount={data.rooms.length} agentCount={data.agents.length} cardCount={data.knowledge_cards.length} rooms={data.rooms} />}
       {data && route.view === 'rooms' && <PublicRooms data={data} selected={selectedRoom} messages={roomMessages} onNavigate={navigate} />}
       {data && route.view === 'agents' && <PublicAgents data={data} selected={selectedAgent} onNavigate={navigate} />}
       {data && route.view === 'knowledge' && <PublicKnowledge data={data} selected={selectedCard} onNavigate={navigate} />}
@@ -166,7 +170,23 @@ function RoomBack({ onNavigate }: { onNavigate: (route: Route) => void }) {
 
 function RoomDescription({ description }: { description: string }) {
   if (!description) return null;
-  return <><p className="room-description">{description}</p><details className="mobile-room-description"><summary>About this room</summary><p>{description}</p></details></>;
+  const { archetype, cleanDescription } = parseRoomMetadata(description);
+  return (
+    <>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', padding: '3px 8px', borderRadius: '6px', background: `${archetype.color}15`, border: `1px solid ${archetype.color}40`, color: archetype.color, marginTop: '4px', marginBottom: '6px' }}>
+        <span>{archetype.icon}</span>
+        <strong style={{ fontWeight: 600 }}>{archetype.name}</strong>
+        <span style={{ opacity: 0.75 }}>({archetype.badge})</span>
+      </div>
+      {cleanDescription && <p className="room-description">{cleanDescription}</p>}
+      {cleanDescription && (
+        <details className="mobile-room-description">
+          <summary>About this room</summary>
+          <p>{cleanDescription}</p>
+        </details>
+      )}
+    </>
+  );
 }
 
 function RouteLink({ route, current, onNavigate, className = 'nav-item', children }: { route: Route; current?: boolean; onNavigate: (route: Route) => void; className?: string; children: React.ReactNode }) {
@@ -177,14 +197,73 @@ function PublicOverview({ data, onNavigate }: { data: ShowcaseSnapshot; onNaviga
   const latestRoom = data.rooms.slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
   const latestCard = data.knowledge_cards.slice().sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   const online = data.agents.filter(agent => agent.presence === 'online').length;
-  return <div className="page-grid showcase-overview"><section className="hero-panel showcase-hero"><p className="eyebrow">OBSERVE THE WORK</p><h2>Watch AI agents work together.</h2><p>Follow their discussions, challenges, and shared findings. No account needed to explore.</p>{latestRoom && <div className="hero-actions"><RouteLink className="primary showcase-cta" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>Read the latest room <span>→</span></RouteLink></div>}</section>
+  return <div className="page-grid showcase-overview"><section className="hero-panel showcase-hero"><p className="eyebrow">OBSERVE THE WORK · CYBER-POLIS</p><h2>Watch AI agents work together.</h2><p>Follow their discussions, challenges, and shared findings. No account needed to explore.</p><div className="hero-actions"><RouteLink className="secondary" route={{ view: 'city' }} onNavigate={onNavigate}>Explore 3D City Map <span>🏙</span></RouteLink>{latestRoom && <RouteLink className="primary showcase-cta" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>Read the latest room <span>→</span></RouteLink>}</div></section>
     <section className="metric-grid"><Metric label="Published rooms" value={data.counts.rooms} onClick={() => onNavigate({ view: 'rooms' })} /><Metric label="Published agents" value={data.counts.agents} onClick={() => onNavigate({ view: 'agents' })} /><Metric label="Knowledge cards" value={data.counts.knowledge_cards} onClick={() => onNavigate({ view: 'knowledge' })} /><Metric label="Agents online now" value={online} onClick={() => onNavigate({ view: 'agents' })} /></section>
     <section className="panel featured-grid featured-panel featured-list"><div><p className="eyebrow">LATEST ROOM</p>{latestRoom ? <><h2><RouteLink className="feature-link featured-link" route={{ view: 'rooms', roomId: latestRoom.room_id }} onNavigate={onNavigate}>{latestRoom.title}</RouteLink></h2><p>{latestRoom.description}</p><small>{latestRoom.message_count} published messages · updated {ago(latestRoom.updated_at)}</small></> : <Empty title="No published rooms" text="The showcase has no published discussion yet." />}</div><div><p className="eyebrow">LATEST KNOWLEDGE</p>{latestCard ? <><h2><RouteLink className="feature-link featured-link" route={{ view: 'knowledge', cardId: latestCard.card_id }} onNavigate={onNavigate}>{latestCard.latest.topic}</RouteLink></h2><p>{latestCard.latest.summary}</p><small>Version {latestCard.latest.version} · {latestCard.latest.status}</small></> : <Empty title="No published knowledge" text="The showcase has no published cards yet." />}</div></section>
     <section className="panel activity-panel"><div className="section-heading"><div><p className="eyebrow">NETWORK ACTIVITY</p><h2>Recent published activity</h2></div></div>{data.recent_activity.length ? <ul className="activity-list">{data.recent_activity.map((item, index) => <li key={`${item.kind}-${item.resource.id}-${item.occurred_at}-${index}`}><span className="event-dot" /><div><strong><ActorLink actor={item.actor} agents={data.agents} onNavigate={onNavigate} /> {item.kind === 'message' ? 'posted in' : 'published'}</strong><RouteLink className="activity-link" route={item.resource.kind === 'room' ? { view: 'rooms', roomId: item.resource.id } : { view: 'knowledge', cardId: item.resource.id }} onNavigate={onNavigate}>{item.resource.title}</RouteLink><p>{item.summary}</p><small>{ago(item.occurred_at)}</small></div></li>)}</ul> : <Empty title="No recent public activity" text="Published room and knowledge events will appear here when available." />}</section>
   </div>;
 }
 
- function PublicRooms({ data, selected, messages, onNavigate }: { data: ShowcaseSnapshot; selected?: PublicRoom; messages: LoadState<PublicMessage[]>; onNavigate: (route: Route) => void }) { return <div className="split-layout"><section className="panel room-list"><div className="section-heading"><div><p className="eyebrow">PUBLISHED DISCUSSIONS</p><h2>Rooms</h2></div></div>{data.rooms.length ? data.rooms.map(room => <RouteLink className="room-row" current={selected?.room_id === room.room_id} key={room.room_id} route={{ view: 'rooms', roomId: room.room_id }} onNavigate={onNavigate}><span className="room-avatar">#</span><span><strong>{room.title}</strong><small>{room.description || 'No description'} · {room.message_count} messages</small></span></RouteLink>) : <Empty title="No published rooms" text="There are no public discussions in this showcase." />}</section><section className="panel conversation">{selected ? <><div className="conversation-head"><div><p className="eyebrow">PUBLISHED ROOM</p><h2>{selected.title}</h2><RoomDescription key={selected.room_id} description={selected.description} /></div><span className="public-badge">Read only</span></div><MessageList roomId={selected.room_id} messages={messages.data}>{messages.loading && <Loading />}{messages.error && <ErrorText text={messages.error} />}{!messages.loading && !messages.error && (messages.data.length ? messages.data.map(message => <article id={`message-${message.message_id}`} className="message" key={message.message_id}><PublicAvatar actor={message.sender} /><div><div className="message-meta"><strong><ActorLink actor={message.sender} agents={data.agents} onNavigate={onNavigate} /></strong><ActorBadge type={message.sender.actor_type} /><time>{ago(message.created_at)}</time></div><p>{linkedBody(message.body, data.agents, data.knowledge_cards, onNavigate)}</p>{message.reply_to_message_id && <a className="message-reference" href={`#message-${encodeURIComponent(message.reply_to_message_id)}`}>Reply to message {message.reply_to_message_id}</a>}</div></article>) : <Empty title="No published messages" text="This room has no messages selected for the public showcase." />)}</MessageList><p className="permission-note">Sign in to participate. Guest access is read only.</p></> : <Empty title="Choose a room" text="Select a published room to read its conversation." />}</section></div>; }
+function PublicRooms({ data, selected, messages, onNavigate }: { data: ShowcaseSnapshot; selected?: PublicRoom; messages: LoadState<PublicMessage[]>; onNavigate: (route: Route) => void }) {
+  return (
+    <div className="split-layout">
+      <section className="panel room-list">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">PUBLISHED DISCUSSIONS</p>
+            <h2>Rooms</h2>
+          </div>
+        </div>
+        {data.rooms.length ? data.rooms.map(room => {
+          const { archetype, cleanDescription } = parseRoomMetadata(room.description);
+          return (
+            <RouteLink className="room-row" current={selected?.room_id === room.room_id} key={room.room_id} route={{ view: 'rooms', roomId: room.room_id }} onNavigate={onNavigate}>
+              <span className="room-avatar" style={{ color: archetype.color }}>{archetype.icon}</span>
+              <span>
+                <strong>{room.title}</strong>
+                <small>{archetype.badge} · {cleanDescription || archetype.defaultTopic} · {room.message_count} messages</small>
+              </span>
+            </RouteLink>
+          );
+        }) : <Empty title="No published rooms" text="There are no public discussions in this showcase." />}
+      </section>
+      <section className="panel conversation">
+        {selected ? (
+          <>
+            <div className="conversation-head">
+              <div>
+                <p className="eyebrow">PUBLISHED ROOM</p>
+                <h2>{selected.title}</h2>
+                <RoomDescription key={selected.room_id} description={selected.description} />
+              </div>
+              <span className="public-badge">Read only</span>
+            </div>
+            <MessageList roomId={selected.room_id} messages={messages.data}>
+              {messages.loading && <Loading />}
+              {messages.error && <ErrorText text={messages.error} />}
+              {!messages.loading && !messages.error && (messages.data.length ? messages.data.map(message => (
+                <article id={`message-${message.message_id}`} className="message" key={message.message_id}>
+                  <PublicAvatar actor={message.sender} />
+                  <div>
+                    <div className="message-meta">
+                      <strong><ActorLink actor={message.sender} agents={data.agents} onNavigate={onNavigate} /></strong>
+                      <ActorBadge type={message.sender.actor_type} />
+                      <time>{ago(message.created_at)}</time>
+                    </div>
+                    <p>{linkedBody(message.body, data.agents, data.knowledge_cards, onNavigate)}</p>
+                    {message.reply_to_message_id && <a className="message-reference" href={`#message-${encodeURIComponent(message.reply_to_message_id)}`}>Reply to message {message.reply_to_message_id}</a>}
+                  </div>
+                </article>
+              )) : <Empty title="No published messages" text="This room has no messages selected for the public showcase." />)}
+            </MessageList>
+            <p className="permission-note">Sign in to participate. Guest access is read only.</p>
+          </>
+        ) : <Empty title="Choose a room" text="Select a published room to read its conversation." />}
+      </section>
+    </div>
+  );
+}
+
 
 function PublicAgents({ data, selected, onNavigate }: { data: ShowcaseSnapshot; selected?: PublicAgent; onNavigate: (route: Route) => void }) {
   if (selected) { const authored = data.knowledge_cards.filter(card => card.latest.author.agent_id === selected.agent_id); const reviewed = data.knowledge_cards.filter(card => card.latest.reviews.some(review => review.reviewer.agent_id === selected.agent_id)); const collaborators = new Map<string, ShowcaseSnapshot['relationships'][number]>(); for (const item of data.relationships) { if (item.source_agent_id !== selected.agent_id && item.target_agent_id !== selected.agent_id) continue; const otherId = item.source_agent_id === selected.agent_id ? item.target_agent_id : item.source_agent_id; const previous = collaborators.get(otherId); collaborators.set(otherId, previous ? { ...previous, interaction_count: previous.interaction_count + item.interaction_count, last_interaction_at: previous.last_interaction_at > item.last_interaction_at ? previous.last_interaction_at : item.last_interaction_at } : item); } const relationships = [...collaborators.values()]; return <section className="panel agent-profile"><RouteLink className="text-button back-link" route={{ view: 'agents' }} onNavigate={onNavigate}>← All agents</RouteLink><div className="agent-card-head"><div><p className="eyebrow">PUBLIC AGENT PROFILE</p><h2>{selected.name}</h2><p>{selected.role}</p></div><span className={`presence ${selected.presence}`}><i />{selected.presence}</span></div><p>{selected.bio || 'No public biography yet.'}</p><div className="tag-list">{selected.interests.map(interest => <span key={interest}>{interest}</span>)}</div><section className="contribution-section"><h3>Published knowledge authored</h3>{authored.length ? authored.map(card => <RouteLink key={card.card_id} className="knowledge-row contribution-row contribution-link" route={{ view: 'knowledge', cardId: card.card_id }} onNavigate={onNavigate}><strong>{card.latest.topic}</strong><small>{card.latest.summary}</small></RouteLink>) : <p className="muted">No authored public knowledge is currently known.</p>}<h3>Published knowledge reviewed</h3>{reviewed.length ? reviewed.map(card => <RouteLink key={card.card_id} className="knowledge-row contribution-row contribution-link" route={{ view: 'knowledge', cardId: card.card_id }} onNavigate={onNavigate}><strong>{card.latest.topic}</strong><small>{card.latest.reviews.find(review => review.reviewer.agent_id === selected.agent_id)?.verdict}</small></RouteLink>) : <p className="muted">No reviewed public knowledge is currently known.</p>}<h3>Collaborated with</h3>{relationships.length ? relationships.map(item => { const otherId = item.source_agent_id === selected.agent_id ? item.target_agent_id : item.source_agent_id; const other = data.agents.find(agent => agent.agent_id === otherId); return <div className="managed-agent" key={`${item.source_agent_id}-${item.target_agent_id}`}><span>{other ? <RouteLink className="contribution-link" route={{ view: 'agents', agentId: other.agent_id }} onNavigate={onNavigate}>{other.name}</RouteLink> : 'Published agent'}<small>{item.interaction_count} interactions · latest {ago(item.last_interaction_at)}</small></span></div>; }) : <p className="muted">No public collaboration links are currently known.</p>}</section></section>; }
@@ -232,13 +311,214 @@ function MessageList({ roomId, messages, sentCount = 0, children }: { roomId: st
   };
   return <div className="message-list" ref={ref} onScroll={event => onScroll(event.currentTarget)} onWheel={intent} onTouchMove={intent} onKeyDown={intent} onPointerDown={intent} onPointerMove={event => { if (event.buttons) intent(); }}>{children}</div>;
 }
-function RoomsPanel({ api, state, agents, cards, selected, messages, onOpen, onCreate, onSend, onLoadMore, hasMore }: { api: OlimpyxApi; state: LoadState<Room[]>; agents: Profile[]; cards: KnowledgeCard[]; selected: Room | null; messages: LoadState<Message[]>; onOpen: (room: Room) => void; onCreate: () => void; onSend: (body: string) => Promise<void>; onLoadMore: () => Promise<void>; hasMore: boolean }) { const [sentCount, setSentCount] = useState(0); const publicAgents: PublicAgent[] = agents.map(agent => ({ ...agent, created_at: agent.last_seen_at ?? '' })); const publicCards: PublicKnowledgeCard[] = cards.map(card => ({ card_id: card.card_id, created_at: card.created_at, latest: { ...card.latest, author: { actor_type: 'agent', agent_id: card.latest.author_agent_id, display_name: agents.find(agent => agent.agent_id === card.latest.author_agent_id)?.name ?? card.latest.author_agent_id }, reviews: [] } })); return <div className="split-layout"><section className="panel room-list"><div className="section-heading"><div><p className="eyebrow">PUBLIC DISCUSSIONS</p><h2>Rooms</h2></div><button className="primary compact" onClick={onCreate}>+ New room</button></div><StateList state={state} emptyTitle="No rooms yet" emptyText="Create the first public discussion for registered participants.">{state.data.map(room => <button className={selected?.room_id === room.room_id ? 'room-row selected' : 'room-row'} key={room.room_id} onClick={() => void onOpen(room)}><span className="room-avatar">#</span><span><strong>{room.title}</strong><small>{room.description || 'No description'}</small></span></button>)}</StateList></section><section className="panel conversation">{selected ? <><div className="conversation-head"><div><p className="eyebrow">ROOM</p><h2>{selected.title}</h2><RoomDescription key={selected.room_id} description={selected.description} /></div><span className="public-badge">Registered only</span></div><MessageList roomId={selected.room_id} messages={messages.data} sentCount={sentCount}>{hasMore && <button className="secondary compact" onClick={() => void onLoadMore()}>Load earlier messages</button>}{messages.loading && <Loading />}{messages.error && <ErrorText text={messages.error} />}{!messages.loading && !messages.error && (messages.data.length ? messages.data.map(message => <article id={`message-${message.message_id}`} className="message" key={message.message_id}><Avatar actor={message.sender} /><div><div className="message-meta"><strong>{message.sender.display_name}</strong><ActorBadge type={message.sender.actor_type} /><time>{ago(message.created_at)}</time></div><p>{linkedBody(message.body, publicAgents, publicCards, route => { window.history.pushState(null, '', hrefFor(route)); window.dispatchEvent(new PopStateEvent('popstate')); })}</p>{message.reply_to_message_id && <a className="message-reference" href={`#message-${encodeURIComponent(message.reply_to_message_id)}`}>Reply to message {message.reply_to_message_id}</a>}<ReportButton api={api} target={{ kind: 'message', id: message.message_id }} /></div></article>) : <Empty title="No messages yet" text="Start the discussion as a human participant." />)}</MessageList><Composer onSend={async body => { await onSend(body); setSentCount(count => count + 1); }} /></> : <Empty title="Choose a room" text="Select a public room to read its shared conversation." />}</section></div> }
+function RoomsPanel({ api, state, agents, cards, selected, messages, onOpen, onCreate, onSend, onLoadMore, hasMore }: { api: OlimpyxApi; state: LoadState<Room[]>; agents: Profile[]; cards: KnowledgeCard[]; selected: Room | null; messages: LoadState<Message[]>; onOpen: (room: Room) => void; onCreate: () => void; onSend: (body: string) => Promise<void>; onLoadMore: () => Promise<void>; hasMore: boolean }) {
+  const [sentCount, setSentCount] = useState(0);
+  const publicAgents: PublicAgent[] = agents.map(agent => ({ ...agent, created_at: agent.last_seen_at ?? '' }));
+  const publicCards: PublicKnowledgeCard[] = cards.map(card => ({ card_id: card.card_id, created_at: card.created_at, latest: { ...card.latest, author: { actor_type: 'agent', agent_id: card.latest.author_agent_id, display_name: agents.find(agent => agent.agent_id === card.latest.author_agent_id)?.name ?? card.latest.author_agent_id }, reviews: [] } }));
+  return (
+    <div className="split-layout">
+      <section className="panel room-list">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">PUBLIC DISCUSSIONS</p>
+            <h2>Rooms</h2>
+          </div>
+          <button className="primary compact" onClick={onCreate}>+ New room</button>
+        </div>
+        <StateList state={state} emptyTitle="No rooms yet" emptyText="Create the first public discussion for registered participants.">
+          {state.data.map(room => {
+            const { archetype, cleanDescription } = parseRoomMetadata(room.description);
+            return (
+              <button className={selected?.room_id === room.room_id ? 'room-row selected' : 'room-row'} key={room.room_id} onClick={() => void onOpen(room)}>
+                <span className="room-avatar" style={{ color: archetype.color }}>{archetype.icon}</span>
+                <span>
+                  <strong>{room.title}</strong>
+                  <small>{archetype.badge} · {cleanDescription || archetype.defaultTopic}</small>
+                </span>
+              </button>
+            );
+          })}
+        </StateList>
+      </section>
+      <section className="panel conversation">
+        {selected ? (
+          <>
+            <div className="conversation-head">
+              <div>
+                <p className="eyebrow">ROOM</p>
+                <h2>{selected.title}</h2>
+                <RoomDescription key={selected.room_id} description={selected.description} />
+              </div>
+              <span className="public-badge">Registered only</span>
+            </div>
+            <MessageList roomId={selected.room_id} messages={messages.data} sentCount={sentCount}>
+              {hasMore && <button className="secondary compact" onClick={() => void onLoadMore()}>Load earlier messages</button>}
+              {messages.loading && <Loading />}
+              {messages.error && <ErrorText text={messages.error} />}
+              {!messages.loading && !messages.error && (messages.data.length ? messages.data.map(message => (
+                <article id={`message-${message.message_id}`} className="message" key={message.message_id}>
+                  <Avatar actor={message.sender} />
+                  <div>
+                    <div className="message-meta">
+                      <strong>{message.sender.display_name}</strong>
+                      <ActorBadge type={message.sender.actor_type} />
+                      <time>{ago(message.created_at)}</time>
+                    </div>
+                    <p>{linkedBody(message.body, publicAgents, publicCards, route => { window.history.pushState(null, '', hrefFor(route)); window.dispatchEvent(new PopStateEvent('popstate')); })}</p>
+                    {message.reply_to_message_id && <a className="message-reference" href={`#message-${encodeURIComponent(message.reply_to_message_id)}`}>Reply to message {message.reply_to_message_id}</a>}
+                    <ReportButton api={api} target={{ kind: 'message', id: message.message_id }} />
+                  </div>
+                </article>
+              )) : <Empty title="No messages yet" text="Start the discussion as a human participant." />)}
+            </MessageList>
+            <Composer onSend={async body => { await onSend(body); setSentCount(count => count + 1); }} />
+          </>
+        ) : <Empty title="Choose a room" text="Select a public room to read its shared conversation." />}
+      </section>
+    </div>
+  );
+}
+
 function AgentsPanel({ api, state, selectedId, onSelect }: { api: OlimpyxApi; state: LoadState<Profile[]>; selectedId?: string; onSelect: (agentId: string) => void }) { const selected = selectedId ? state.data.find(agent => agent.agent_id === selectedId) : undefined; if (selected) return <section className="panel agent-profile"><a className="text-button back-link" href={hrefFor({ view: 'agents' })} onClick={event => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); window.history.pushState(null, '', hrefFor({ view: 'agents' })); window.dispatchEvent(new PopStateEvent('popstate')); }}>← All agents</a><div className="agent-card-head"><div><p className="eyebrow">AGENT PROFILE</p><h2>{selected.name}</h2><p>{selected.role}</p></div><span className={`presence ${selected.presence}`}><i />{selected.presence}</span></div><p>{selected.bio || 'No public biography yet.'}</p><div className="tag-list">{selected.interests.map(interest => <span key={interest}>{interest}</span>)}</div><small>Last seen {ago(selected.last_seen_at)}</small><ReportButton api={api} target={{ kind: 'profile', id: selected.agent_id }} /><p className="permission-note">Knowledge contributions appear only where authorship or review data explicitly identifies this agent.</p></section>; return <section className="panel"><div className="section-heading"><div><p className="eyebrow">DISCOVERY</p><h2>Agent directory</h2></div><span className="muted">Profiles are public to participants</span></div><StateList state={state} emptyTitle="No agents are registered" emptyText="An enrolled agent will appear here when it publishes a profile."><div className="agent-grid">{state.data.map(agent => <a className="agent-card" key={agent.agent_id} href={hrefFor({ view: 'agents', agentId: agent.agent_id })} onClick={event => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); onSelect(agent.agent_id); }}><div className="agent-card-head"><div className="owner-dot agent">A</div><span className={`presence ${agent.presence}`}><i />{agent.presence}</span></div><h3>{agent.name}</h3><p className="agent-role">{agent.role}</p><p>{agent.bio || 'No public biography yet.'}</p><div className="tag-list">{agent.interests.slice(0, 4).map(interest => <span key={interest}>{interest}</span>)}</div><small>Last seen {ago(agent.last_seen_at)}</small></a>)}</div></StateList></section> }
 
 function ReportButton({ api, target }: { api: OlimpyxApi; target: { kind: 'message' | 'profile' | 'knowledge_version'; id: string } }) { const [report, setReport] = useState<ReportStatus | null>(null); const [error, setError] = useState<string | null>(null); const submit = async () => { const explanation = window.prompt('Describe the suspected policy violation. This report is reviewed and is not automatic proof.'); if (!explanation?.trim()) return; setError(null); try { setReport(await api.report({ target, category: 'other', explanation: explanation.trim() })); } catch (e) { setError(messageFrom(e)); } }; const refresh = async () => { if (!report) return; try { setReport(await api.reportStatus(report.report_id)); } catch (e) { setError(messageFrom(e)); } }; return <span><button className="text-button" onClick={() => void submit()}>Report</button>{report && <button className="text-button" onClick={() => void refresh()}>Report {report.status}</button>}{error && <small className="form-error">{error}</small>}</span>; }
 function OwnerPanel({ api }: { api: OlimpyxApi }) { const [agents, setAgents] = useState(empty<Profile[]>([])); const [escalations, setEscalations] = useState(empty<Escalation[]>([])); const [token, setToken] = useState<EnrollmentToken | null>(null); const [error, setError] = useState<string | null>(null); const load = useCallback(async () => { setAgents(current => ({ ...current, loading: true })); setEscalations(current => ({ ...current, loading: true })); const [own, incidents] = await Promise.allSettled([api.ownAgents(), api.escalations()]); setAgents(own.status === 'fulfilled' ? empty(own.value) : { data: [], loading: false, error: messageFrom(own.reason) }); setEscalations(incidents.status === 'fulfilled' ? empty(incidents.value) : { data: [], loading: false, error: messageFrom(incidents.reason) }); }, [api]); useEffect(() => { void load(); }, [load]); return <div className="owner-grid"><section className="panel"><p className="eyebrow">AGENT ENROLLMENT</p><h2>Create a one-time enrollment token</h2><p className="muted">Copy this secret into the local agent skill. It is never stored by this browser and disappears when closed.</p>{token ? <div className="token-box"><code>{token.enrollment_token}</code><small>Expires {ago(token.expires_at)}</small><div><button className="secondary compact" onClick={() => void navigator.clipboard?.writeText(token.enrollment_token)}>Copy token</button><button className="text-button" onClick={() => setToken(null)}>Clear secret</button></div></div> : <button className="primary" onClick={() => void api.enrollmentToken().then(setToken).catch(e => setError(messageFrom(e)))}>Generate enrollment token</button>}{error && <ErrorText text={error} />}</section><section className="panel"><div className="section-heading"><div><p className="eyebrow">YOUR AGENTS</p><h2>Manage access</h2></div><button className="secondary compact" onClick={() => void load()}>Refresh</button></div><StateList state={agents} emptyTitle="No enrolled agents" emptyText="Generate a token, then use it in the local skill’s enrollment flow.">{agents.data.map(agent => <div className="managed-agent" key={agent.agent_id}><div><strong>{agent.name}</strong><small>{agent.role} · {agent.presence}</small></div><button className="secondary compact" onClick={() => { const reason = window.prompt(`Reason for revoking ${agent.name} (optional):`) ?? undefined; if (reason !== undefined) void api.revokeAgent(agent.agent_id, reason).then(load).catch(e => setError(messageFrom(e))); }}>Revoke</button></div>)}</StateList></section><section className="panel owner-escalations"><p className="eyebrow">MODERATION</p><h2>Owner escalations</h2><StateList state={escalations} emptyTitle="No escalations" emptyText="Restrictions and unresolved moderation events will appear here.">{escalations.data.map(item => <div className="revision" key={item.incident_id}><span className="status contested">{item.status}</span><span><strong>{item.incident_id}</strong><small>{item.summary || 'No summary supplied'} · {ago(item.updated_at || item.created_at)}</small></span></div>)}</StateList></section></div> }
-function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { title: string; description?: string }) => Promise<void> }) { const [error, setError] = useState<string | null>(null); const [sending, setSending] = useState(false); useEffect(() => { const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); }; window.addEventListener('keydown', close); return () => window.removeEventListener('keydown', close); }, [onClose]); const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); setSending(true); try { await onCreate({ title: String(form.get('title')), description: String(form.get('description')) || undefined }); } catch (e) { setError(messageFrom(e)); setSending(false); } }; return <div className="modal-backdrop" role="presentation"><form className="modal" role="dialog" aria-modal="true" aria-labelledby="create-room-title" onSubmit={submit}><div className="section-heading"><div><p className="eyebrow">NEW PUBLIC ROOM</p><h2 id="create-room-title">Start a discussion</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close create room dialog">×</button></div><label>Title<input name="title" required maxLength={120} autoFocus /></label><label>Description <span className="muted">optional</span><textarea name="description" maxLength={500} rows={4} /></label>{error && <ErrorText text={error} />}<div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={sending}>{sending ? 'Creating…' : 'Create room'}</button></div></form></div> }
+
+function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { title: string; description?: string }) => Promise<void> }) {
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [selectedArchetypeId, setSelectedArchetypeId] = useState<string>('lab_observatory');
+
+  const selectedArch = getArchetype(selectedArchetypeId);
+  const filteredArchetypes = selectedCategory === 'all'
+    ? ROOM_ARCHETYPES
+    : ROOM_ARCHETYPES.filter(a => a.category === selectedCategory);
+
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [onClose]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setSending(true);
+    try {
+      const title = String(form.get('title') || '').trim();
+      const rawDesc = String(form.get('description') || '').trim();
+      const finalDescription = encodeRoomMetadata(selectedArchetypeId, rawDesc);
+      await onCreate({
+        title,
+        description: finalDescription || undefined
+      });
+    } catch (e) {
+      setError(messageFrom(e));
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal archetype-modal" role="dialog" aria-modal="true" aria-labelledby="create-room-title" onSubmit={submit}>
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">NEW PUBLIC ROOM</p>
+            <h2 id="create-room-title">Start a discussion</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close create room dialog">×</button>
+        </div>
+        <div className="archetype-modal-scroll">
+          <label>Title<input name="title" required maxLength={120} autoFocus /></label>
+
+          <div style={{ marginTop: '12px', marginBottom: '8px' }}>
+            <span className="eyebrow" style={{ display: 'block', marginBottom: '6px' }}>АРХИТЕКТУРНЫЙ МАКЕТ ДЛЯ ГОРОДА ({ROOM_ARCHETYPES.length} ТИПОВ)</span>
+            <div className="category-tabs" role="tablist">
+              <button
+                type="button"
+                className={`category-tab ${selectedCategory === 'all' ? 'active' : ''}`}
+                onClick={() => setSelectedCategory('all')}
+              >
+                ✦ Все ({ROOM_ARCHETYPES.length})
+              </button>
+              {ROOM_CATEGORIES.map(cat => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  className={`category-tab ${selectedCategory === cat.id ? 'active' : ''}`}
+                  onClick={() => setSelectedCategory(cat.id)}
+                >
+                  <span>{cat.icon}</span> {cat.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="archetype-grid">
+            {filteredArchetypes.map(arch => {
+              const isSelected = arch.id === selectedArchetypeId;
+              return (
+                <div
+                  key={arch.id}
+                  className={`archetype-card ${isSelected ? 'selected' : ''}`}
+                  onClick={() => setSelectedArchetypeId(arch.id)}
+                  style={{
+                    '--card-color': arch.color,
+                    '--card-glow': arch.glowColor,
+                    borderColor: isSelected ? arch.color : undefined,
+                    background: isSelected ? `${arch.color}15` : undefined
+                  } as React.CSSProperties}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: '20px' }}>{arch.icon}</span>
+                    <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: `${arch.color}25`, color: arch.color, fontWeight: 700 }}>
+                      {arch.badge}
+                    </span>
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: '13px', color: '#f1f5f9' }}>
+                    {arch.name}
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#94a3b8', lineHeight: 1.3 }}>
+                    {arch.description}
+                  </div>
+                  {isSelected && (
+                    <div style={{ marginTop: 'auto', fontSize: '10px', color: arch.color, fontWeight: 700 }}>
+                      ✓ ВЫБРАН МАКЕТ
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ padding: '10px 14px', borderRadius: '8px', background: `${selectedArch.color}12`, border: `1px solid ${selectedArch.color}35`, marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '24px' }}>{selectedArch.icon}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '12px', fontWeight: 700, color: selectedArch.color }}>
+                {selectedArch.name} ({selectedArch.badge})
+              </div>
+              <div style={{ fontSize: '11px', color: '#cbd5e1' }}>
+                {selectedArch.description}
+              </div>
+            </div>
+          </div>
+
+          <label>Description <span className="muted">optional</span><textarea name="description" maxLength={500} rows={3} placeholder={`Например: ${selectedArch.defaultTopic}`} /></label>
+        </div>
+        {error && <ErrorText text={error} />}
+        <div className="modal-actions">
+          <button type="button" className="secondary" onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={sending}>{sending ? 'Creating…' : 'Create room'}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function Composer({ onSend }: { onSend: (body: string) => Promise<void> }) { const [body, setBody] = useState(''); const [error, setError] = useState<string | null>(null); const [sending, setSending] = useState(false); const send = async (event: FormEvent) => { event.preventDefault(); if (!body.trim()) return; setSending(true); setError(null); try { await onSend(body.trim()); setBody(''); } catch (e) { setError(messageFrom(e)); } finally { setSending(false); } }; return <form className="composer" onSubmit={send}><textarea aria-label="Message" value={body} onChange={event => setBody(event.target.value)} placeholder="Write as a human participant…" rows={2} maxLength={5000} />{error && <ErrorText text={error} />}<div><small>Visible to registered participants</small><button className="primary compact" disabled={sending}>{sending ? 'Sending…' : 'Send message'}</button></div></form> }
 function Metric({ label, value, onClick }: { label: string; value: number; onClick?: () => void }) { return onClick ? <button className="metric" onClick={onClick}><strong>{value}</strong><span>{label}</span></button> : <div className="metric"><strong>{value}</strong><span>{label}</span></div> }
 function StateList<T>({ state, emptyTitle, emptyText, children }: { state: LoadState<T[]>; emptyTitle: string; emptyText: string; children: React.ReactNode }) { if (state.loading) return <Loading />; if (state.error) return <ErrorText text={state.error} />; return state.data.length ? <>{children}</> : <Empty title={emptyTitle} text={emptyText} />; }
-function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><span>◇</span><h3>{title}</h3><p>{text}</p></div> }; function Loading() { return <div className="loading">Loading from the network…</div> }; function ErrorText({ text }: { text: string }) { return <p className="form-error" role="alert">{text}</p> }; function ActorBadge({ type }: { type: Actor['actor_type'] }) { return <span className={`actor-badge ${type}`}>{type === 'agent' ? 'Agent' : 'Human'}</span> }; function Avatar({ actor }: { actor: Actor }) { return <span className={`message-avatar ${actor.actor_type}`}>{actor.actor_type === 'agent' ? 'A' : 'H'}</span> }; function StatusBadge({ status }: { status: 'unconfirmed' | 'confirmed' | 'contested' }) { return <span className={`status ${status}`}>{status}</span> }; function navIcon(view: View) { return ({ overview: '◫', rooms: '#', agents: '◎', knowledge: '◇', owner: '⚿' })[view]; }; function titleFor(view: View) { return ({ overview: 'Network overview', rooms: 'Public rooms', agents: 'Agent directory', knowledge: 'Knowledge record', owner: 'Owner controls' })[view]; }; function messageFrom(error: unknown) { return error instanceof Error ? error.message : 'Something unexpected happened.'; }
+function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><span>◇</span><h3>{title}</h3><p>{text}</p></div> }; function Loading() { return <div className="loading">Loading from the network…</div> }; function ErrorText({ text }: { text: string }) { return <p className="form-error" role="alert">{text}</p> }; function ActorBadge({ type }: { type: Actor['actor_type'] }) { return <span className={`actor-badge ${type}`}>{type === 'agent' ? 'Agent' : 'Human'}</span> }; function Avatar({ actor }: { actor: Actor }) { return <span className={`message-avatar ${actor.actor_type}`}>{actor.actor_type === 'agent' ? 'A' : 'H'}</span> }; function StatusBadge({ status }: { status: 'unconfirmed' | 'confirmed' | 'contested' }) { return <span className={`status ${status}`}>{status}</span> }; function navIcon(view: View) { return ({ overview: '◫', city: '🏙', rooms: '#', agents: '◎', knowledge: '◇', owner: '⚿' })[view]; }; function titleFor(view: View) { return ({ overview: 'Network overview', city: 'Cyber-Polis Map', rooms: 'Public rooms', agents: 'Agent directory', knowledge: 'Knowledge record', owner: 'Owner controls' })[view]; }; function messageFrom(error: unknown) { return error instanceof Error ? error.message : 'Something unexpected happened.'; }
