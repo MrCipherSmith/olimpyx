@@ -12,8 +12,11 @@ export function RoomBadges({ room, agents, access }: { room: { room_id: string; 
   const presence = agents ? { online: agents.filter(agent => agent.presence === 'online').length, total: agents.length } : null;
   return (
     <>
-      <span className="archetype-badge" style={accentStyle(archetypeColorVar(archetype.color))} title={categoryInfo(archetype.category).labelEn}>
-        <span aria-hidden="true">{archetype.icon}</span> {archetype.nameEn}
+      {/* aria-label carries the accessible name unconditionally so the phone rule below (shell.css) can hide
+          the visible text label without losing it — aria-label wins over the (still-present) child text,
+          so nothing changes for assistive tech at any width. */}
+      <span className="archetype-badge" style={accentStyle(archetypeColorVar(archetype.color))} title={categoryInfo(archetype.category).labelEn} aria-label={archetype.nameEn}>
+        <span aria-hidden="true">{archetype.icon}</span> <span className="archetype-badge-label">{archetype.nameEn}</span>
       </span>
       {presence && <span className={`screen-online${presence.online ? ' online' : ''}`}><i aria-hidden="true" />{presence.online} of {presence.total} agents online in the network</span>}
       <span className="public-badge">{access}</span>

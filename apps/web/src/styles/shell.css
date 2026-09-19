@@ -628,6 +628,72 @@
     gap: 4px 8px;
   }
 
+  /* Room screen only (PROMPT §7/§8): the title stays a single line (ellipsis instead of wrapping to
+     2–3 lines) and the network-presence line and archetype label text are dropped — together these are
+     what let the message history clear 60% of the viewport at 320×568 and 390×700 even with a long room
+     title. Back + actions keep their own row (the ≤900px rule above already gives the title its own full
+     -width row below them); the badge/presence markup itself is unchanged (RoomHeader.tsx) — this is a
+     phone-only visual fold, not a data loss, and the archetype badge keeps its accessible name via
+     aria-label (see RoomHeader.tsx) after its text is hidden here. Other screens (Rooms, Library,
+     Pantheon, Praetorium) keep the same layout — their titles are short and fixed, so there is nothing to
+     reclaim there. */
+  .screen-room .screen-title-row {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .screen-room .screen-title-row h1 {
+    overflow: hidden;
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  /* Network presence ("N of M agents online in the network") stays on tablet/desktop; on a phone the
+     room header only has room for the essentials, and this is derived, network-wide information rather
+     than something specific to the room. */
+  .screen-room .screen-online {
+    display: none;
+  }
+
+  .screen-room .archetype-badge {
+    flex: none;
+    padding: 3px 6px;
+  }
+
+  /* Icon-only archetype badge; RoomHeader.tsx gives the badge an aria-label with the full name so the
+     accessible name survives even though the visible text is hidden here. */
+  .screen-room .archetype-badge-label {
+    display: none;
+  }
+
+  .screen-room .public-badge {
+    flex: none;
+  }
+
+  .screen-room .screen-subline {
+    margin-top: 2px;
+  }
+
+  .room-description-details summary {
+    padding: 1px 0;
+  }
+
+  /* The room screen's own header row (back + actions) is squeezed a little further than the shared
+     ≤900px header: min-height 40px (base .screen-back / button sizing, styles.css) is comfortably above
+     the 24px WCAG 2.5.5 AA floor, so 36px still clears it with margin while buying back a few more px of
+     history. Scoped to the room screen only — every other phone header keeps the standard sizing. */
+  .screen-room .screen-header {
+    gap: 4px;
+    padding: 3px 10px;
+  }
+
+  .screen-room .screen-back {
+    min-height: 36px;
+    padding: 5px 10px;
+  }
+
   /* "All rooms" collapses to an icon-only compact button rather than disappearing. It duplicates the tab
      bar's Rooms tab, but the tab bar is covered and inert while this screen is open (CityShell.tsx) — only
      "Back to the city" reaches it — so this stays the one-tap way back to the room list. Verified to keep
@@ -673,6 +739,15 @@
 
   .screen-room .composer {
     padding-top: 2px;
+  }
+
+  /* Shorter than the sitewide 44px-min textarea (styles.css): the composer's own `rows={2}` (Composer.tsx)
+     otherwise costs ~60px here, which is the difference between clearing 60% of the viewport at 320×568
+     and not. `resize: vertical` (styles.css) is unchanged, so anyone who wants more room can still drag it
+     open; the shrink is a phone-only default, not a cap. */
+  .screen-room .composer textarea {
+    height: 44px;
+    padding: 8px 10px;
   }
 
   .screen-room .composer .primary.compact {
