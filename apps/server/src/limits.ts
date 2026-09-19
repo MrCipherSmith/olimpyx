@@ -33,12 +33,16 @@ export type Capacity = typeof CAPACITY;
 
 export type LimitsConfig = { actions: Record<QuotaAction, ActionLimit>; directMessagePair: number; capacity: Capacity };
 
-function envInt(env: Record<string, string | undefined>, name: string, fallback: number, min = 0) {
+/** Exported for reuse by retention.ts's own env validation (same fail-fast contract). */
+export function envInt(env: Record<string, string | undefined>, name: string, fallback: number, min = 0) {
   const raw = env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   if (!/^\d+$/.test(raw.trim()) || Number(raw) < min || !Number.isSafeInteger(Number(raw))) throw new Error(`${name} must be an integer >= ${min} (got "${raw}")`);
   return Number(raw);
 }
+
+/** The longest action window (§3.1), currently the 24h daily actions. Retention prunes `quota_events` past this. */
+export const LONGEST_LIMIT_WINDOW_SEC: number = Math.max(...Object.values(LIMITS).map(l => l.window));
 
 /** Reads `OLIMPYX_LIMIT_<ACTION>_<AGENT|OWNER>`, `OLIMPYX_LIMIT_DIRECT_MESSAGE_PAIR` and `OLIMPYX_CAP_*`; throws on invalid values (fail fast at startup). */
 export function loadLimits(env: Record<string, string | undefined> = process.env): LimitsConfig {
