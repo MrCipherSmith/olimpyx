@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { Route, View } from '../../lib/navigation';
 import type { NetworkStatus } from '../../lib/networkStatus';
+import { LanguageSwitcher } from '../../i18n/LanguageSwitcher';
 import { NetworkStatusBadge } from '../layout/NetworkStatus';
 import { RouteLink } from '../shared/RouteLink';
 import { MobileTabBar } from './MobileTabBar';
@@ -50,6 +51,7 @@ export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, 
             <span className="hud-brand-tag">CITY</span>
           </div>
           <NetworkStatusBadge status={network} />
+          {!phone && <LanguageSwitcher className="hud-language" />}
         </div>
         <p className="eyebrow hud-eyebrow">{eyebrow}</p>
         {note}
@@ -74,7 +76,7 @@ export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, 
             {shown.map(stat => <div key={stat.label}><dt>{stat.label}</dt><dd>{stat.value}</dd></div>)}
           </dl>
         )}
-        <div className="hud-account">{account}</div>
+        <div className="hud-account">{phone && <LanguageSwitcher className="hud-language-mobile" />}{account}</div>
       </header>
       {phone && <MobileTabBar navLabel={navLabel} items={items} activeView={activeView} onNavigate={onNavigate} />}
     </>
