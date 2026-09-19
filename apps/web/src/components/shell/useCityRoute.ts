@@ -28,6 +28,16 @@ export interface CityRoute {
 
 const identity = (route: Route) => route;
 const currentRoute = () => readRoute(typeof window === 'undefined' ? '' : window.location.search);
+const currentHref = () => `${window.location.pathname}${window.location.search}`;
+const sameRoute = (a: Route, b: Route) => hrefFor(a, '') === hrefFor(b, '');
+
+/** The route the viewer may open; a rewritten one (a guest's `?view=owner`) also replaces the URL. */
+function readAllowedRoute(normalize: (route: Route) => Route): Route {
+  const raw = currentRoute();
+  const allowed = normalize(raw);
+  if (typeof window !== 'undefined' && !sameRoute(raw, allowed)) window.history.replaceState(window.history.state, '', hrefFor(allowed));
+  return allowed;
+}
 
 /**
  * The shell's route and history, with the dive transition in between (PROMPT §4). The URL is pushed when
@@ -37,7 +47,7 @@ const currentRoute = () => readRoute(typeof window === 'undefined' ? '' : window
 export function useCityRoute({ buildings, camera, normalize = identity }: CityRouteOptions): CityRoute {
   const reducedMotion = usePrefersReducedMotion();
   const phone = useMediaQuery(PHONE_QUERY);
-  const [route, setRoute] = useState<Route>(() => normalize(currentRoute()));
+  const [route, setRoute] = useState<Route>(() => readAllowedRoute(normalize));
   const latest = useRef({ route, buildings, camera, normalize, reducedMotion, phone });
   latest.current = { ...latest.current, buildings, camera, normalize, reducedMotion, phone };
 
@@ -45,7 +55,9 @@ export function useCityRoute({ buildings, camera, normalize = identity }: CityRo
   if (!controllerRef.current) {
     controllerRef.current = new DiveController(initialDiveState(screenFor(route) !== null), {
       commit: ({ route: next, push }) => {
-        if (push) window.history.pushState(null, '', hrefFor(next));
+        // Never push the entry already shown (Overview on the city, a close after Back): Back must work.
+        const href = hrefFor(next);
+        if (push && href !== currentHref()) window.history.pushState(null, '', href);
         latest.current.route = next;
         setRoute(next);
       },
@@ -81,8 +93,8 @@ export function useCityRoute({ buildings, camera, normalize = identity }: CityRo
   // Back / Forward: the URL already changed; show what it says (screens at once, closing with the exit).
   useEffect(() => {
     const onPopState = () => {
-      const next = currentRoute();
-      go(next, false, screenFor(latest.current.normalize(next)) !== null);
+      const next = readAllowedRoute(latest.current.normalize);
+      go(next, false, screenFor(next) !== null);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);

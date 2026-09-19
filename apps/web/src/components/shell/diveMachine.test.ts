@@ -142,6 +142,37 @@ describe('dive state machine', () => {
     expect(commits).toEqual([{ route: overview, push: false }, { route: overview, push: true }]);
   });
 
+  it('browser Back during a Rooms → room redive never pushes (the history already moved)', () => {
+    const { controller, commits } = setup(insideState(null));
+    controller.send({ type: 'open', route: { view: 'rooms', roomId: 'r1' }, target: room, animate: true, push: true, redive: true });
+    vi.advanceTimersByTime(DIVE_TIMINGS.focusMs + 100); // diving
+    controller.send({ type: 'close', route: overview, animate: true, push: false });
+    expect(controller.state).toEqual(IDLE);
+    expect(commits).toEqual([{ route: overview, push: false }, { route: overview, push: false }]);
+    vi.advanceTimersByTime(5000);
+    expect(commits).toHaveLength(2);
+  });
+
+  it('browser Back during the covered exit turns the pending push into a plain commit, keeping the timing', () => {
+    const { controller, commits, moves } = setup(insideState(library));
+    controller.send({ type: 'close', route: overview, animate: true, push: true }); // "Back to the city"
+    vi.advanceTimersByTime(100);
+    controller.send({ type: 'close', route: overview, animate: true, push: false }); // browser Back meanwhile
+    expect(controller.state).toMatchObject({ phase: 'exiting', covered: true, pending: { route: overview, push: false } });
+    expect(commits).toEqual([]);
+    vi.advanceTimersByTime(DIVE_TIMINGS.coverMs - 100);
+    expect(commits).toEqual([{ route: overview, push: false }]);
+    expect(moves.at(-1)).toEqual({ kind: 'return', ms: DIVE_TIMINGS.returnMs });
+    vi.advanceTimersByTime(DIVE_TIMINGS.returnMs);
+    expect(controller.state).toEqual(IDLE);
+  });
+
+  it('a user close (push) during the exit is still ignored', () => {
+    const step = reduceDive({ ...insideState(library), phase: 'exiting', covered: true, pending: { route: overview, push: false } }, { type: 'close', route: overview, animate: true, push: true });
+    expect(step.effects).toEqual([]);
+    expect(step.state.pending).toEqual({ route: overview, push: false });
+  });
+
   it('dispose clears the pending timer', () => {
     const { controller, commits } = setup();
     controller.send({ type: 'open', route: knowledge, target: library, animate: true, push: true });

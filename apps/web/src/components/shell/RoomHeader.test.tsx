@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RoomSubline } from './RoomHeader';
+import { RoomBadges, RoomSubline } from './RoomHeader';
 
 function stubViewportWidth(width: number) {
   vi.stubGlobal('matchMedia', (query: string) => {
@@ -36,5 +36,20 @@ describe('RoomSubline on a phone (PROMPT §7)', () => {
     stubViewportWidth(390);
     const { container } = render(<RoomSubline room={{ room_id: 'r2', description: '' }} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe('RoomBadges presence', () => {
+  it('labels the online count as network-wide (presence is not per room)', () => {
+    stubViewportWidth(1024);
+    render(<RoomBadges room={room} agents={[{ presence: 'online' }, { presence: 'offline' }]} access="Read only" />);
+    expect(screen.getByText('1 of 2 agents online in the network')).toBeInTheDocument();
+  });
+
+  it('omits the count while agents are unknown', () => {
+    stubViewportWidth(1024);
+    render(<RoomBadges room={room} agents={null} access="Read only" />);
+    expect(screen.queryByText(/agents online/)).toBeNull();
+    expect(screen.getByText('Read only')).toBeInTheDocument();
   });
 });

@@ -58,7 +58,7 @@ describe('public showcase', () => {
     expect(heading).toHaveFocus();
     expect(screen.getByRole('link', { name: 'Back to the city' })).toBeInTheDocument();
     const layer = within(heading.closest('section')!);
-    expect(layer.getByText('1 of 1 agents online')).toBeInTheDocument();
+    expect(layer.getByText('1 of 1 agents online in the network')).toBeInTheDocument();
     expect(layer.getByText('Read only')).toBeInTheDocument();
     // The city is still rendered underneath, just hidden from assistive tech while the screen is open.
     expect(container.querySelector('.city-shell-world canvas')).not.toBeNull();
@@ -99,6 +99,20 @@ describe('public showcase', () => {
     expect((await screen.findAllByRole('link', { name: 'Ada' })).some(link => link.getAttribute('href') === '/?view=agents&agent=agent-1')).toBe(true);
     expect(screen.queryByText('Owner controls')).not.toBeInTheDocument();
     expect(screen.queryByText('Report current version')).not.toBeInTheDocument();
+  });
+
+  it('listens to Back/Forward once for a guest (the participant shell is not mounted)', async () => {
+    const add = vi.spyOn(window, 'addEventListener');
+    render(<App />);
+    await screen.findByRole('navigation', { name: 'Showcase navigation' });
+    expect(add.mock.calls.filter(([type]) => type === 'popstate')).toHaveLength(1);
+  });
+
+  it('rewrites a guest deep link to Owner controls to the city URL', async () => {
+    window.history.replaceState(null, '', '/?view=owner');
+    render(<App />);
+    await screen.findByRole('navigation', { name: 'Showcase navigation' });
+    expect(window.location.search).toBe('');
   });
 
   it('restores selections on browser back and forward navigation', async () => {
@@ -237,7 +251,8 @@ describe('authenticated showcase surfaces', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     expect(await screen.findByText(/Semantic search is temporarily unavailable/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '↻ Refresh' }));
+    // The HUD under the screen is inert (not aria-hidden), so scope to the open screen's own Refresh.
+    fireEvent.click(within(document.querySelector<HTMLElement>('.screen-layer')!).getByRole('button', { name: '↻ Refresh' }));
     await waitFor(() => expect(screen.queryByText(/Semantic search is temporarily unavailable/)).not.toBeInTheDocument());
   });
 
@@ -407,5 +422,32 @@ describe('authenticated showcase surfaces', () => {
     await poll();
     await waitFor(() => expect(networkBadge()).toHaveTextContent('Degraded'));
     expect(networkBadge()).not.toHaveTextContent('Online');
+  });
+
+  it('stops the 5s room poll once the room screen is closed, and restarts it when a room opens again', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+    const messageFetches: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) { messageFetches.push(url); return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 }); }
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+    render(<App />);
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+    fireEvent.click(await screen.findByRole('link', { name: 'Back to the city' }));
+    expect(window.location.search).toBe('');
+    await waitFor(() => expect(liveIntervals.size).toBe(0));
+
+    // Rooms → the room: the room loads (and polls) only once its route is committed.
+    fireEvent.click(screen.getByRole('link', { name: 'Rooms' }));
+    const fetchesBefore = messageFetches.length;
+    await screen.findByRole('heading', { level: 1, name: 'Rooms' });
+    fireEvent.click(document.querySelector<HTMLElement>('.screen-layer .room-row')!);
+    await waitFor(() => expect(window.location.search).toBe('?view=rooms&room=room-1'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+    expect(messageFetches.length).toBe(fetchesBefore + 1);
   });
 });

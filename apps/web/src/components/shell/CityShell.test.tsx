@@ -62,15 +62,17 @@ describe('CityShell screens and focus', () => {
     expect(screen.getByRole('link', { name: 'Knowledge' })).toHaveFocus();
   });
 
-  it('makes the city and HUD inert and hidden while a screen covers them', () => {
+  it('makes the city and HUD inert while a screen covers them', () => {
     const { container } = render(<Harness initial={{ view: 'rooms' }} />);
-    expect(screen.queryByRole('navigation', { name: 'Main navigation' })).toBeNull();
     expect(container.querySelector('.city-shell-hud')).toHaveAttribute('inert');
-    expect(container.querySelector('.city-shell-world')).toHaveAttribute('aria-hidden', 'true');
+    expect(container.querySelector('.city-shell-world')).toHaveAttribute('inert');
+    // inert alone hides them: no aria-hidden on an ancestor that may still hold the focus.
+    expect(container.querySelector('.city-shell-hud')).not.toHaveAttribute('aria-hidden');
+    expect(container.querySelector('.city-shell-world')).not.toHaveAttribute('aria-hidden');
     expect(screen.getAllByRole('main')).toHaveLength(1);
     fireEvent.click(screen.getByRole('link', { name: 'Back to the city' }));
-    expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument();
     expect(container.querySelector('.city-shell-hud')).not.toHaveAttribute('inert');
+    expect(container.querySelector('.city-shell-world')).not.toHaveAttribute('inert');
   });
 
   it('does not close on Escape while a dialog is open or while typing a draft', () => {

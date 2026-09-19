@@ -102,6 +102,15 @@ describe('CityView accessible building list', () => {
     expect(screen.queryByRole('navigation', { name: 'City buildings' })).toBeNull();
   });
 
+  it('says a category is empty for a participant too (the Praetorium is not a room)', () => {
+    const agoraOnly = [rooms[0]];
+    render(<CityView rooms={agoraOnly} scene={buildCityScene(agoraOnly, { includePraetorium: true })} mode="participant" onNavigate={vi.fn()} />);
+    fireEvent.click(within(screen.getByRole('group', { name: 'Filter buildings by category' })).getByRole('button', { name: /Science/ }));
+    expect(screen.getByText('No rooms in this category.')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('group', { name: 'Filter buildings by category' })).getByRole('button', { name: /Agora/ }));
+    expect(screen.queryByText('No rooms in this category.')).toBeNull();
+  });
+
   it('guest mode says when nothing is published yet', () => {
     render(<CityView rooms={[]} mode="guest" onNavigate={vi.fn()} />);
     expect(screen.getByText('No published rooms yet.')).toBeInTheDocument();
@@ -183,5 +192,41 @@ describe('buildCityScene', () => {
     expect(scene.buildings.filter(building => building.kind === 'room')).toHaveLength(31);
     expect(scene.rings).toEqual([520, 780, 1040, 1300]);
     expect(buildCityScene([]).rings).toEqual([520]);
+  });
+});
+
+describe('CityView directory panel across viewport changes', () => {
+  /** A viewport whose width can change later, notifying the matchMedia listeners like a real resize. */
+  function resizableViewport(initial: number) {
+    let width = initial;
+    const lists: Array<{ query: string; listeners: Set<() => void>; readonly matches: boolean }> = [];
+    const matchesAt = (query: string) => {
+      const max = query.match(/max-width:\s*(\d+)px/);
+      const min = query.match(/min-width:\s*(\d+)px/);
+      return (!max || width <= Number(max[1])) && (!min || width >= Number(min[1]));
+    };
+    vi.stubGlobal('matchMedia', (query: string) => {
+      const listeners = new Set<() => void>();
+      const list = { query, listeners, get matches() { return matchesAt(query); }, media: query, addEventListener: (_: string, fn: () => void) => listeners.add(fn), removeEventListener: (_: string, fn: () => void) => listeners.delete(fn) };
+      lists.push(list);
+      return list;
+    });
+    return (next: number) => act(() => { width = next; lists.forEach(list => list.listeners.forEach(fn => fn())); });
+  }
+
+  it('follows the viewport (open on desktop, collapsed when compact) until the user toggles it', () => {
+    const resize = resizableViewport(1280);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
+    const toggle = screen.getByRole('button', { name: /Buildings/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    resize(768);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    resize(1280);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(toggle); // the user's choice now wins over the viewport
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    resize(768);
+    resize(1280);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
   });
 });

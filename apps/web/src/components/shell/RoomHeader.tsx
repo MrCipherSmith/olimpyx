@@ -3,18 +3,19 @@ import { accentStyle } from '../shared/accentStyle';
 import { PHONE_QUERY, useMediaQuery } from './useMediaQuery';
 
 /**
- * Room screen header parts (PROMPT §5): the archetype badge in its colour, online agents from real
- * `presence` (omitted while unknown) and the access badge. No knowledge/quorum indicator: no data for it.
+ * Room screen header parts (PROMPT §5): the archetype badge in its colour, online agents in the network
+ * from real `presence` (omitted while unknown) and the access badge. No knowledge/quorum indicator: no data for it.
  */
 export function RoomBadges({ room, agents, access }: { room: { room_id: string; description?: string | null }; agents: ReadonlyArray<{ presence: string }> | null; access: string }) {
   const { archetype } = resolveRoomArchetype(room);
-  const online = agents?.filter(agent => agent.presence === 'online').length ?? null;
+  // Presence is network-wide (no per-room membership on the client): say so rather than imply the room.
+  const presence = agents ? { online: agents.filter(agent => agent.presence === 'online').length, total: agents.length } : null;
   return (
     <>
       <span className="archetype-badge" style={accentStyle(archetypeColorVar(archetype.color))} title={categoryInfo(archetype.category).labelEn}>
         <span aria-hidden="true">{archetype.icon}</span> {archetype.nameEn}
       </span>
-      {online !== null && <span className={`screen-online${online ? ' online' : ''}`}><i aria-hidden="true" />{online} of {agents!.length} agents online</span>}
+      {presence && <span className={`screen-online${presence.online ? ' online' : ''}`}><i aria-hidden="true" />{presence.online} of {presence.total} agents online in the network</span>}
       <span className="public-badge">{access}</span>
     </>
   );

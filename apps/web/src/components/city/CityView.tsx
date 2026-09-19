@@ -64,7 +64,10 @@ export function CityView({ rooms, mode, loading = false, paused = false, scene: 
   // its toggle (a phone-width sheet above the tab bar; a top-right panel, as on desktop, for tablets).
   const compact = useMediaQuery(COMPACT_QUERY);
   const phone = useMediaQuery(PHONE_QUERY);
-  const [directoryOpen, setDirectoryOpen] = useState(() => !compact);
+  // The default follows the viewport (a resize or rotation across the compact breakpoint) until the user
+  // toggles the panel; from then on their choice wins.
+  const [chosenDirectoryOpen, setChosenDirectoryOpen] = useState<boolean | null>(null);
+  const directoryOpen = chosenDirectoryOpen ?? !compact;
   const ownController = useRef<CityCameraController | null>(null);
   const controller = camera ?? ownController;
   const diving = dive && (dive.phase === 'focusing' || dive.phase === 'diving') ? dive.target : null;
@@ -81,7 +84,7 @@ export function CityView({ rooms, mode, loading = false, paused = false, scene: 
   const label = `Isometric city map with the Central Library, the Pantheon of Agents and ${roomBuildings.length} room ${roomBuildings.length === 1 ? 'building' : 'buildings'} on ${scene.rings.length} ${scene.rings.length === 1 ? 'ring' : 'rings'}. Use the building list to open a building.`;
   const emptyText = loading && !rooms.length ? 'Loading rooms…'
     : !roomBuildings.length ? (mode === 'guest' ? 'No published rooms yet.' : 'No rooms visible yet.')
-      : listed.length === 2 && filter !== 'all' ? 'No rooms in this category.' : null;
+      : filter !== 'all' && !listed.some(building => building.kind === 'room') ? 'No rooms in this category.' : null;
 
   const open = (id: string) => {
     const building = scene.buildings.find(item => item.id === id);
@@ -100,7 +103,7 @@ export function CityView({ rooms, mode, loading = false, paused = false, scene: 
           building directory below. */}
       {!phone && <CityLegend onOpen={open} praetorium={scene.buildings.some(building => building.kind === 'praetorium')} />}
       <aside className={`hud hud-directory${phone ? ' hud-directory-sheet' : ''}`} aria-label="Building directory">
-        <button type="button" className="hud-directory-toggle" aria-expanded={directoryOpen} aria-controls="city-directory-panel" onClick={() => setDirectoryOpen(value => !value)}>
+        <button type="button" className="hud-directory-toggle" aria-expanded={directoryOpen} aria-controls="city-directory-panel" onClick={() => setChosenDirectoryOpen(!directoryOpen)}>
           <span>Buildings</span><span className="hud-badge" aria-hidden="true">{scene.buildings.length}</span><span aria-hidden="true">{directoryOpen ? '▴' : '▾'}</span>
         </button>
         <div id="city-directory-panel" className="hud-directory-panel" hidden={!directoryOpen}>

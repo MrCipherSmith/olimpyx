@@ -4,7 +4,7 @@ import { AuthScreen } from './components/auth/AuthScreen';
 import type { CityCameraController } from './components/city/CityCanvas';
 import { CityView } from './components/city/CityView';
 import { buildCityScene } from './components/city/cityScene';
-import { inhabitantActivityFromMessages } from './components/city/inhabitants';
+import { type InhabitantActivityInput, inhabitantActivityFromMessages } from './components/city/inhabitants';
 import { KnowledgePanel } from './components/knowledge/KnowledgePanel';
 import { OwnerPanel } from './components/owner/OwnerPanel';
 import { CreateRoom } from './components/rooms/CreateRoom';
@@ -18,45 +18,85 @@ import { CityShell } from './components/shell/CityShell';
 import { DiveOverlay } from './components/shell/DiveOverlay';
 import { RoomBadges, RoomSubline } from './components/shell/RoomHeader';
 import { ScreenLayer } from './components/shell/ScreenLayer';
+import { useStableActivity } from './components/shell/stableActivity';
 import { useCityRoute } from './components/shell/useCityRoute';
 import { PublicShowcase } from './components/showcase/PublicShowcase';
 import { OlimpyxApi, type KnowledgeCard, type Message, type Profile, type Room } from './lib/api';
 import { ApiError, AuthSession, type StoredSession } from './lib/auth-session';
 import { messageFrom } from './lib/format';
 import { empty, type LoadState } from './lib/loadState';
-import { screenFor } from './lib/navigation';
+import { hrefFor, screenFor } from './lib/navigation';
 import { initialNetworkStatus, nextNetworkStatus, nextPollNetworkStatus } from './lib/networkStatus';
 
-/** Root: owns the session, the route and the participant's private data; guests get the public showcase. */
+const NO_ACTIVITY: InhabitantActivityInput[] = [];
+
+/** Leaves any screen for the city in the URL before a session change mounts the other shell. */
+function showCityInHistory() {
+  const href = hrefFor({ view: 'overview' });
+  if (href !== `${window.location.pathname}${window.location.search}`) window.history.pushState(null, '', href);
+}
+
+/**
+ * Root: owns the session. Guests get the public showcase; a signed-in owner gets the participant shell,
+ * mounted only then (one route/history listener at a time) and keyed by the session, so a new sign-in
+ * always starts from fresh private state.
+ */
 export function App() {
   const sessionStore = useMemo(() => new AuthSession(), []);
   const api = useMemo(() => new OlimpyxApi(sessionStore), [sessionStore]);
   const [session, setSession] = useState<StoredSession | null>(() => sessionStore.current);
+  const [authWanted, setAuthWanted] = useState(false);
+  const authenticate = (newSession: StoredSession) => { sessionStore.save(newSession); showCityInHistory(); setSession(newSession); };
+  const signedOut = () => { showCityInHistory(); setSession(null); };
+
+  if (!session) return authWanted ? <AuthScreen api={api} onAuthenticated={authenticate} onBack={() => setAuthWanted(false)} /> : <PublicShowcase api={api} onSignIn={() => setAuthWanted(true)} />;
+  return <ParticipantApp key={session.token} api={api} sessionStore={sessionStore} session={session} onSignedOut={signedOut} onSessionLost={() => setSession(null)} />;
+}
+
+interface ParticipantAppProps {
+  api: OlimpyxApi;
+  sessionStore: AuthSession;
+  session: StoredSession;
+  /** Explicit sign out: back to the guest city. */
+  onSignedOut: () => void;
+  /** The stored session disappeared (expired / cleared elsewhere). */
+  onSessionLost: () => void;
+}
+
+/** The signed-in shell: the route and the participant's private data. */
+function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost }: ParticipantAppProps) {
   const [rooms, setRooms] = useState(empty<Room[]>([]));
   // The participant's city (with the owner-only Praetorium): drawn by CityView and the dive targets.
   const scene = useMemo(() => buildCityScene(rooms.data, { includePraetorium: true }), [rooms.data]);
   const camera = useRef<CityCameraController | null>(null);
-  const { route, navigate, close: closeScreen, reset: resetRoute, dive } = useCityRoute({ buildings: scene.buildings, camera });
+  const { route, navigate, close: closeScreen, dive } = useCityRoute({ buildings: scene.buildings, camera });
   const [agents, setAgents] = useState(empty<Profile[]>([]));
   const [cards, setCards] = useState(empty<KnowledgeCard[]>([]));
   // Size of the full knowledge record from the last load; `cards` itself holds search results.
   const [cardTotal, setCardTotal] = useState<number | null>(null);
-  const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const [messages, setMessages] = useState(empty<Message[]>([]));
+  /** The room `messages` belong to. Kept after the room closes: its links still place the inhabitants. */
+  const [messagesRoomId, setMessagesRoomId] = useState<string | null>(null);
   const [messageCursor, setMessageCursor] = useState<string | null>(null);
   const [createRoomOpen, setCreateRoomOpen] = useState(false);
-  const [authWanted, setAuthWanted] = useState(false);
   const [network, setNetwork] = useState(initialNetworkStatus);
   const [knowledgeSearchNotice, setKnowledgeSearchNotice] = useState<{ q: string; message: string } | null>(null);
   const roomRefreshInFlight = useRef(false);
   const roomRequestId = useRef(0);
-  const privateLoadGeneration = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  // The open room follows the committed route only: a dive that is cancelled or ignored never selects a
+  // room, and leaving the room (city, another screen) stops its poll.
+  const selectedRoom = route.roomId ? rooms.data.find(item => item.room_id === route.roomId) ?? null : null;
+  const selectedRoomId = selectedRoom?.room_id ?? null;
+  const selectedRoomIdRef = useRef(selectedRoomId);
+  selectedRoomIdRef.current = selectedRoomId;
+
+  const capturePrivateOperation = () => { const token = sessionStore.current?.token; return () => mounted.current && Boolean(token) && sessionStore.current?.token === token; };
 
   const load = useCallback(async () => {
-    if (!session) return;
-    const generation = privateLoadGeneration.current;
-    const sessionToken = session.token;
-    const current = () => generation === privateLoadGeneration.current && sessionStore.current?.token === sessionToken;
+    const current = capturePrivateOperation();
     // A stale "semantic search unavailable" notice from a previous session/room must not survive a
     // fresh load or an explicit Refresh (it names a specific query that no longer applies).
     setKnowledgeSearchNotice(null);
@@ -68,19 +108,29 @@ export function App() {
     const allCards = () => api.cards().then(data => { if (current()) setCardTotal(data.length); return data; }, error => { if (current()) setCardTotal(null); throw error; });
     const outcomes = await Promise.all([settle(() => api.rooms(), setRooms), settle(() => api.agents(), setAgents), settle(allCards, setCards)]);
     if (current()) setNetwork(previous => nextNetworkStatus(outcomes, previous));
-    if (!sessionStore.current) { setSession(null); resetPrivateState(); }
+    if (mounted.current && !sessionStore.current) onSessionLost();
   }, [api, session]);
   useEffect(() => { void load(); }, [load]);
-  const capturePrivateOperation = () => { const generation = privateLoadGeneration.current; const token = sessionStore.current?.token; return () => generation === privateLoadGeneration.current && Boolean(token) && sessionStore.current?.token === token; };
-  useEffect(() => { const room = route.roomId && rooms.data.find(item => item.room_id === route.roomId); if (room && selectedRoom?.room_id !== room.room_id) void openRoom(room, false); }, [route.roomId, rooms.data]);
+
+  // First page of the selected room; any older request (another room, a closed room) is dropped.
   useEffect(() => {
-    if (!selectedRoom) return;
+    const requestId = ++roomRequestId.current;
+    if (!selectedRoomId) return;
+    setMessagesRoomId(selectedRoomId); setMessageCursor(null); setMessages({ data: [], loading: true, error: null });
+    void api.messagePage(selectedRoomId).then(
+      page => { if (requestId !== roomRequestId.current) return; setMessageCursor(page.nextCursor); setMessages({ data: page.data.reverse(), loading: false, error: null }); },
+      error => { if (requestId === roomRequestId.current) setMessages(current => ({ ...current, loading: false, error: messageFrom(error) })); },
+    );
+  }, [api, selectedRoomId]);
+
+  useEffect(() => {
+    if (!selectedRoomId) return;
     let active = true;
     const refresh = async () => {
       if (roomRefreshInFlight.current) return;
       roomRefreshInFlight.current = true;
       try {
-        const next = await api.messagePage(selectedRoom.room_id);
+        const next = await api.messagePage(selectedRoomId);
         if (active) {
           setMessages(current => ({ ...current, data: [...new Map([...current.data, ...next.data].map(message => [message.message_id, message])).values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id)), error: null }));
           // The 5s room poll is itself a real, ongoing network probe — feed its outcome into the
@@ -101,20 +151,13 @@ export function App() {
     };
     const timer = window.setInterval(() => void refresh(), 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [api, selectedRoom]);
+  }, [api, selectedRoomId]);
 
-  const openRoom = async (room: Room, updateRoute = true) => {
-    const requestId = ++roomRequestId.current;
-    if (updateRoute) navigate({ view: 'rooms', roomId: room.room_id });
-    setSelectedRoom(room); setMessages(current => ({ ...current, loading: true, error: null }));
-    try { const page = await api.messagePage(room.room_id); if (requestId !== roomRequestId.current) return; setMessageCursor(page.nextCursor); setMessages({ data: page.data.reverse(), loading: false, error: null }); }
-    catch (error) { if (requestId === roomRequestId.current) setMessages(current => ({ ...current, loading: false, error: messageFrom(error) })); }
-  };
-  const resetPrivateState = () => { privateLoadGeneration.current++; roomRequestId.current++; setRooms(empty([])); setAgents(empty([])); setCards(empty([])); setCardTotal(null); setSelectedRoom(null); setMessages(empty([])); setMessageCursor(null); setCreateRoomOpen(false); setNetwork(initialNetworkStatus); setKnowledgeSearchNotice(null); };
-  const authenticate = (newSession: StoredSession) => { resetPrivateState(); sessionStore.save(newSession); setSession(newSession); resetRoute({ view: 'overview' }); };
-  const logout = async () => { try { await api.logout(); } finally { sessionStore.clear(); resetPrivateState(); setSession(null); resetRoute({ view: 'overview' }); } };
-  const loadEarlierMessages = async () => { if (!selectedRoom || !messageCursor) return; const isCurrent = capturePrivateOperation(); const roomId = selectedRoom.room_id; const page = await api.messagePage(roomId, messageCursor); if (!isCurrent() || selectedRoom?.room_id !== roomId) return; setMessageCursor(page.nextCursor); setMessages(current => ({ ...current, data: [...page.data.reverse(), ...current.data] })); };
-  const sendMessage = async (body: string) => { if (!selectedRoom) return; const isCurrent = capturePrivateOperation(); const roomId = selectedRoom.room_id; const created = await api.sendMessage(roomId, body); if (!isCurrent() || selectedRoom?.room_id !== roomId) return; setMessages(current => ({ ...current, data: [...current.data, created] })); };
+  /** Asks for the room screen; the room is selected (and polled) only when that route is committed. */
+  const openRoom = (room: Room) => navigate({ view: 'rooms', roomId: room.room_id });
+  const logout = async () => { try { await api.logout(); } finally { sessionStore.clear(); onSignedOut(); } };
+  const loadEarlierMessages = async () => { const roomId = selectedRoomId; if (!roomId || !messageCursor) return; const isCurrent = capturePrivateOperation(); const page = await api.messagePage(roomId, messageCursor); if (!isCurrent() || selectedRoomIdRef.current !== roomId) return; setMessageCursor(page.nextCursor); setMessages(current => ({ ...current, data: [...page.data.reverse(), ...current.data] })); };
+  const sendMessage = async (body: string) => { const roomId = selectedRoomId; if (!roomId) return; const isCurrent = capturePrivateOperation(); const created = await api.sendMessage(roomId, body); if (!isCurrent() || selectedRoomIdRef.current !== roomId) return; setMessages(current => ({ ...current, data: [...current.data, created] })); };
   const searchCards = async (q: string, mode: 'lexical' | 'semantic' | 'hybrid') => {
     const isCurrent = capturePrivateOperation();
     if (isCurrent()) { setCards(current => ({ ...current, loading: true, error: null })); setKnowledgeSearchNotice(null); }
@@ -127,19 +170,20 @@ export function App() {
       else setCards(current => ({ ...current, loading: false, error: messageFrom(error) }));
     }
   };
-  const createRoom = async (input: { title: string; description?: string }) => { const isCurrent = capturePrivateOperation(); const room = await api.createRoom(input); if (!isCurrent()) return; setRooms(current => ({ ...current, data: [room, ...current.data] })); setCreateRoomOpen(false); void openRoom(room); };
+  const createRoom = async (input: { title: string; description?: string }) => { const isCurrent = capturePrivateOperation(); const room = await api.createRoom(input); if (!isCurrent()) return; setRooms(current => ({ ...current, data: [room, ...current.data] })); setCreateRoomOpen(false); openRoom(room); };
   const avenues = scene.avenues.length;
-  // City Shell §6: the only agent↔room link available on the client without a new API call is the
-  // currently open room's already-loaded messages (no bootstrap/recent-activity feed exists here yet).
-  const inhabitantActivity = useMemo(() => (selectedRoom ? inhabitantActivityFromMessages(messages.data, selectedRoom.room_id) : []), [selectedRoom, messages.data]);
-
-  if (!session) return authWanted ? <AuthScreen api={api} onAuthenticated={authenticate} onBack={() => setAuthWanted(false)} /> : <PublicShowcase api={api} onSignIn={() => setAuthWanted(true)} />;
+  // City Shell §6: the only agent↔room link available on the client without a new API call is the last
+  // opened room's already-loaded messages (no bootstrap/recent-activity feed exists here yet). Rebuilt only
+  // when the links change, not on every 5s poll that returns new message objects.
+  const inhabitantActivity = useStableActivity(useMemo(() => (messagesRoomId ? inhabitantActivityFromMessages(messages.data, messagesRoomId) : NO_ACTIVITY), [messagesRoomId, messages.data]));
 
   const screen = screenFor(route);
   const roomCount = loadedCount(rooms);
   const knownAgents = loadedCount(agents) === null ? null : agents.data;
   const refresh = <button className="secondary compact" onClick={() => void load()}>↻ Refresh</button>;
-  const room = route.roomId && selectedRoom?.room_id === route.roomId ? selectedRoom : null;
+  const room = selectedRoom;
+  // Until the selected room's first page is requested, `messages` may still hold the previous room.
+  const roomMessages = messagesRoomId === selectedRoomId ? messages : { data: [], loading: true, error: null };
   const hud = <CityHud
     navLabel="Main navigation"
     eyebrow="Participant observatory"
@@ -173,7 +217,7 @@ export function App() {
         badges={room && <RoomBadges room={room} agents={knownAgents} access="Registered only" />}
         subline={room && <RoomSubline room={room} />}
         actions={<><RouteLink className="secondary compact" route={{ view: 'rooms' }} onNavigate={navigate}>All rooms</RouteLink>{refresh}</>}>
-        {room ? <RoomConversation api={api} agents={agents.data} cards={cards.data} room={room} messages={messages} onLoadMore={loadEarlierMessages} hasMore={Boolean(messageCursor)} onSend={sendMessage} />
+        {room ? <RoomConversation api={api} agents={agents.data} cards={cards.data} room={room} messages={roomMessages} onLoadMore={loadEarlierMessages} hasMore={Boolean(messageCursor)} onSend={sendMessage} />
           : rooms.loading ? <Loading /> : rooms.error ? <ErrorText text={rooms.error} /> : <Empty title="Room unavailable" text="This room is not visible to your account." />}
       </ScreenLayer>;
       case 'knowledge': return <ScreenLayer {...common} eyebrow="Forum · Central Library" title="Central Library of Knowledge" actions={refresh}>

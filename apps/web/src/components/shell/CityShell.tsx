@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useLayoutEffect, useRef } from 'react';
+import { type ReactNode, type RefObject, useEffect, useLayoutEffect, useRef } from 'react';
 import type { View } from '../../lib/navigation';
 import { SCREEN_HEADING_ID } from './ScreenLayer';
 
@@ -19,7 +19,18 @@ interface CityShellProps {
 }
 
 const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]';
-const inertWhile = (hidden: boolean) => (hidden ? { 'aria-hidden': true, inert: '' } : {}) as Record<string, unknown>;
+
+/**
+ * Sets the `inert` attribute on the element directly: React 18 does not know the prop (it would need a
+ * string) and React 19 treats it as a boolean, so a DOM write behaves the same on both. `inert` alone
+ * removes the subtree from focus and the accessibility tree; no aria-hidden on an ancestor of the focus.
+ * Layout effect: applied before paint, in the same commit that opens the screen.
+ */
+function useInert(ref: RefObject<HTMLElement>, inert: boolean): void {
+  useLayoutEffect(() => {
+    ref.current?.toggleAttribute('inert', inert);
+  }, [ref, inert]);
+}
 
 /** A draft in a text field must not be thrown away by an Escape meant for the field. */
 function keepsEscape(target: EventTarget | null): boolean {
@@ -36,6 +47,10 @@ function keepsEscape(target: EventTarget | null): boolean {
 export function CityShell({ hud, city, screen, screenKey, screenView, transition, onClose }: CityShellProps) {
   const open = screenKey !== null;
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const hudRef = useRef<HTMLDivElement>(null);
+  const worldRef = useRef<HTMLDivElement>(null);
+  useInert(hudRef, open);
+  useInert(worldRef, open);
   /** The last control used in the city or HUD: the opener of the next screen. */
   const lastUsed = useRef<HTMLElement | null>(null);
   const opener = useRef<HTMLElement | null>(null);
@@ -86,9 +101,9 @@ export function CityShell({ hud, city, screen, screenKey, screenView, transition
 
   return (
     <div className={`city-shell${open ? ' screen-open' : ''}`} ref={shellRef}>
-      <div className="city-shell-hud" {...inertWhile(open)}>{hud}</div>
+      <div className="city-shell-hud" ref={hudRef}>{hud}</div>
       <main className="city-shell-main">
-        <div className="city-shell-world" {...inertWhile(open)}>{city}</div>
+        <div className="city-shell-world" ref={worldRef}>{city}</div>
         {screen}
       </main>
       {transition}

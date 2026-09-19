@@ -3,7 +3,7 @@ import { useRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CityCameraController } from '../city/CityCanvas';
 import { buildCityScene } from '../city/cityScene';
-import { screenFor } from '../../lib/navigation';
+import { screenFor, type Route } from '../../lib/navigation';
 import { initialNetworkStatus } from '../../lib/networkStatus';
 import { CityHud } from './CityHud';
 import { CityShell } from './CityShell';
@@ -22,9 +22,9 @@ function fakeCamera(canAnimate = true): CityCameraController {
 const TITLES = { rooms: 'Rooms', room: 'Signal Lab', knowledge: 'Central Library of Knowledge', agents: 'Pantheon of Agents', owner: 'Owner controls' } as const;
 
 /** The shell as App wires it: HUD nav, a building button, screen layers, the dive overlay and target lock. */
-function Harness({ camera }: { camera: CityCameraController }) {
+function Harness({ camera, normalize, scene = buildings }: { camera: CityCameraController; normalize?: (route: Route) => Route; scene?: typeof buildings }) {
   const cameraRef = useRef<CityCameraController | null>(camera);
-  const { route, navigate, close, dive } = useCityRoute({ buildings, camera: cameraRef });
+  const { route, navigate, close, dive } = useCityRoute({ buildings: scene, camera: cameraRef, normalize });
   const info = screenFor(route);
   return (
     <CityShell
@@ -232,5 +232,73 @@ describe('browser history', () => {
     advance(5000);
     expect(heading(TITLES.agents)).toBeInTheDocument();
     expect(window.location.search).toBe('?view=agents');
+  });
+});
+
+describe('history hygiene', () => {
+  it('Overview while the city is shown adds no history entry (Back keeps working)', () => {
+    const push = vi.spyOn(window.history, 'pushState');
+    render(<Harness camera={fakeCamera()} />);
+    fireEvent.click(screen.getByRole('link', { name: 'Overview' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Overview' }));
+    expect(push).not.toHaveBeenCalled();
+    expect(window.location.search).toBe('');
+  });
+
+  it('a close that lands on the URL already shown does not push it again', () => {
+    stubReducedMotion(true);
+    render(<Harness camera={fakeCamera()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Central Library' }));
+    expect(window.location.search).toBe('?view=knowledge');
+    // Browser Back moved the URL; a user close arriving with the same destination must not duplicate it.
+    window.history.replaceState(null, '', '/');
+    const push = vi.spyOn(window.history, 'pushState');
+    fireEvent.click(screen.getByRole('link', { name: 'Back to the city' }));
+    expect(heading(TITLES.knowledge)).toBeNull();
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('rewrites a route the viewer may not open in the URL too (guest ?view=owner), on load and on Back/Forward', () => {
+    const guest = (route: Route): Route => (route.view === 'owner' ? { view: 'overview' } : route);
+    window.history.replaceState(null, '', '/?view=owner');
+    render(<Harness camera={fakeCamera()} normalize={guest} />);
+    expect(window.location.search).toBe('');
+    expect(heading(TITLES.owner)).toBeNull();
+    window.history.replaceState(null, '', '/?view=owner');
+    act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+    expect(window.location.search).toBe('');
+    expect(heading(TITLES.owner)).toBeNull();
+  });
+});
+
+describe('dive announcements and untrusted names', () => {
+  it('announces "Opening <name>…" in a polite status region during the dive, and clears it after', () => {
+    render(<Harness camera={fakeCamera()} />);
+    const status = screen.getAllByRole('status').find(element => element.classList.contains('dive-status'))!;
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    expect(status).toHaveClass('visually-hidden');
+    expect(status).toBeEmptyDOMElement();
+    fireEvent.click(screen.getByRole('button', { name: 'Central Library' }));
+    expect(status).toHaveTextContent('Opening Central Library of Knowledge…');
+    advance(focusMs);
+    expect(status).toHaveTextContent('Opening Central Library of Knowledge…');
+    advance(diveMs);
+    expect(status).toBeEmptyDOMElement();
+  });
+
+  it('strips bidi controls from room names and isolates them in the overlay and the target lock', () => {
+    const spoofed = buildCityScene([{ room_id: 'r1', title: '\u202Egnp.exe\u2066 Lab\u2069' }]).buildings;
+    render(<Harness camera={fakeCamera()} scene={spoofed} />);
+    fireEvent.click(screen.getByRole('link', { name: 'Rooms' }));
+    advance(focusMs + diveMs);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Signal Lab' }));
+    const lock = document.querySelector('.target-lock-text')!;
+    expect(lock.querySelector('bdi')).toHaveTextContent('gnp.exe Lab');
+    expect(/[\u202A-\u202E\u2066-\u2069]/.test(lock.textContent!)).toBe(false);
+    expect(document.querySelector('.dive-status')).toHaveTextContent('Opening gnp.exe Lab…');
+    advance(focusMs);
+    const name = overlay().querySelector('.dive-overlay-name')!;
+    expect(name.querySelector('bdi')).toHaveTextContent('gnp.exe Lab');
+    expect(/[\u202A-\u202E\u2066-\u2069]/.test(overlay().textContent!)).toBe(false);
   });
 });

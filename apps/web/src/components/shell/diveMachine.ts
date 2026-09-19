@@ -12,7 +12,7 @@
  * Without animation (reduced motion, phones, a city that is not drawn) a screen opens and closes at once.
  * Deep links and browser Back/Forward (`immediate`) always open at once, whatever the machine is doing.
  * Any other request during a transition is ignored, except a close during focusing/diving, which cancels
- * the dive and returns the camera. Effects are returned as data; DiveController executes them.
+ * the dive and returns the camera, and a browser Back during the exit, which only drops the pending push. Effects are returned as data; DiveController executes them.
  */
 import type { DiveCameraMove, DivePoint } from '../city/cameraMath';
 import type { Route } from '../../lib/navigation';
@@ -119,10 +119,16 @@ export function reduceDive(state: DiveState, event: DiveEvent): Step {
         case 'diving': {
           // Escape / Back during the dive cancels it. The route was never committed, unless the dive
           // started from a screen that is already hidden (then the city is made official) or the request
-          // came from the browser history (the URL already changed).
-          const reconcile = state.fromScreen || !event.push ? [commit(event.route, event.push || state.fromScreen)] : [];
+          // came from the browser history (the URL already changed: commit it, never push on top of it).
+          const reconcile = state.fromScreen || !event.push ? [commit(event.route, event.push)] : [];
           return { state: IDLE, effects: [...reconcile, camera({ kind: 'return', ms: event.animate ? DIVE_TIMINGS.returnMs : 0 })] };
         }
+        case 'exiting':
+          // Browser Back while the overlay still covers the screen: the URL already moved, so the pending
+          // commit must not push. The exit keeps running on its timer. Any other close is ignored.
+          return !event.push && state.pending
+            ? { state: { ...state, pending: { route: event.route, push: false } }, effects: [] }
+            : ignore;
         default: return ignore;
       }
     }
@@ -151,7 +157,7 @@ export interface DiveIo {
 }
 
 /**
- * Runs the machine: executes effects in order and owns the single pending timer. Any state change clears
+ * Runs the machine: executes effects in order and owns the single pending timer. Any phase change clears
  * the previous timer, so a cancelled dive can never fire a stale tick.
  */
 export class DiveController {
@@ -166,7 +172,10 @@ export class DiveController {
   send(event: DiveEvent): void {
     const { state, effects } = reduceDive(this.current, event);
     if (state === this.current && !effects.length) return;
-    if (state !== this.current && this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
+    // A phase change (or a new schedule) makes the pending tick stale; an update within the same phase
+    // (exiting: Back turns the pending push into a plain commit) keeps the running timer.
+    const stale = state.phase !== this.current.phase || effects.some(effect => effect.type === 'schedule');
+    if (stale && this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
     this.current = state;
     for (const effect of effects) {
       if (effect.type === 'commit') this.io.commit(effect.commit);
