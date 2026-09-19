@@ -106,19 +106,26 @@ test('isOwnTaskRoom is true when a non-terminal task in the room is assigned to 
     request: async (method, path) => {
       assert.equal(method, 'GET');
       assert.equal(path, '/v1/rooms/rom_1/tasks');
-      return { data: [{ status: 'in_progress', assigned_agent_id: 'agt_me', creator_type: 'agent', creator_id: 'agt_other' }] };
+      // Real shape from GET /v1/rooms/:roomId/tasks (apps/server/src/app.ts taskFrom): the
+      // creator is nested as `creator: { actor_type, actor_id }`, with no flat duplicates.
+      return { data: [{ status: 'in_progress', assigned_agent_id: 'agt_me', creator: { actor_type: 'agent', actor_id: 'agt_other' } }] };
     }
   };
   assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me' }), true);
 });
 
-test('isOwnTaskRoom is true when a non-terminal task was created by the owner', async () => {
-  const client = { request: async () => ({ data: [{ status: 'proposed', assigned_agent_id: 'agt_other', creator_type: 'owner', creator_id: 'own_1' }] }) };
+test('isOwnTaskRoom is true when a non-terminal task was created by the owner (real nested creator shape)', async () => {
+  const client = { request: async () => ({ data: [{ status: 'proposed', assigned_agent_id: 'agt_other', creator: { actor_type: 'owner', actor_id: 'own_1' } }] }) };
+  assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me' }), true);
+});
+
+test('isOwnTaskRoom is true when a non-terminal task was created by this agent itself (real nested creator shape)', async () => {
+  const client = { request: async () => ({ data: [{ status: 'accepted', assigned_agent_id: 'agt_other', creator: { actor_type: 'agent', actor_id: 'agt_me' } }] }) };
   assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me' }), true);
 });
 
 test('isOwnTaskRoom is false when the only matching task is terminal', async () => {
-  const client = { request: async () => ({ data: [{ status: 'completed', assigned_agent_id: 'agt_me', creator_type: 'agent', creator_id: 'agt_me' }] }) };
+  const client = { request: async () => ({ data: [{ status: 'completed', assigned_agent_id: 'agt_me', creator: { actor_type: 'agent', actor_id: 'agt_me' } }] }) };
   assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me' }), false);
 });
 
@@ -202,7 +209,7 @@ test('enforceSendBudget is a full no-op without a budget.json', async () => {
 test('enforceSendBudget allows a reply inside the owner\'s own task room even under help:off', async () => {
   const root = await tempRoot();
   await saveBudget(root, { help: 'off', contacts: [] });
-  const client = { request: async () => ({ data: [{ status: 'in_progress', assigned_agent_id: 'agt_me', creator_type: 'agent', creator_id: 'agt_me' }] }) };
+  const client = { request: async () => ({ data: [{ status: 'in_progress', assigned_agent_id: 'agt_me', creator: { actor_type: 'agent', actor_id: 'agt_me' } }] }) };
   await assert.doesNotReject(enforceSendBudget(client, root, { agentId: 'agt_me', kind: 'reply', roomId: 'rom_1', replyToMessageId: 'msg_1' }));
   await rm(root, { recursive: true, force: true });
 });

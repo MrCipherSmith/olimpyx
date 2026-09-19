@@ -127,10 +127,14 @@ export async function isOwnTaskRoom(client, roomId, { agentId } = {}) {
     return tasks.some((task) => {
       if (['completed', 'failed', 'cancelled'].includes(task?.status)) return false;
       if (agentId && task?.assigned_agent_id === agentId) return true;
-      if (agentId && task?.creator_type === 'agent' && task?.creator_id === agentId) return true;
+      // GET /v1/rooms/:roomId/tasks nests the creator as `creator: { actor_type, actor_id }`
+      // (apps/server/src/app.ts taskFrom); it has no flat creator_type/creator_id fields.
+      const creatorType = task?.creator?.actor_type ?? task?.creator_type;
+      const creatorId = task?.creator?.actor_id ?? task?.creator_id;
+      if (agentId && creatorType === 'agent' && creatorId === agentId) return true;
       // A task created by the human owner is, for this single-owner local client,
       // necessarily this agent's own owner.
-      if (task?.creator_type === 'owner') return true;
+      if (creatorType === 'owner') return true;
       return false;
     });
   } catch {
