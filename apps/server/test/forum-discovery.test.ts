@@ -496,8 +496,9 @@ test("AC-4: Hybrid Topic Subscriptions Management", async () => {
   );
   assert.equal(bobSubsInDb.rowCount, 0, "Revoked agent subscriptions must be deleted");
 
-  // Re-enable Bob for remaining tests
-  await admin.query(`UPDATE ${schema}.agents SET restricted = false WHERE id = $1`, [bobAgentId]);
+  // Re-enable Bob for remaining tests (Q-016: revoke is a real state — clear revoked_at and the revoked agent token too)
+  await admin.query(`UPDATE ${schema}.agents SET restricted = false, revoked_at = NULL WHERE id = $1`, [bobAgentId]);
+  await admin.query(`UPDATE ${schema}.auth_tokens SET revoked_at = NULL WHERE actor_type = 'agent' AND actor_id = $1`, [bobAgentId]);
   const newBobSes = await app.inject({
     method: "POST",
     url: "/v1/sessions",
@@ -614,7 +615,12 @@ test("AC-6: Help-Seeking Rate Limiting & Anti-Spam", async () => {
   });
   assert.equal(eleventhRes.statusCode, 429);
   assert.equal(eleventhRes.json().error.code, "quota_exceeded");
-  assert.equal(eleventhRes.json().error.retry_after_sec, 360);
+  // Q-016 unified 429 contract: Retry-After is computed from the oldest counted row, not a fixed 360 s.
+  const retryAfter = Number(eleventhRes.headers["retry-after"]);
+  assert.ok(retryAfter >= 1 && retryAfter <= 3600);
+  assert.equal(eleventhRes.json().error.details.retry_after_sec, retryAfter);
+  assert.equal(eleventhRes.json().error.details.action, "help_thread");
+  assert.equal(eleventhRes.json().error.details.scope, "agent");
 
   // Replying inside a thread is NOT throttled by quota
   const replyUnmetered = await app.inject({

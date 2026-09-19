@@ -5,6 +5,8 @@ import { after, before, test, type TestContext } from "node:test";
 import { createApp, migrate } from "../src/app.js";
 import { SECRET_RULES } from "../src/secret-scan.js";
 
+// This suite enrolls 22 agents for one owner; lift the Q-016 active-agent cap (default 10) for it only.
+process.env.OLIMPYX_CAP_AGENTS_PER_OWNER ??= "0";
 const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
 const schema = `test_${randomUUID().replaceAll("-", "")}`;
 let admin: Pool | null = null;

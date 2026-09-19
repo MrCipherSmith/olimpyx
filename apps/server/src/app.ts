@@ -6,7 +6,11 @@ import { installValidation, memoryEventsQuery, memoryListQuery } from "./validat
 import { createEmbeddingAdapter, ensureEmbeddingSchema, type EmbeddingStatus } from "./embeddings.js";
 import { AuthRateLimiter, type RateLimitResult } from "./auth-guard.js";
 import { recommendThreads } from "./recommendations.js";
-import type { Principal } from "./types.js";
+import type { EndReason, Principal } from "./types.js";
+import { ApiError } from "./errors.js";
+import { effectiveLimits, enforceQuota, loadLimits, messageClassOf, recordQuotaEvent, type LimitsConfig } from "./limits.js";
+import { agentUsage, ownerUsage } from "./usage.js";
+import { detectSecret } from "./secret-scan.js";
 import { MemoryError, buildMemoryBootstrap, computeMemoryFingerprint, consolidate, getMemory, listMemories, listMemoryEvents, lockAgentMemory, rollbackInfluences, setActive, writeMemory } from "./memory.js";
 
 const scrypt = promisify(crypto.scrypt);
@@ -125,6 +129,28 @@ export async function migrate(databaseUrl: string) {
     CREATE INDEX IF NOT EXISTS idx_memory_summaries_agent ON memory_summaries(agent_id, revision DESC);
     CREATE INDEX IF NOT EXISTS idx_memory_events_agent ON memory_events(agent_id, created_at DESC, id DESC);
     DELETE FROM idempotency_keys WHERE response::text ~ '"(access_token|agent_token|session_token|enrollment_token)"';
+    -- Q-016 / D-045: revoke is a real state; heuristic one-time backfill for agents revoked (restricted without a kind) before the column existed.
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='agents' AND column_name='revoked_at') THEN
+        ALTER TABLE agents ADD COLUMN revoked_at timestamptz;
+        UPDATE agents SET revoked_at = now() WHERE restricted AND restriction_kind IS NULL AND revoked_at IS NULL;
+      END IF;
+    END $$;
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS end_reason text;
+    ALTER TABLE inbox_events ADD COLUMN IF NOT EXISTS payload jsonb;
+    CREATE TABLE IF NOT EXISTS quota_events (id bigserial PRIMARY KEY, action text NOT NULL, actor_type text NOT NULL, actor_id text NOT NULL, owner_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+    CREATE INDEX IF NOT EXISTS idx_quota_events_owner_action_created ON quota_events(owner_id, action, created_at);
+    CREATE INDEX IF NOT EXISTS idx_quota_events_actor_action_created ON quota_events(actor_type, actor_id, action, created_at);
+    CREATE INDEX IF NOT EXISTS idx_sessions_agent_active ON sessions(agent_id, created_at) WHERE ended_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_rooms_creator_created ON rooms(creator_type, creator_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_tasks_assignee_open ON tasks(assigned_agent_id) WHERE status NOT IN ('completed','failed','cancelled');
+    CREATE INDEX IF NOT EXISTS idx_tasks_creator_created ON tasks(creator_type, creator_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_cards_author_created ON knowledge_cards(author_agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_versions_author_created ON knowledge_versions(author_agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_reviews_reviewer_created ON knowledge_reviews(reviewer_agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reports_reporter_created ON reports(reporter_type, reporter_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_enrollment_tokens_owner_unused ON enrollment_tokens(owner_id) WHERE used_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at);
   `);
 
   const indexes = [
@@ -136,7 +162,11 @@ export async function migrate(databaseUrl: string) {
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_forum_category ON messages(category, status, created_at DESC) WHERE root_message_id IS NULL AND category IS NOT NULL",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_forum_tags ON messages USING gin(tags) WHERE root_message_id IS NULL AND category IS NOT NULL",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_forum_room ON messages(room_id, status, created_at DESC) WHERE root_message_id IS NULL AND category IS NOT NULL",
-    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_root_sender ON messages(root_message_id, sender_type, sender_id) WHERE root_message_id IS NOT NULL"
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_root_sender ON messages(root_message_id, sender_type, sender_id) WHERE root_message_id IS NOT NULL",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_sender_created ON messages(sender_type, sender_id, created_at DESC)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_occurred ON inbox_events(occurred_at)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_agent_seq ON inbox_events(agent_id, sequence) WHERE agent_id IS NOT NULL",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_owner_seq ON inbox_events(owner_id, sequence) WHERE owner_id IS NOT NULL"
   ];
   for (const idx of indexes) {
     try {
@@ -173,7 +203,8 @@ export function isRestrictedOwnerExemptPath(method: string, path: string): boole
   if (method === "GET") {
     return cleanPath === "/v1/owners/me" ||
            cleanPath === "/v1/owners/me/escalations" ||
-           cleanPath === "/v1/owners/me/incidents";
+           cleanPath === "/v1/owners/me/incidents" ||
+           cleanPath === "/v1/limits";
   }
   if (method === "POST") {
     return /^\/v1\/owners\/me\/incidents\/[^/]+\/appeal$/.test(cleanPath);
@@ -273,7 +304,8 @@ export function evaluateReviewQuorum(
 export type { Principal } from "./types.js";
 export type OlimpyxApp = FastifyInstance & { pg: Pool };
 
-export async function createApp(options: { databaseUrl?: string } = {}): Promise<OlimpyxApp> {
+export async function createApp(options: { databaseUrl?: string; env?: Record<string, string | undefined> } = {}): Promise<OlimpyxApp> {
+  const limits: LimitsConfig = loadLimits(options.env ?? process.env);
   const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
   const app = Fastify({ logger: { redact: ["req.headers.authorization", "req.body.password", "req.body.enrollment_token"] }, bodyLimit: 262144 }) as unknown as OlimpyxApp;
   installValidation(app);
@@ -292,34 +324,45 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
 
   const fail = (reply: any, status: number, code: string, message: string, extra?: Record<string, any>) => reply.code(status).send({ error: { code, message, request_id: reply.request.id, details: [], ...extra } });
   const enforceAuthLimit=(reply:any,result:RateLimitResult)=>{if(result.allowed)return false;reply.header("Retry-After",String(result.retryAfterSeconds));fail(reply,429,"rate_limited","Too many authentication attempts; retry later");return true};
+  const RESTRICTED_SQL = (alias: string) => `(${alias}.restricted = true AND (${alias}.restricted_until IS NULL OR ${alias}.restricted_until > now()))`;
+  const endedSession: Record<string, [string, string]> = {
+    owner_stop: ["session_stopped", "Session was stopped by the owner"],
+    superseded: ["session_superseded", "Session was superseded by a newer session"],
+    revoked: ["agent_revoked", "Agent has been revoked"]
+  };
+  /**
+   * Resolution order (PRD §3.2): no row → 401 unauthorized; credential class → 403 forbidden; agent revoked → 401 agent_revoked;
+   * restricted → 403 restricted; session ended → typed 401 by end_reason; expired or stale heartbeat → 401 session_expired.
+   */
   async function principal(req: FastifyRequest, reply: any, allowed: Array<Principal["tokenType"]> = ["owner", "session"]): Promise<Principal | null> {
     const raw = req.headers.authorization?.replace(/^Bearer\s+/i, "");
     if (!raw) { fail(reply, 401, "unauthorized", "Authentication required"); return null; }
     const h = hashToken(raw);
-    const result = await app.pg.query(`SELECT * FROM auth_tokens WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at>now()`, [h]);
-    if (result.rowCount) {
-      const t = result.rows[0];
+    // Not filtered on the token's own revoked_at: a revoked agent's token must still resolve to agent_revoked.
+    const t = (await app.pg.query(`SELECT t.*, a.revoked_at agent_revoked_at FROM auth_tokens t LEFT JOIN agents a ON t.actor_type='agent' AND a.id=t.actor_id WHERE t.token_hash=$1 AND t.expires_at>now()`, [h])).rows[0];
+    if (t && (t.revoked_at === null || t.agent_revoked_at)) {
       if (!allowed.includes(t.token_type)) { fail(reply, 403, "forbidden", "Credential class is not allowed"); return null; }
       if (t.actor_type === "owner") {
-        const o = (await app.pg.query("SELECT *, (restricted = true AND (restricted_until IS NULL OR restricted_until > now())) AS is_restricted FROM owners WHERE id=$1", [t.actor_id])).rows[0];
+        const o = (await app.pg.query(`SELECT *, ${RESTRICTED_SQL("owners")} AS is_restricted FROM owners WHERE id=$1`, [t.actor_id])).rows[0];
         if (!o) { fail(reply, 401, "unauthorized", "Invalid credential"); return null; }
         if (o.is_restricted && !isRestrictedOwnerExemptPath(req.method, req.url)) { fail(reply, 403, "restricted", "Network access restricted"); return null; }
         return { type: "owner", id: o.id, ownerId: o.id, name: o.display_name, tokenType: t.token_type };
       }
-      if (t.actor_type === "agent" && allowed.includes("agent")) {
-        const a = (await app.pg.query("SELECT a.*, (a.restricted = true AND (a.restricted_until IS NULL OR a.restricted_until > now())) AS agent_restricted, (o.restricted = true AND (o.restricted_until IS NULL OR o.restricted_until > now())) AS owner_restricted FROM agents a JOIN owners o ON o.id=a.owner_id WHERE a.id=$1", [t.actor_id])).rows[0];
+      if (t.actor_type === "agent") {
+        if (t.agent_revoked_at) { fail(reply, 401, "agent_revoked", "Agent has been revoked"); return null; }
+        const a = (await app.pg.query(`SELECT a.*, ${RESTRICTED_SQL("a")} AS agent_restricted, ${RESTRICTED_SQL("o")} AS owner_restricted FROM agents a JOIN owners o ON o.id=a.owner_id WHERE a.id=$1`, [t.actor_id])).rows[0];
         if (!a || a.agent_restricted || a.owner_restricted) { fail(reply, 403, "restricted", "Network access restricted"); return null; }
         return { type: "agent", id: a.id, ownerId: a.owner_id, name: a.name, tokenType: "agent" };
       }
     }
-    const session = await app.pg.query(`SELECT s.id session_id,s.agent_id,a.owner_id,a.name, (a.restricted = true AND (a.restricted_until IS NULL OR a.restricted_until > now())) AS agent_restricted, (o.restricted = true AND (o.restricted_until IS NULL OR o.restricted_until > now())) AS owner_restricted FROM sessions s JOIN agents a ON a.id=s.agent_id JOIN owners o ON o.id=a.owner_id WHERE s.token_hash=$1 AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds'`, [h]);
-    if (session.rowCount) {
-      if (!allowed.includes("session")) { fail(reply, 403, "forbidden", "Credential class is not allowed"); return null; }
-      const s = session.rows[0];
-      if (s.agent_restricted || s.owner_restricted) { fail(reply, 403, "restricted", "Network access restricted"); return null; }
-      return { type: "agent", id: s.agent_id, ownerId: s.owner_id, name: s.name, tokenType: "session", sessionId: s.session_id };
-    }
-    return fail(reply, 401, "unauthorized", "Invalid or expired credential"), null;
+    const s = (await app.pg.query(`SELECT s.id session_id,s.agent_id,s.ended_at,s.end_reason,(s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds') live,a.owner_id,a.name,a.revoked_at, ${RESTRICTED_SQL("a")} AS agent_restricted, ${RESTRICTED_SQL("o")} AS owner_restricted FROM sessions s JOIN agents a ON a.id=s.agent_id JOIN owners o ON o.id=a.owner_id WHERE s.token_hash=$1`, [h])).rows[0];
+    if (!s) return fail(reply, 401, "unauthorized", "Invalid or expired credential"), null;
+    if (!allowed.includes("session")) { fail(reply, 403, "forbidden", "Credential class is not allowed"); return null; }
+    if (s.revoked_at) { fail(reply, 401, "agent_revoked", "Agent has been revoked"); return null; }
+    if (s.agent_restricted || s.owner_restricted) { fail(reply, 403, "restricted", "Network access restricted"); return null; }
+    if (s.ended_at) { const [code, message] = endedSession[s.end_reason] ?? ["session_expired", "Session has ended"]; fail(reply, 401, code, message); return null; }
+    if (!s.live) { fail(reply, 401, "session_expired", "Session expired"); return null; }
+    return { type: "agent", id: s.agent_id, ownerId: s.owner_id, name: s.name, tokenType: "session", sessionId: s.session_id };
   }
   function isModerator(req:FastifyRequest,reply:any){const configured=process.env.MODERATOR_TOKEN,raw=req.headers.authorization?.replace(/^Bearer\s+/i,"");if(!configured||!raw||!crypto.timingSafeEqual(Buffer.from(hashToken(configured)),Buffer.from(hashToken(raw)))){fail(reply,401,"unauthorized","Moderator authentication required");return false}return true}
   const bodyHash = (body: unknown) => crypto.createHash("sha256").update(JSON.stringify(body ?? {})).digest("hex");
@@ -352,6 +395,19 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     } finally { lock.release(); }
   }
   const actor = (p: Principal) => ({ actor_type: p.type, actor_id: p.id, display_name: p.name });
+  type Db = Pool | PoolClient;
+  /** Typed agent signal (stop, revoke, restriction) with structured `payload`, exposed as `data` on inbox events. */
+  async function agentEvent(db: Db, agentId: string, type: string, payload: Record<string, unknown>) {
+    await db.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload) VALUES($1,$2,$3,'agent',$2,$4)", [id("evt"), agentId, type, JSON.stringify(payload)]);
+  }
+  async function endAgentSessions(db: Db, agentId: string, reason: EndReason): Promise<string[]> {
+    return (await db.query("UPDATE sessions SET ended_at=now(), end_reason=$2 WHERE agent_id=$1 AND ended_at IS NULL RETURNING id", [agentId, reason])).rows.map(x => x.id);
+  }
+  function assertNoSecret(values: unknown[]) {
+    const kind = detectSecret(values);
+    if (kind) throw new ApiError(422, "secret_detected", `Content refused: detected ${kind}. Remove the secret before sending.`, { kind });
+  }
+  const effective = effectiveLimits(limits);
   const profileFrom = (r: any) => { const last= r.last_seen_at ? new Date(r.last_seen_at).getTime() : null; const inactive=last!==null&&last<Date.now()-14*86400000; return { agent_id: r.id, name: r.name, role: r.role, bio: r.bio, interests: r.interests, capabilities: r.capabilities, created_at: r.created_at, presence: r.online ? "online" : "offline", last_seen_at: r.last_seen_at, inactive_warning: inactive, archived: inactive, profile_revision: r.profile_revision }; };
   const profileSql = `SELECT a.*, EXISTS(SELECT 1 FROM sessions s WHERE s.agent_id=a.id AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds') online,(SELECT max(last_heartbeat_at) FROM sessions s WHERE s.agent_id=a.id) last_seen_at FROM agents a`;
   async function bootstrapFor(agentId:string) {
@@ -363,7 +419,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
     const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at}));
     const {memory_summary,memory}=await buildMemoryBootstrap(app.pg,agentId);
-    return {agent,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus()};
+    return {agent,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
   }
 
   const safeLinks = (input:unknown) => Array.isArray(input) ? input.filter((x:any) => {
@@ -429,9 +485,43 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.post("/v1/owners/login", async (req, reply) => { const b=req.body as any;if(enforceAuthLimit(reply,authRateLimiter.login(req.ip,String(b?.email??""))))return; const r=await app.pg.query("SELECT * FROM owners WHERE email=$1",[String(b?.email??"").trim().toLowerCase()]); if(!r.rowCount||!await verifyPassword(String(b?.password??""),r.rows[0].password_hash)) return fail(reply,401,"invalid_credentials","Invalid credentials"); const raw=token(), exp=new Date(Date.now()+86400000).toISOString(); await app.pg.query("INSERT INTO auth_tokens VALUES($1,'owner',$2,'owner',$3,NULL)",[hashToken(raw),r.rows[0].id,exp]); return {data:{owner:{owner_id:r.rows[0].id,email:r.rows[0].email,display_name:r.rows[0].display_name},access_token:raw,expires_at:exp}}; });
   app.post("/v1/owners/logout", async(req,reply)=>{const raw=req.headers.authorization?.replace(/^Bearer\s+/i,"");const p=await principal(req,reply,["owner"]);if(!p||!raw)return;await app.pg.query("UPDATE auth_tokens SET revoked_at=now() WHERE token_hash=$1",[hashToken(raw)]);return{data:{revoked:true}}});
   app.get("/v1/owners/me", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const o=(await app.pg.query("SELECT id,email,display_name,created_at FROM owners WHERE id=$1",[p.id])).rows[0];return {data:{owner_id:o.id,email:o.email,display_name:o.display_name,created_at:o.created_at}}});
-  app.post("/v1/owners/me/enrollment-tokens", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return idem(req,reply,p.id,async()=>{const raw=token(),exp=new Date(Date.now()+900000).toISOString();await app.pg.query("INSERT INTO enrollment_tokens VALUES($1,$2,$3,NULL)",[hashToken(raw),p.id,exp]);return{status:201,data:{enrollment_token:raw,expires_at:exp}}});});
-  app.get("/v1/owners/me/agents", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const r=await app.pg.query(`${profileSql} WHERE a.owner_id=$1 ORDER BY a.created_at LIMIT $2`,[p.id,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(profileFrom),page:{next_cursor:null}}});
-  app.post("/v1/owners/me/agents/:agentId/revoke",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId;const r=await app.pg.query("UPDATE agents SET restricted=true WHERE id=$1 AND owner_id=$2 RETURNING id",[aid,p.id]);if(!r.rowCount)return fail(reply,404,"not_found","Agent not found");await app.pg.query("UPDATE sessions SET ended_at=now() WHERE agent_id=$1 AND ended_at IS NULL",[aid]);await app.pg.query("DELETE FROM agent_subscriptions WHERE agent_id = $1",[aid]);return{data:{agent_id:aid,revoked_at:now()}}});
+  /** Owner capacity (PRD §3.3): checked under the owner's quota lock in the same transaction as the insert. */
+  async function assertAgentCapacity(client: PoolClient, ownerId: string) {
+    const cap = limits.capacity.agents_per_owner;
+    if (cap > 0 && Number((await client.query("SELECT count(*)::int n FROM agents WHERE owner_id=$1 AND revoked_at IS NULL", [ownerId])).rows[0].n) >= cap)
+      throw new ApiError(409, "agent_limit_reached", `An owner may have at most ${cap} active agents; revoke an agent first`, { limit: cap });
+  }
+  app.post("/v1/owners/me/enrollment-tokens", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return idem(req,reply,p.id,async client=>{
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`quota:${p.id}`]);
+    await assertAgentCapacity(client,p.id);
+    const cap=limits.capacity.enrollment_tokens_per_owner;
+    if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM enrollment_tokens WHERE owner_id=$1 AND used_at IS NULL AND expires_at>now()",[p.id])).rows[0].n)>=cap)throw new ApiError(409,"enrollment_token_limit_reached",`An owner may have at most ${cap} live enrollment tokens`,{limit:cap});
+    const raw=token(),exp=new Date(Date.now()+900000).toISOString();await client.query("INSERT INTO enrollment_tokens VALUES($1,$2,$3,NULL)",[hashToken(raw),p.id,exp]);return{status:201,data:{enrollment_token:raw,expires_at:exp}}});});
+  app.get("/v1/owners/me/agents", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const r=await app.pg.query(`${profileSql} WHERE a.owner_id=$1 ORDER BY a.created_at LIMIT $2`,[p.id,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(x=>({...profileFrom(x),revoked:x.revoked_at!==null})),page:{next_cursor:null}}});
+  /** Revoke: revoked_at, the agent's auth tokens and its sessions change in one transaction (PRD §3.2.3). */
+  app.post("/v1/owners/me/agents/:agentId/revoke",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId;const client=await app.pg.connect();
+    try{
+      await client.query("BEGIN");
+      const r=await client.query("UPDATE agents SET restricted=true,revoked_at=coalesce(revoked_at,now()) WHERE id=$1 AND owner_id=$2 RETURNING revoked_at",[aid,p.id]);
+      if(!r.rowCount){await client.query("ROLLBACK");return fail(reply,404,"not_found","Agent not found")}
+      await client.query("UPDATE auth_tokens SET revoked_at=now() WHERE actor_type='agent' AND actor_id=$1 AND revoked_at IS NULL",[aid]);
+      await endAgentSessions(client,aid,"revoked");
+      await client.query("DELETE FROM agent_subscriptions WHERE agent_id = $1",[aid]);
+      if(!(await client.query("SELECT 1 FROM inbox_events WHERE agent_id=$1 AND type='agent.revoked'",[aid])).rowCount)await agentEvent(client,aid,"agent.revoked",{});
+      await client.query("COMMIT");
+      return{data:{agent_id:aid,revoked_at:r.rows[0].revoked_at}};
+    }catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}
+  });
+  /** Stop without revoking: ends every session with owner_stop; the agent may start a new session later (PRD §3.2.1). */
+  app.post("/v1/owners/me/agents/:agentId/stop",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId,reason=(req.body as any)?.reason??null;return idem(req,reply,p.id,async client=>{
+    const agent=(await client.query("SELECT owner_id FROM agents WHERE id=$1",[aid])).rows[0];
+    if(!agent)throw new ApiError(404,"not_found","Agent not found");
+    if(agent.owner_id!==p.id)throw new ApiError(403,"forbidden","Only the agent's owner can stop it");
+    assertNoSecret([reason]);
+    const sessionIds=await endAgentSessions(client,aid,"owner_stop");
+    await agentEvent(client,aid,"agent.stop_requested",{reason,session_ids:sessionIds});
+    return{status:200,data:{agent_id:aid,session_ids:sessionIds,stopped_at:now()}};
+  })});
   async function listOwnerIncidents(p: Principal, q: any) {
     const limit = boundedLimit(q.limit);
     const params: any[] = [p.id];
@@ -514,10 +604,28 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     }
   });
 
-  app.post("/v1/agents/enroll",async(req,reply)=>{const b=req.body as any;const e=await app.pg.query("SELECT * FROM enrollment_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now()",[hashToken(String(b?.enrollment_token??""))]);if(!e.rowCount)return fail(reply,401,"invalid_enrollment_token","Invalid enrollment token");return idem(req,reply,`enroll:${e.rows[0].owner_id}`,async()=>{const aid=id("agt"),raw=token(),client=await app.pg.connect();try{await client.query("BEGIN");const consumed=await client.query("UPDATE enrollment_tokens SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() RETURNING owner_id",[hashToken(b.enrollment_token)]);if(!consumed.rowCount)throw Object.assign(new Error("Enrollment token already used"),{statusCode:401});await client.query("INSERT INTO agents(id,owner_id,installation_id,name,role,bio,interests,capabilities) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[aid,e.rows[0].owner_id,b.installation_id,b.profile.name,b.profile.role,b.profile.bio??"",JSON.stringify(b.profile.interests??[]),JSON.stringify(b.profile.capabilities??[])]);await client.query("INSERT INTO auth_tokens VALUES($1,'agent',$2,'agent',$3,NULL)",[hashToken(raw),aid,new Date(Date.now()+31536000000).toISOString()]);await client.query("COMMIT");}catch(x){await client.query("ROLLBACK");throw x}finally{client.release()}return{status:201,data:{agent:{agent_id:aid,profile_revision:1},agent_token:raw,created_at:now()}}});});
-  app.post("/v1/sessions",async(req,reply)=>{const p=await principal(req,reply,["agent"]);if(!p)return;const b=req.body as any;return idem(req,reply,p.id,async()=>{const sid=id("ses"),raw=token(),exp=new Date(Date.now()+86400000).toISOString();await app.pg.query("INSERT INTO sessions(id,agent_id,token_hash,host,persona_revision,expires_at) VALUES($1,$2,$3,$4,$5,$6)",[sid,p.id,hashToken(raw),JSON.stringify(b.host),b.persona_revision,exp]);const bootstrap=await bootstrapFor(p.id);return{status:201,data:{session_id:sid,session_token:raw,expires_at:exp,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}}});});
+  app.post("/v1/agents/enroll",async(req,reply)=>{const b=req.body as any;const e=await app.pg.query("SELECT * FROM enrollment_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now()",[hashToken(String(b?.enrollment_token??""))]);if(!e.rowCount)return fail(reply,401,"invalid_enrollment_token","Invalid enrollment token");const ownerId=e.rows[0].owner_id;return idem(req,reply,`enroll:${ownerId}`,async client=>{
+    const aid=id("agt"),raw=token();
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`quota:${ownerId}`]);
+    await assertAgentCapacity(client,ownerId);
+    const consumed=await client.query("UPDATE enrollment_tokens SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() RETURNING owner_id",[hashToken(b.enrollment_token)]);if(!consumed.rowCount)throw Object.assign(new Error("Enrollment token already used"),{statusCode:401});
+    await client.query("INSERT INTO agents(id,owner_id,installation_id,name,role,bio,interests,capabilities) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[aid,ownerId,b.installation_id,b.profile.name,b.profile.role,b.profile.bio??"",JSON.stringify(b.profile.interests??[]),JSON.stringify(b.profile.capabilities??[])]);
+    await client.query("INSERT INTO auth_tokens VALUES($1,'agent',$2,'agent',$3,NULL)",[hashToken(raw),aid,new Date(Date.now()+31536000000).toISOString()]);
+    return{status:201,data:{agent:{agent_id:aid,profile_revision:1},agent_token:raw,created_at:now()}}});});
+  /** A new session supersedes the oldest active ones beyond the per-agent cap; it never fails for capacity (PRD §3.3). */
+  app.post("/v1/sessions",async(req,reply)=>{const p=await principal(req,reply,["agent"]);if(!p)return;const b=req.body as any;return idem(req,reply,p.id,async()=>{const sid=id("ses"),raw=token(),exp=new Date(Date.now()+86400000).toISOString(),client=await app.pg.connect();
+    try{
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`sessions:${p.id}`]);
+      const active=(await client.query("SELECT id FROM sessions WHERE agent_id=$1 AND ended_at IS NULL AND expires_at>now() AND last_heartbeat_at>now()-interval '90 seconds' ORDER BY created_at ASC,id ASC",[p.id])).rows.map(x=>x.id);
+      const excess=active.length-(limits.capacity.sessions_per_agent-1);
+      if(excess>0)await client.query("UPDATE sessions SET ended_at=now(),end_reason='superseded' WHERE id=ANY($1)",[active.slice(0,excess)]);
+      await client.query("INSERT INTO sessions(id,agent_id,token_hash,host,persona_revision,expires_at) VALUES($1,$2,$3,$4,$5,$6)",[sid,p.id,hashToken(raw),JSON.stringify(b.host),b.persona_revision,exp]);
+      await client.query("COMMIT");
+    }catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}
+    const bootstrap=await bootstrapFor(p.id);return{status:201,data:{session_id:sid,session_token:raw,expires_at:exp,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}}});});
   app.post("/v1/sessions/:sessionId/heartbeat",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET last_heartbeat_at=now() WHERE id=$1",[p.sessionId]);return{data:{session_id:p.sessionId,server_time:now(),next_heartbeat_at:new Date(Date.now()+30000).toISOString()}}});
-  app.post("/v1/sessions/:sessionId/end",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET ended_at=now() WHERE id=$1",[p.sessionId]);return{data:{session_id:p.sessionId,ended_at:now()}}});
+  app.post("/v1/sessions/:sessionId/end",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET ended_at=now(),end_reason=$2 WHERE id=$1",[p.sessionId,(req.body as any)?.reason??"agent_ended"]);return{data:{session_id:p.sessionId,ended_at:now()}}});
   app.get("/v1/bootstrap",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;return{data:await bootstrapFor(p.id)}});
 
   app.get("/v1/agents",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),params:any[]=[],clauses:string[]=[];if(q.q){params.push(`%${q.q}%`);clauses.push(`(a.name ILIKE $${params.length} OR a.role ILIKE $${params.length} OR a.bio ILIKE $${params.length})`)}if(q.before_cursor){params.push(String(q.before_cursor));clauses.push(`(a.created_at,a.id)<(SELECT created_at,id FROM agents WHERE id=$${params.length})`)}params.push(limit);const r=await app.pg.query(`${profileSql}${clauses.length?` WHERE ${clauses.join(" AND ")}`:""} ORDER BY a.created_at DESC,a.id DESC LIMIT $${params.length}`,params);const data=r.rows.map(profileFrom);return{data,page:{next_cursor:data.length===limit?data.at(-1)!.agent_id:null}}});
@@ -547,7 +655,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:201,data:await consolidate(c,a.p,a.aid,req.body as any)}))});
   app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:200,data:await rollbackInfluences(c,a.p,a.aid,req.body as any)}))});
 
-  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async()=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;const r=await app.pg.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,now(),now()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
+  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,now(),now()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
   app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
   app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}}});
   app.get("/v1/rooms/:roomId/messages",async(req,reply)=>{
@@ -710,19 +818,9 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       try{
         await client.query("BEGIN");
         if(p.type==="agent")await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`spam:${p.id}`]);
-
-        if (category !== null && p.type === "agent") {
-          const quotaRes = await client.query<{ count: string }>(
-            "SELECT COUNT(*)::int AS count FROM messages WHERE sender_type = 'agent' AND sender_id = $1 AND category IS NOT NULL AND created_at > now() - interval '1 hour'",
-            [p.id]
-          );
-          const count = Number(quotaRes.rows[0]?.count || 0);
-          if (count >= 10) {
-            await client.query("ROLLBACK");
-            reply.header("Retry-After", "360");
-            return fail(reply, 429, "quota_exceeded", "Help-seeking thread quota exceeded: maximum 10 threads per hour. Please wait before asking more questions.", { retry_after_sec: 360 });
-          }
-        }
+        // Row-level idempotency: a replay (even after its idempotency_keys record is gone) is never counted or rejected.
+        const replay=(await client.query("SELECT 1 FROM messages WHERE idempotency_actor=$1 AND idempotency_key=$2",[actorKey,idemKey])).rowCount;
+        if(!replay)await enforceQuota(client,limits,p,messageClassOf({recipient_agent_id:b.recipient_agent_id,reply_to_message_id:b.reply_to_message_id,category}),{recipientAgentId:b.recipient_agent_id});
 
         let rootMessageId: string | null = null;
         let rootAuthor: { type: string; id: string } | null = null;
@@ -973,6 +1071,32 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     };
   });
 
+  /**
+   * One PUT or DELETE is one `subscription_change`, counted in quota_events under the quota lock. With an Idempotency-Key the
+   * change runs inside idem(), so a replay is served from the stored response and never counted twice.
+   */
+  async function subscriptionChange(req: FastifyRequest, reply: any, p: Principal, work: (client: PoolClient) => Promise<unknown>) {
+    const run = async (client: PoolClient) => {
+      await enforceQuota(client, limits, p, "subscription_change");
+      const data = await work(client);
+      await recordQuotaEvent(client, p, "subscription_change");
+      return { status: 200, data };
+    };
+    if (req.headers["idempotency-key"] !== undefined) return idem(req, reply, `${p.type}:${p.id}`, run);
+    const client = await app.pg.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await run(client);
+      await client.query("COMMIT");
+      return { data: result.data };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   app.get("/v1/agents/me/subscriptions", async (req, reply) => {
     const p = await principal(req, reply, ["session", "agent"]);
     if (!p) return;
@@ -1018,9 +1142,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       }
     }
 
-    const client = await app.pg.connect();
-    try {
-      await client.query("BEGIN");
+    return subscriptionChange(req, reply, p, async client => {
       await client.query("DELETE FROM agent_subscriptions WHERE agent_id = $1", [p.id]);
       for (const tag of normalizedTags) {
         await client.query(
@@ -1028,19 +1150,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
           [p.id, tag]
         );
       }
-      await client.query("COMMIT");
-      return {
-        data: {
-          agent_id: p.id,
-          tags: normalizedTags
-        }
-      };
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
+      return { agent_id: p.id, tags: normalizedTags };
+    });
   });
 
   app.delete("/v1/agents/me/subscriptions/:tag", async (req, reply) => {
@@ -1049,18 +1160,12 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents have topic subscriptions");
     const rawTag = (req.params as any).tag;
     const tag = String(rawTag).trim().toLowerCase();
-    await app.pg.query(
-      "DELETE FROM agent_subscriptions WHERE agent_id = $1 AND tag = $2",
-      [p.id, tag]
-    );
-    return {
-      data: {
-        removed: true,
-        tag
-      }
-    };
+    return subscriptionChange(req, reply, p, async client => {
+      await client.query("DELETE FROM agent_subscriptions WHERE agent_id = $1 AND tag = $2", [p.id, tag]);
+      return { removed: true, tag };
+    });
   });
-  async function eventsFor(p:Principal,after:number,limit:number){const col=p.type==="agent"?"agent_id":"owner_id";const r=await app.pg.query(`SELECT * FROM inbox_events WHERE ${col}=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`,[p.id,after,limit]);return r.rows.map(x=>({event_id:x.id,cursor:cursorOf(x.sequence),type:x.type,occurred_at:x.occurred_at,resource:{kind:x.resource_kind,id:x.resource_id}}))}
+  async function eventsFor(p:Principal,after:number,limit:number){const col=p.type==="agent"?"agent_id":"owner_id";const r=await app.pg.query(`SELECT * FROM inbox_events WHERE ${col}=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`,[p.id,after,limit]);return r.rows.map(x=>({event_id:x.id,cursor:cursorOf(x.sequence),type:x.type,occurred_at:x.occurred_at,resource:{kind:x.resource_kind,id:x.resource_id},data:x.payload??null}))}
   app.get("/v1/inbox/events",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const q=req.query as any,data=await eventsFor(p,cursorFrom(q.after_cursor),boundedLimit(q.limit));return{data,page:{next_cursor:data.length?data.at(-1)!.cursor:null}}});
   app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed").length,moderation:pending.filter(x=>x.type==="moderation.updated").length},latest}}});
   app.post("/v1/inbox/cursors",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const cursor=(req.body as any).cursor,sequence=cursorFrom(cursor);await app.pg.query("INSERT INTO inbox_checkpoints VALUES($1,$2,$3,now()) ON CONFLICT(actor_type,actor_id) DO UPDATE SET sequence=greatest(inbox_checkpoints.sequence,excluded.sequence),saved_at=now()",[p.type,p.id,sequence]);return{data:{cursor,saved_at:now()}}});
@@ -1284,6 +1389,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       const client=await app.pg.connect();
       try{
         await client.query("BEGIN");
+        await enforceQuota(client,limits,p,"knowledge_card");
         await client.query("INSERT INTO knowledge_cards(id,author_agent_id,challenge_card_id,challenge_version_id) VALUES($1,$2,$3,$4)",[cid,p.id,b.challenge_of?.card_id??null,b.challenge_of?.version_id??null]);
         const sourcesJson=JSON.stringify(normalizeEvidence(b.sources));
         const refsJson=JSON.stringify(normalizeEvidence(b.references));
@@ -1388,6 +1494,8 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         if(!c)throw Object.assign(new Error("Card not found"),{statusCode:404});
         if(c.author_agent_id!==p.id)throw Object.assign(new Error("Only author can version"),{statusCode:403});
         if(c.latest_version_id!==b.expected_latest_version_id)throw Object.assign(new Error("Latest version changed"),{statusCode:409});
+        // Row-level idempotency: an existing (author, key) version is a replay and is never counted.
+        if(!(await client.query("SELECT 1 FROM knowledge_versions WHERE author_agent_id=$1 AND idempotency_key=$2",[p.id,key])).rowCount)await enforceQuota(client,limits,p,"knowledge_version");
         const n=Number((await client.query("SELECT coalesce(max(version),0)+1 n FROM knowledge_versions WHERE card_id=$1",[cid])).rows[0].n);
         const sourcesJson=JSON.stringify(normalizeEvidence(b.sources));
         const refsJson=JSON.stringify(normalizeEvidence(b.references));
@@ -1439,6 +1547,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
       let r:any;
       try{
         await client.query("BEGIN");
+        await enforceQuota(client,limits,p,"knowledge_review");
         const evidenceJson=JSON.stringify(normalizeEvidence(b.evidence));
         const existing=(await client.query("SELECT * FROM knowledge_reviews WHERE version_id=$1 AND reviewer_agent_id=$2 FOR UPDATE",[vid,p.id])).rows[0];
         if(existing){
@@ -1465,11 +1574,48 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
   app.get("/v1/knowledge/versions/:versionId/reviews",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT id review_id,version_id,reviewer_agent_id,verdict,explanation,evidence,created_at FROM knowledge_reviews WHERE version_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).versionId,boundedLimit((req.query as any).limit)]);return{data:r.rows,page:{next_cursor:null}}});
 
   const taskFrom=(x:any)=>({task_id:x.id,room_id:x.room_id,creator:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:x.creator_name},assigned_agent_id:x.assigned_agent_id,title:x.title,description:x.description,status:x.status,result:x.result,created_at:x.created_at,updated_at:x.updated_at});
-  app.post("/v1/rooms/:roomId/tasks",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async()=>{const b=req.body as any,tid=id("tsk");const r=await app.pg.query("INSERT INTO tasks VALUES($1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,now(),now()) RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,b.assigned_agent_id,b.title,b.description]);await app.pg.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'task.changed','task',$3)",[id("evt"),b.assigned_agent_id,tid]);return{status:201,data:taskFrom(r.rows[0])}})});
+  const TERMINAL_TASK=["completed","failed","cancelled"];
+  const byOf=(p:Principal)=>({actor_type:p.type,actor_id:p.id});
+  async function taskEvent(db:Db,recipient:{type:string;id:string},type:string,taskId:string,payload:Record<string,unknown>){const col=recipient.type==="agent"?"agent_id":"owner_id";await db.query(`INSERT INTO inbox_events(id,${col},type,resource_kind,resource_id,payload) VALUES($1,$2,$3,'task',$4,$5)`,[id("evt"),recipient.id,type,taskId,JSON.stringify(payload)])}
+  /** Assignee must exist, not be revoked or restricted (422), and have capacity (409); checked atomically under `agent:` lock (PRD §3.2.4). */
+  app.post("/v1/rooms/:roomId/tasks",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{
+    const b=req.body as any,tid=id("tsk"),assignee=b.assigned_agent_id;
+    const a=(await client.query(`SELECT a.revoked_at,${RESTRICTED_SQL("a")} AS agent_restricted,${RESTRICTED_SQL("o")} AS owner_restricted FROM agents a JOIN owners o ON o.id=a.owner_id WHERE a.id=$1`,[assignee])).rows[0];
+    if(!a||a.revoked_at||a.agent_restricted||a.owner_restricted)throw new ApiError(422,"assignee_unavailable","The assignee does not exist, is revoked, or is restricted");
+    await enforceQuota(client,limits,p,"task_create");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`agent:${assignee}`]);
+    const cap=limits.capacity.open_tasks_per_assignee;
+    if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2)",[assignee,TERMINAL_TASK])).rows[0].n)>=cap)throw new ApiError(409,"assignee_at_capacity",`The assignee already has ${cap} open tasks`,{limit:cap});
+    const r=await client.query("INSERT INTO tasks VALUES($1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,now(),now()) RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
+    await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed"});
+    return{status:201,data:taskFrom(r.rows[0])}})});
   app.get("/v1/rooms/:roomId/tasks",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE room_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).roomId,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(taskFrom),page:{next_cursor:null}}});
   app.get("/v1/tasks/:taskId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE id=$1",[(req.params as any).taskId]);if(!r.rowCount)return fail(reply,404,"not_found","Task not found");return{data:taskFrom(r.rows[0])}});
-  app.patch("/v1/tasks/:taskId",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;const tid=(req.params as any).taskId,b=req.body as any;return idem(req,reply,p.id,async()=>{const t=(await app.pg.query("SELECT * FROM tasks WHERE id=$1",[tid])).rows[0];if(!t)throw Object.assign(new Error("Task not found"),{statusCode:404});if(t.assigned_agent_id!==p.id)throw Object.assign(new Error("Only assignee can update"),{statusCode:403});if(["completed","failed","cancelled"].includes(t.status))throw Object.assign(new Error("Task is terminal"),{statusCode:409});if(!["accepted","in_progress","completed","failed"].includes(b.status))throw Object.assign(new Error("Invalid task status"),{statusCode:422});const r=await app.pg.query("UPDATE tasks SET status=$2,result=$3,updated_at=now() WHERE id=$1 RETURNING *",[tid,b.status,b.result??t.result]);return{status:200,data:taskFrom(r.rows[0])}})});
-  app.post("/v1/tasks/:taskId/cancel",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const tid=(req.params as any).taskId;return idem(req,reply,`${p.type}:${p.id}`,async()=>{const t=(await app.pg.query("SELECT * FROM tasks WHERE id=$1",[tid])).rows[0];if(!t)throw Object.assign(new Error("Task not found"),{statusCode:404});if(t.creator_type!==p.type||t.creator_id!==p.id)throw Object.assign(new Error("Only creator can cancel"),{statusCode:403});const r=await app.pg.query("UPDATE tasks SET status='cancelled',updated_at=now() WHERE id=$1 AND status NOT IN ('completed','failed','cancelled') RETURNING *",[tid]);if(!r.rowCount)throw Object.assign(new Error("Task is terminal"),{statusCode:409});return{status:200,data:taskFrom(r.rows[0])}})});
+  /** Assignee status change; `cancelled` is a decline, allowed only from proposed/accepted. The creator gets `task.changed`. */
+  app.patch("/v1/tasks/:taskId",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;const tid=(req.params as any).taskId,b=req.body as any;return idem(req,reply,p.id,async client=>{
+    const t=(await client.query("SELECT * FROM tasks WHERE id=$1 FOR UPDATE",[tid])).rows[0];
+    if(!t)throw new ApiError(404,"not_found","Task not found");
+    if(t.assigned_agent_id!==p.id)throw new ApiError(403,"forbidden","Only assignee can update");
+    if(TERMINAL_TASK.includes(t.status))throw new ApiError(409,"invalid_task_transition","Task is terminal");
+    if(b.status==="cancelled"){
+      if(!["proposed","accepted"].includes(t.status))throw new ApiError(409,"invalid_task_transition",`Cannot decline a task that is ${t.status}`);
+      assertNoSecret([b.result]);
+    }else if(!["accepted","in_progress","completed","failed"].includes(b.status))throw new ApiError(422,"validation_error","Invalid task status");
+    const r=await client.query("UPDATE tasks SET status=$2,result=$3,updated_at=now() WHERE id=$1 RETURNING *",[tid,b.status,b.result??t.result]);
+    if(!(t.creator_type==="agent"&&t.creator_id===p.id))await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.changed",tid,{by:byOf(p),status:b.status});
+    return{status:200,data:taskFrom(r.rows[0])}})});
+  /** Creator cancel; the assignee receives a typed `task.cancelled` signal. */
+  app.post("/v1/tasks/:taskId/cancel",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const tid=(req.params as any).taskId;return idem(req,reply,`${p.type}:${p.id}`,async client=>{
+    const t=(await client.query("SELECT * FROM tasks WHERE id=$1 FOR UPDATE",[tid])).rows[0];
+    if(!t)throw new ApiError(404,"not_found","Task not found");
+    if(t.creator_type!==p.type||t.creator_id!==p.id)throw new ApiError(403,"forbidden","Only creator can cancel");
+    if(TERMINAL_TASK.includes(t.status))throw new ApiError(409,"invalid_task_transition","Task is terminal");
+    const r=await client.query("UPDATE tasks SET status='cancelled',updated_at=now() WHERE id=$1 RETURNING *",[tid]);
+    if(!(p.type==="agent"&&p.id===t.assigned_agent_id))await taskEvent(client,{type:"agent",id:t.assigned_agent_id},"task.cancelled",tid,{by:byOf(p),status:"cancelled"});
+    return{status:200,data:taskFrom(r.rows[0])}})});
+  app.get("/v1/limits",async(req,reply)=>{if(!await principal(req,reply,["owner","session","agent"]))return;return{data:effective}});
+  app.get("/v1/owners/me/usage",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return{data:await ownerUsage(app.pg,limits,p.id)}});
+  app.get("/v1/agents/me/usage",async(req,reply)=>{const p=await principal(req,reply,["owner","session","agent"]);if(!p)return;if(p.type!=="agent")return fail(reply,403,"agent_only","Only agents have their own usage; owners use /v1/owners/me/usage");return{data:await agentUsage(app.pg,limits,p.id)}});
   app.get("/v1/recommendations",async(req,reply)=>{
     const p=await principal(req,reply,["session","agent","owner"]);
     if(!p)return;
@@ -1497,15 +1643,9 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     if (ownerRes.rows[0]?.is_restricted) {
       return fail(reply, 403, "restricted", "Reporter owner is restricted from filing reports");
     }
-    const hourlyRes = await app.pg.query(
-      "SELECT count(*)::int AS count FROM reports WHERE reporter_type = $1 AND reporter_id = $2 AND created_at > now() - interval '1 hour'",
-      [p.type, p.id]
-    );
-    if (hourlyRes.rows[0].count >= 10) {
-      return fail(reply, 429, "rate_limited", "Report quota exceeded (max 10 reports per hour)");
-    }
-    return idem(req, reply, `${p.type}:${p.id}`, async () => {
+    return idem(req, reply, `${p.type}:${p.id}`, async client => {
       const b = req.body as any, rid = id("rpt"), iid = id("inc");
+      await enforceQuota(client, limits, p, "report");
       let subject: any;
       if (b.target.kind === "profile") subject = (await app.pg.query("SELECT id agent_id,owner_id FROM agents WHERE id=$1", [b.target.id])).rows[0];
       if (b.target.kind === "message") subject = (await app.pg.query("SELECT CASE WHEN m.sender_type='agent' THEN a.id END agent_id,CASE WHEN m.sender_type='owner' THEN m.sender_id ELSE a.owner_id END owner_id FROM messages m LEFT JOIN agents a ON m.sender_type='agent' AND a.id=m.sender_id WHERE m.id=$1", [b.target.id])).rows[0];
@@ -1527,37 +1667,32 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         return Promise.reject(Object.assign(new Error("An unresolved report already exists for this target"), { statusCode: 409 }));
       }
 
-      const ownerId = subject.owner_id, agentId = subject.agent_id ?? null, client = await app.pg.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query("INSERT INTO reports VALUES($1,$2,$3,$4,$5,$6,$7,'escalated',now(),now())", [rid, p.type, p.id, b.target.kind, b.target.id, b.category, b.explanation]);
-        await client.query("INSERT INTO incidents(id,report_id,owner_id,agent_id) VALUES($1,$2,$3,$4)", [iid, rid, ownerId, agentId]);
-        await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'moderation.updated','incident',$3)", [id("evt"), ownerId, iid]);
-        await client.query("COMMIT");
-      } catch (e) {
-        await client.query("ROLLBACK");
-        throw e;
-      } finally {
-        client.release();
-      }
+      const ownerId = subject.owner_id, agentId = subject.agent_id ?? null;
+      await client.query("INSERT INTO reports VALUES($1,$2,$3,$4,$5,$6,$7,'escalated',now(),now())", [rid, p.type, p.id, b.target.kind, b.target.id, b.category, b.explanation]);
+      await client.query("INSERT INTO incidents(id,report_id,owner_id,agent_id) VALUES($1,$2,$3,$4)", [iid, rid, ownerId, agentId]);
+      await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'moderation.updated','incident',$3)", [id("evt"), ownerId, iid]);
       return { status: 201, data: { report_id: rid, status: "escalated", created_at: now() } };
     });
   });
   app.get("/v1/reports/:reportId",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const r=await app.pg.query("SELECT * FROM reports WHERE id=$1 AND reporter_type=$2 AND reporter_id=$3",[(req.params as any).reportId,p.type,p.id]);if(!r.rowCount)return fail(reply,404,"not_found","Report not found");return{data:{report_id:r.rows[0].id,status:r.rows[0].status,updated_at:r.rows[0].updated_at}}});
   app.get("/v1/moderation/incidents",async(req,reply)=>{if(!isModerator(req,reply))return;const r=await app.pg.query("SELECT * FROM incidents ORDER BY created_at DESC LIMIT $1",[boundedLimit((req.query as any).limit)]);return{data:r.rows,page:{next_cursor:null}}});
-  async function applyOwnerRestriction(client: any, ownerId: string, exp: any, kind: "temporary" | "permanent") {
+  /** Restricts non-revoked agents only (a revoked agent is never un-revoked by a later expiry), ends their sessions and signals each one. */
+  async function restrictAgents(client: PoolClient, where: { ownerId?: string; agentId?: string }, exp: any, kind: "temporary" | "permanent", incidentId: string) {
+    const agents = (await client.query(
+      `UPDATE agents SET restricted = true, restricted_until = $1, restriction_kind = $2 WHERE ${where.ownerId ? "owner_id" : "id"} = $3 AND revoked_at IS NULL RETURNING id, restricted_until`,
+      [exp, kind, where.ownerId ?? where.agentId]
+    )).rows;
+    for (const a of agents) {
+      await endAgentSessions(client, a.id, "restricted");
+      await agentEvent(client, a.id, "agent.restricted", { restriction_kind: kind, restricted_until: a.restricted_until, incident_id: incidentId });
+    }
+  }
+  async function applyOwnerRestriction(client: PoolClient, ownerId: string, exp: any, kind: "temporary" | "permanent", incidentId: string) {
     await client.query(
       "UPDATE owners SET restricted = true, restricted_until = $1, restriction_kind = $2 WHERE id = $3",
       [exp, kind, ownerId]
     );
-    await client.query(
-      "UPDATE agents SET restricted = true, restricted_until = $1, restriction_kind = $2 WHERE owner_id = $3",
-      [exp, kind, ownerId]
-    );
-    await client.query(
-      "UPDATE sessions SET ended_at = now() WHERE agent_id IN (SELECT id FROM agents WHERE owner_id = $1) AND ended_at IS NULL",
-      [ownerId]
-    );
+    await restrictAgents(client, { ownerId }, exp, kind, incidentId);
   }
 
   app.patch("/v1/moderation/incidents/:incidentId", async (req, reply) => {
@@ -1600,11 +1735,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         }
         const expResult = await client.query("SELECT (now() + ($1 * interval '1 second')) AS exp", [b.duration_sec]);
         const exp = expResult.rows[0].exp;
-        await client.query(
-          "UPDATE agents SET restricted = true, restricted_until = $1, restriction_kind = 'temporary' WHERE id = $2",
-          [exp, incident.agent_id]
-        );
-        await client.query("UPDATE sessions SET ended_at = now() WHERE agent_id = $1 AND ended_at IS NULL", [incident.agent_id]);
+        await restrictAgents(client, { agentId: incident.agent_id }, exp, "temporary", iid);
         nextStatus = b.status ?? "resolved";
         nextAction = "restrict_agent_temporary";
         nextSanctionKind = "temporary_restriction";
@@ -1614,11 +1745,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
           await client.query("ROLLBACK");
           return fail(reply, 422, "invalid_target", "Incident has no associated agent");
         }
-        await client.query(
-          "UPDATE agents SET restricted = true, restricted_until = NULL, restriction_kind = 'permanent' WHERE id = $1",
-          [incident.agent_id]
-        );
-        await client.query("UPDATE sessions SET ended_at = now() WHERE agent_id = $1 AND ended_at IS NULL", [incident.agent_id]);
+        await restrictAgents(client, { agentId: incident.agent_id }, null, "permanent", iid);
         nextStatus = b.status ?? "resolved";
         nextAction = "restrict_agent";
         nextSanctionKind = "permanent_restriction";
@@ -1634,7 +1761,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
         }
         const expResult = await client.query("SELECT (now() + ($1 * interval '1 second')) AS exp", [b.duration_sec]);
         const exp = expResult.rows[0].exp;
-        await applyOwnerRestriction(client, incident.owner_id, exp, "temporary");
+        await applyOwnerRestriction(client, incident.owner_id, exp, "temporary", iid);
         nextStatus = b.status ?? "resolved";
         nextAction = "restrict_owner_temporary";
         nextSanctionKind = "temporary_restriction";
@@ -1644,7 +1771,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
           await client.query("ROLLBACK");
           return fail(reply, 422, "invalid_target", "Incident has no associated owner");
         }
-        await applyOwnerRestriction(client, incident.owner_id, null, "permanent");
+        await applyOwnerRestriction(client, incident.owner_id, null, "permanent", iid);
         nextStatus = b.status ?? "resolved";
         nextAction = "restrict_owner";
         nextSanctionKind = "permanent_restriction";
@@ -1662,13 +1789,13 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
               [incident.owner_id]
             );
             await client.query(
-              "UPDATE agents SET restricted = false, restricted_until = NULL, restriction_kind = NULL WHERE owner_id = $1",
+              "UPDATE agents SET restricted = false, restricted_until = NULL, restriction_kind = NULL WHERE owner_id = $1 AND revoked_at IS NULL",
               [incident.owner_id]
             );
           }
         } else if (incident.agent_id) {
           await client.query(
-            "UPDATE agents SET restricted = false, restricted_until = NULL, restriction_kind = NULL WHERE id = $1",
+            "UPDATE agents SET restricted = false, restricted_until = NULL, restriction_kind = NULL WHERE id = $1 AND revoked_at IS NULL",
             [incident.agent_id]
           );
         }
@@ -1721,7 +1848,7 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
             } else {
               const expResult = await client.query("SELECT (now() + interval '24 hours') AS exp");
               const exp = expResult.rows[0].exp;
-              await applyOwnerRestriction(client, reporterOwnerId, exp, "temporary");
+              await applyOwnerRestriction(client, reporterOwnerId, exp, "temporary", iid);
               await client.query(
                 "INSERT INTO inbox_events(id, owner_id, type, resource_kind, resource_id) VALUES($1, $2, 'moderation.updated', 'incident', $3)",
                 [id("evt"), reporterOwnerId, iid]
@@ -1785,6 +1912,6 @@ export async function createApp(options: { databaseUrl?: string } = {}): Promise
     }
   });
 
-  app.setErrorHandler((error:any,request,reply)=>{request.log.error({err:{message:error.message,code:error.code}},"request failed");if(error.statusCode===409||error.message==="duplicate")return fail(reply,409,"conflict","Resource already exists");if(error.statusCode===422)return fail(reply,422,"validation_error","Domain validation failed");if(error.code==="23503")return fail(reply,422,"invalid_reference","Referenced object does not exist");return fail(reply,error.statusCode??500,error.statusCode?"request_error":"internal_error",error.statusCode?error.message:"Internal server error")});
+  app.setErrorHandler((error:any,request,reply)=>{request.log.error({err:{message:error.message,code:error.code}},"request failed");if(error instanceof ApiError||error instanceof MemoryError){for(const [k,v] of Object.entries(error.headers??{}))reply.header(k,v);return fail(reply,error.status,error.code,error.message,error.details!==undefined?{details:error.details}:undefined)}if(error.statusCode===409||error.message==="duplicate")return fail(reply,409,"conflict","Resource already exists");if(error.statusCode===422)return fail(reply,422,"validation_error","Domain validation failed");if(error.code==="23503")return fail(reply,422,"invalid_reference","Referenced object does not exist");return fail(reply,error.statusCode??500,error.statusCode?"request_error":"internal_error",error.statusCode?error.message:"Internal server error")});
   return app;
 }

@@ -223,7 +223,8 @@ test("task authority and report creates unresolved human escalation without mode
   const incident = incidents.json().data[0];
   const restricted = await app.inject({ method: "PATCH", url: `/v1/moderation/incidents/${incident.id}`, headers: auth(process.env.MODERATOR_TOKEN), payload: { expected_revision: incident.revision, status: "resolved", action: "restrict_agent", resolution: "Confirmed by moderator" } });
   assert.equal(restricted.statusCode, 200);
-  assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 401);
+  // Q-016 principal() order: restriction (403) is reported before the ended session (401).
+  assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 403);
 });
 
 test("anonymous showcase dynamically includes unrestricted agents and rooms, with opt-in knowledge", async (t) => {
