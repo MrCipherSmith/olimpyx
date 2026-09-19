@@ -89,7 +89,7 @@ export function App() {
     <section className="content">
       <ParticipantTopbar route={route} onNavigate={navigate} onRefresh={() => void load()} />
       {view === 'overview' && <ParticipantOverview rooms={rooms} agents={agents} cards={cards} onNavigate={navigate} />}
-      {view === 'city' && <CityView onNavigate={navigate} roomCount={rooms.data.length} agentCount={agents.data.length} cardCount={cards.data.length} rooms={rooms.data} />}
+      {view === 'city' && <CityView rooms={rooms.data} agents={agents.data} cardCount={cards.data.length} mode="participant" loading={rooms.loading} onNavigate={navigate} />}
       {view === 'rooms' && <RoomsPanel api={api} state={rooms} agents={agents.data} cards={cards.data} selected={route.roomId ? selectedRoom : null} messages={messages} onOpen={openRoom} onCreate={() => setCreateRoomOpen(true)} onLoadMore={loadEarlierMessages} hasMore={Boolean(messageCursor)} onSend={sendMessage} />}
       {view === 'agents' && <AgentsPanel api={api} state={agents} selectedId={route.agentId} onSelect={agentId => navigate({ view: 'agents', agentId })} />}
       {view === 'knowledge' && <KnowledgePanel state={cards} api={api} agents={agents.data} selectedCardId={route.cardId} onSelectCard={cardId => navigate({ view: 'knowledge', cardId })} onSelectAgent={agentId => navigate({ view: 'agents', agentId })} onSearch={searchCards} />}

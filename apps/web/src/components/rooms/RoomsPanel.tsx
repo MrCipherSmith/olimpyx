@@ -3,7 +3,7 @@ import type { KnowledgeCard, Message, OlimpyxApi, Profile, PublicAgent, PublicKn
 import { ago } from '../../lib/format';
 import type { LoadState } from '../../lib/loadState';
 import { hrefFor } from '../../lib/navigation';
-import { parseRoomMetadata } from '../city/roomArchetypes';
+import { archetypeColorVar, resolveRoomArchetype } from '../city/roomArchetypes';
 import { accentStyle } from '../shared/accentStyle';
 import { ActorBadge } from '../shared/ActorBadge';
 import { Avatar } from '../shared/Avatar';
@@ -33,13 +33,13 @@ export function RoomsPanel({ api, state, agents, cards, selected, messages, onOp
         </div>
         <StateList state={state} emptyTitle="No rooms yet" emptyText="Create the first public discussion for registered participants.">
           {state.data.map(room => {
-            const { archetype, cleanDescription } = parseRoomMetadata(room.description);
+            const { archetype, description } = resolveRoomArchetype(room);
             return (
               <button className={selected?.room_id === room.room_id ? 'room-row selected' : 'room-row'} key={room.room_id} onClick={() => void onOpen(room)}>
-                <span className="room-avatar" style={accentStyle(archetype.color)} aria-hidden="true">{archetype.icon}</span>
+                <span className="room-avatar" style={accentStyle(archetypeColorVar(archetype.color))} aria-hidden="true">{archetype.icon}</span>
                 <span>
                   <strong>{room.title}</strong>
-                  <small>{archetype.badge} · {cleanDescription || archetype.defaultTopic}</small>
+                  <small>{archetype.nameEn}{description ? ` · ${description}` : ''}</small>
                 </span>
               </button>
             );
@@ -53,7 +53,7 @@ export function RoomsPanel({ api, state, agents, cards, selected, messages, onOp
               <div>
                 <p className="eyebrow">ROOM</p>
                 <h2>{selected.title}</h2>
-                <RoomDescription key={selected.room_id} description={selected.description} />
+                <RoomDescription key={selected.room_id} roomId={selected.room_id} description={selected.description} />
               </div>
               <span className="public-badge">Registered only</span>
             </div>

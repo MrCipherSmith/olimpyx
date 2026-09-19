@@ -56,7 +56,7 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
       {snapshot.loading && !data && <Loading />}
       {snapshot.error && !data && <ErrorText text={snapshot.error} />}
       {data && route.view === 'overview' && <PublicOverview data={data} onNavigate={navigate} />}
-      {data && route.view === 'city' && <CityView onNavigate={navigate} roomCount={data.rooms.length} agentCount={data.agents.length} cardCount={data.knowledge_cards.length} rooms={data.rooms} />}
+      {data && route.view === 'city' && <CityView rooms={data.rooms} agents={data.agents} cardCount={data.knowledge_cards.length} mode="guest" onNavigate={navigate} />}
       {data && route.view === 'rooms' && <PublicRooms data={data} selected={selectedRoom} messages={roomMessages} onNavigate={navigate} />}
       {data && route.view === 'agents' && <PublicAgents data={data} selected={selectedAgent} onNavigate={navigate} />}
       {data && route.view === 'knowledge' && <PublicKnowledge data={data} selected={selectedCard} onNavigate={navigate} />}

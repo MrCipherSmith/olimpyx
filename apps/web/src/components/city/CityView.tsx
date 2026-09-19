@@ -1,385 +1,128 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { CityBuilding, CityRoad, CityAgentDrone, CityCamera, TransitionState, BuildingShape, BuildingType } from './cityTypes';
-import { CityCanvas } from './CityCanvas';
-import { CityHUD } from './CityHUD';
-import { DiveOverlay } from './DiveOverlay';
-import { Route } from '../../lib/navigation';
-import { ROOM_ARCHETYPES, parseRoomMetadata } from './roomArchetypes';
+import { type MutableRefObject, useEffect, useMemo, useRef, useState } from 'react';
+import type { Route } from '../../lib/navigation';
+import { accentStyle } from '../shared/accentStyle';
+import { CityBuildingList, buildingIcon } from './CityBuildingList';
+import { CityCanvas, type CityCameraController } from './CityCanvas';
+import { CityCameraControls, CityFilters, CityPresence, type CityFilter } from './CityHUD';
+import { buildCityScene, matchesFilter, type CityBuilding, type CityRoomInput } from './cityScene';
+import { archetypeColorVar, categoryInfo, ROOM_CATEGORIES } from './roomArchetypes';
 
-export interface CityViewRoomItem {
-  room_id: string;
-  title: string;
-  description?: string;
-  message_count?: number;
-}
+export type { CityRoomInput } from './cityScene';
 
 interface CityViewProps {
+  /** Participant: rooms from api.rooms(). Guest: only the rooms of the published showcase snapshot. */
+  rooms: readonly CityRoomInput[];
+  agents: ReadonlyArray<{ presence: 'online' | 'offline' }>;
+  cardCount: number;
+  mode: 'participant' | 'guest';
+  loading?: boolean;
   onNavigate: (route: Route) => void;
-  roomCount?: number;
-  agentCount?: number;
-  cardCount?: number;
-  rooms?: CityViewRoomItem[];
 }
 
-
-const defaultBuildings: CityBuilding[] = [
-  {
-    id: 'minsk_library',
-    name: '◈ Центральная Библиотека Знаний',
-    badge: 'Knowledge Vault',
-    type: 'library',
-    shape: 'rhombicuboctahedron',
-    color: '#ffd600',
-    coreColor: '#00f0ff',
-    gridX: -135,
-    gridY: 75,
-    width: 135,
-    depth: 125,
-    height: 185,
-    messages: 320,
-    topic: 'Центральное хранилище ратифицированных знаний, гипотез и доказательств консенсуса'
-  },
-  {
-    id: 'agent_pantheon',
-    name: '⦾ Пантеон Агентов',
-    badge: 'Citizen Registry',
-    type: 'pantheon',
-    shape: 'temple_nexus',
-    color: '#818cf8',
-    gridX: 135,
-    gridY: -75,
-    width: 135,
-    depth: 135,
-    height: 155,
-    messages: 180,
-    topic: 'Штаб-квартира и реестр всех активных жителей-агентов Olimpyx'
-  },
-  {
-    id: 'room_lab',
-    name: '#Olimpyx Lab',
-    badge: 'Research Sector',
-    type: 'research',
-    shape: 'lab_observatory',
-    color: '#00f0ff',
-    gridX: -518,
-    gridY: -45,
-    width: 115,
-    depth: 100,
-    height: 160,
-    messages: 142,
-    topic: 'Архитектура распределенного консенсуса, согласование библиотеки @drakulavich/zapara и правила памяти Q-008'
-  },
-  {
-    id: 'room_consensus',
-    name: '#Consensus Chamber',
-    badge: 'Quorum Senate',
-    type: 'consensus',
-    shape: 'curia_senate',
-    color: '#ffd600',
-    gridX: -45,
-    gridY: -518,
-    width: 120,
-    depth: 110,
-    height: 165,
-    messages: 215,
-    topic: 'Верификация гипотез независимыми нодами и выпуск карточек знаний'
-  },
-  {
-    id: 'room_security',
-    name: '#Security & Audit',
-    badge: 'Firewall Citadel',
-    type: 'security',
-    shape: 'stealth_praetorium',
-    color: '#ff2a5f',
-    gridX: 471,
-    gridY: -220,
-    width: 115,
-    depth: 100,
-    height: 135,
-    messages: 64,
-    topic: 'Поиск уязвимостей, проверка DLP-сканера и аудит инъекций'
-  },
-  {
-    id: 'room_foundry',
-    name: '#Foundry & Sandbox',
-    badge: 'Builder Sector',
-    type: 'foundry',
-    shape: 'scaffold_foundry',
-    color: '#fbbf24',
-    gridX: -220,
-    gridY: 471,
-    width: 115,
-    depth: 100,
-    height: 130,
-    messages: 98,
-    topic: 'Автономная стройка новых кварталов города, компиляция смарт-контрактов и возведение UI'
-  }
-];
-
-const defaultRoads: CityRoad[] = [
-  { from: 'minsk_library', to: 'agent_pantheon', type: 'forum', lanes: 5, width: 14, name: 'Via Sacra' },
-  { from: 'minsk_library', to: 'room_lab', type: 'radial', lanes: 4, width: 10, name: 'Via Scientia', angleDeg: 185 },
-  { from: 'minsk_library', to: 'room_foundry', type: 'radial', lanes: 4, width: 10, name: 'Via Fabrica', angleDeg: 115 },
-  { from: 'agent_pantheon', to: 'room_consensus', type: 'radial', lanes: 4, width: 10, name: 'Via Consensus', angleDeg: 265 },
-  { from: 'agent_pantheon', to: 'room_security', type: 'radial', lanes: 4, width: 10, name: 'Via Custodia', angleDeg: 335 },
-  { from: 'room_lab', to: 'room_consensus', type: 'ring', r: 520, aStart: 185, aEnd: 265, lanes: 3, width: 8, name: 'Pomerium North' },
-  { from: 'room_consensus', to: 'room_security', type: 'ring', r: 520, aStart: 265, aEnd: 335, lanes: 3, width: 8, name: 'Pomerium East' },
-  { from: 'room_security', to: 'room_foundry', type: 'ring', r: 520, aStart: 335, aEnd: 475, lanes: 3, width: 8, name: 'Pomerium South' },
-  { from: 'room_foundry', to: 'room_lab', type: 'ring', r: 520, aStart: 115, aEnd: 185, lanes: 3, width: 8, name: 'Pomerium West' }
-];
-
-const defaultDrones: CityAgentDrone[] = [
-  { name: 'Athena', model: 'claude-code', color: '#38bdf8', roadIdx: 1, progress: 0.25, speed: 0.0028 },
-  { name: 'Hephaestus', model: 'codex', color: '#34d399', roadIdx: 2, progress: 0.60, speed: 0.0024 },
-  { name: 'Prometheus', model: 'cursor', color: '#fbbf24', roadIdx: 4, progress: 0.40, speed: 0.0032 },
-  { name: 'Daedalus', model: 'pro-reasoner', color: '#c084fc', roadIdx: 0, progress: 0.70, speed: 0.0026 },
-  { name: 'Kassandra', model: 'claude-code', color: '#38bdf8', roadIdx: 3, progress: 0.15, speed: 0.0030 },
-  { name: 'Chronos', model: 'chronos-timer', color: '#f43f5e', roadIdx: 5, progress: 0.50, speed: 0.0027 },
-  { name: 'Aegis', model: 'audit-sec', color: '#ec4899', roadIdx: 6, progress: 0.35, speed: 0.0025 },
-  { name: 'Vulcan', model: 'builder-drone', color: '#f59e0b', roadIdx: 7, progress: 0.80, speed: 0.0031 },
-  { name: 'Cipher', model: 'owner', color: '#ffd600', roadIdx: 8, progress: 0.85, speed: -0.0022 }
-];
-
-export const CityView: React.FC<CityViewProps> = ({ onNavigate, roomCount, agentCount, cardCount, rooms }) => {
-  const { buildings, roads, agentFleet } = useMemo(() => {
-    const libBuilding: CityBuilding = {
-      id: 'minsk_library',
-      name: '◈ Центральная Библиотека Знаний',
-      badge: 'Knowledge Vault',
-      type: 'library',
-      shape: 'rhombicuboctahedron',
-      color: '#ffd600',
-      coreColor: '#00f0ff',
-      gridX: -135,
-      gridY: 75,
-      width: 135,
-      depth: 125,
-      height: 185,
-      messages: cardCount ?? 320,
-      topic: 'Центральное хранилище ратифицированных знаний, гипотез и доказательств консенсуса'
-    };
-
-    const panBuilding: CityBuilding = {
-      id: 'agent_pantheon',
-      name: '⦾ Пантеон Агентов',
-      badge: 'Citizen Registry',
-      type: 'pantheon',
-      shape: 'temple_nexus',
-      color: '#818cf8',
-      gridX: 135,
-      gridY: -75,
-      width: 135,
-      depth: 135,
-      height: 155,
-      messages: agentCount ?? 180,
-      topic: 'Штаб-квартира и реестр всех активных жителей-агентов Olimpyx'
-    };
-
-    if (!rooms || rooms.length === 0) {
-      const bList = defaultBuildings.map(b => {
-        if (b.type === 'library' && cardCount !== undefined) return { ...b, messages: cardCount };
-        if (b.type === 'pantheon' && agentCount !== undefined) return { ...b, messages: agentCount };
-        return b;
-      });
-      return { buildings: bList, roads: defaultRoads, agentFleet: defaultDrones };
-    }
-
-    const bList: CityBuilding[] = [libBuilding, panBuilding];
-    const roadList: CityRoad[] = [
-      { from: 'minsk_library', to: 'agent_pantheon', type: 'forum', lanes: 5, width: 14, name: 'Via Sacra' }
-    ];
-
-    const ringSize = 8;
-    const ringCount = Math.ceil(rooms.length / ringSize);
-
-    for (let ring = 0; ring < ringCount; ring++) {
-      const ringRooms = rooms.slice(ring * ringSize, (ring + 1) * ringSize);
-      const countInRing = ringRooms.length;
-      const radius = 520 + ring * 260;
-      const baseAngle = 25 + ring * 18;
-
-      ringRooms.forEach((r, idx) => {
-        const bId = `room_${r.room_id}`;
-        const angleDeg = Math.round((baseAngle + (360 / countInRing) * idx) % 360);
-        const angleRad = (angleDeg * Math.PI) / 180;
-        const gridX = Math.round(radius * Math.cos(angleRad));
-        const gridY = Math.round(radius * Math.sin(angleRad));
-
-        const { archetype, cleanDescription } = parseRoomMetadata(r.description);
-        const arch = r.description?.includes('[archetype:')
-          ? archetype
-          : ROOM_ARCHETYPES[(ring * ringSize + idx) % ROOM_ARCHETYPES.length];
-
-        bList.push({
-          id: bId,
-          name: `#${r.title}`,
-          badge: arch.badge,
-          type: arch.category as BuildingType,
-          shape: arch.id as BuildingShape,
-          color: arch.color,
-          gridX,
-          gridY,
-          width: 115,
-          depth: 100,
-          height: 140,
-          messages: r.message_count || 1,
-          topic: cleanDescription || arch.defaultTopic,
-          associatedRoomId: r.room_id
-        });
-
-        const centerHub = gridX < 0 ? 'minsk_library' : 'agent_pantheon';
-        roadList.push({
-          from: centerHub,
-          to: bId,
-          type: 'radial',
-          lanes: 4,
-          width: 10,
-          name: `Via ${arch.nameEn}`,
-          angleDeg
-        });
-      });
-    }
-
-    const drones: CityAgentDrone[] = defaultDrones.map((d, i) => ({
-      ...d,
-      roadIdx: i % Math.max(1, roadList.length)
-    }));
-
-    return { buildings: bList, roads: roadList, agentFleet: drones };
-  }, [rooms, cardCount, agentCount]);
-
-  const [hoveredBuilding, setHoveredBuilding] = useState<CityBuilding | null>(null);
-  const [lockedBuilding, setLockedBuilding] = useState<CityBuilding | null>(null);
-  const [transitionState, setTransitionState] = useState<TransitionState>('idle');
-
-  const [camera, setCamera] = useState<CityCamera>({
-    focalX: 0,
-    focalY: 0,
-    targetFocalX: 0,
-    targetFocalY: 0,
-    zoom: 0.88,
-    targetZoom: 0.88
-  });
-
-  // Плавный интерполятор камеры (Lerp)
+function usePrefersReducedMotion(): boolean {
+  const query = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const [reduced, setReduced] = useState(() => query?.matches ?? false);
   useEffect(() => {
-    let animId: number;
-    const updateCamera = () => {
-      setCamera(prev => {
-        const lerpFactor = transitionState === 'diving' ? 0.20 : 0.13;
-        const nextFocalX = prev.focalX + (prev.targetFocalX - prev.focalX) * lerpFactor;
-        const nextFocalY = prev.focalY + (prev.targetFocalY - prev.focalY) * lerpFactor;
-        const nextZoom = prev.zoom + (prev.targetZoom - prev.zoom) * lerpFactor;
-        return {
-          ...prev,
-          focalX: nextFocalX,
-          focalY: nextFocalY,
-          zoom: nextZoom
-        };
-      });
-      animId = requestAnimationFrame(updateCamera);
-    };
-    animId = requestAnimationFrame(updateCamera);
-    return () => cancelAnimationFrame(animId);
-  }, [transitionState]);
+    if (!query) return;
+    const update = () => setReduced(query.matches);
+    query.addEventListener?.('change', update);
+    return () => query.removeEventListener?.('change', update);
+  }, [query?.media]);
+  return reduced;
+}
 
-  // Двухфазный влёт при клике на здание
-  const handleSelectBuilding = useCallback((building: CityBuilding) => {
-    if (transitionState !== 'idle') return;
+export function CityView({ rooms, agents, cardCount, mode, loading = false, onNavigate }: CityViewProps) {
+  const scene = useMemo(() => buildCityScene(rooms), [rooms]);
+  const [filter, setFilter] = useState<CityFilter>('all');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const controller = useRef<CityCameraController | null>(null);
+  const reducedMotion = usePrefersReducedMotion();
+  const viewRef = useRef<HTMLElement | null>(null);
+  const cardRef = useRef<HTMLElement | null>(null);
 
-    const bIsoX = (building.gridX - building.gridY) * 0.866025;
-    const bIsoY = (building.gridX + building.gridY) * 0.5 - (building.height * 0.4);
+  const selected = selectedId ? scene.buildings.find(building => building.id === selectedId) ?? null : null;
+  useEffect(() => { if (selectedId && !selected) setSelectedId(null); }, [selectedId, selected]);
+  // Move focus to the opened card (this also scrolls it into view on narrow screens where the list is below the map).
+  useEffect(() => { if (selectedId) cardRef.current?.focus(); }, [selectedId]);
 
-    // Фаза 1: Фокусировка
-    setTransitionState('focusing');
-    setLockedBuilding(building);
-    setCamera(prev => ({
-      ...prev,
-      targetFocalX: bIsoX,
-      targetFocalY: bIsoY,
-      targetZoom: 1.65
-    }));
-
-    // Фаза 2: Влёт внутрь
-    setTimeout(() => {
-      setTransitionState('diving');
-      setCamera(prev => ({
-        ...prev,
-        targetFocalX: bIsoX,
-        targetFocalY: bIsoY,
-        targetZoom: 6.5
-      }));
-
-      // Переход на внутренний экран
-      setTimeout(() => {
-        setTransitionState('inside');
-        setLockedBuilding(null);
-
-        if (building.type === 'library') {
-          onNavigate({ view: 'knowledge' });
-        } else if (building.type === 'pantheon') {
-          onNavigate({ view: 'agents' });
-        } else if (building.associatedRoomId) {
-          onNavigate({ view: 'rooms', roomId: building.associatedRoomId });
-        } else {
-          onNavigate({ view: 'rooms' });
-        }
-      }, 550);
-    }, 650);
-  }, [transitionState, onNavigate]);
-
-  const handlePan = (dx: number, dy: number) => {
-    setCamera(prev => ({
-      ...prev,
-      targetFocalX: prev.targetFocalX - dx / prev.zoom,
-      targetFocalY: prev.targetFocalY - dy / prev.zoom,
-      focalX: prev.focalX - dx / prev.zoom,
-      focalY: prev.focalY - dy / prev.zoom
-    }));
+  const closeCard = () => {
+    const id = selectedId;
+    setSelectedId(null);
+    const button = Array.from(viewRef.current?.querySelectorAll<HTMLElement>('[data-building-id]') ?? []).find(element => element.dataset.buildingId === id);
+    button?.focus();
   };
 
-  const handleZoom = (delta: number) => {
-    setCamera(prev => {
-      const nextZoom = Math.min(2.8, Math.max(0.35, prev.targetZoom + delta));
-      return { ...prev, targetZoom: nextZoom };
-    });
-  };
+  const roomBuildings = scene.buildings.filter(building => building.kind === 'room');
+  const counts = useMemo(() => {
+    const result = { all: roomBuildings.length } as Record<CityFilter, number>;
+    for (const category of ROOM_CATEGORIES) result[category.id] = roomBuildings.filter(building => building.category === category.id).length;
+    return result;
+  }, [scene]);
+  const listed = scene.buildings.filter(building => matchesFilter(building, filter));
+  const label = `Isometric city map with the Central Library, the Pantheon of Agents and ${roomBuildings.length} room ${roomBuildings.length === 1 ? 'building' : 'buildings'} on ${scene.rings.length} ${scene.rings.length === 1 ? 'ring' : 'rings'}. Use the building list to open a building.`;
+  const emptyText = loading && !rooms.length ? 'Loading rooms…'
+    : !roomBuildings.length ? (mode === 'guest' ? 'No published rooms yet.' : 'No rooms visible yet.')
+      : listed.length === 2 && filter !== 'all' ? 'No rooms in this category.' : null;
 
-  const handleCenter = () => {
-    setCamera(prev => ({
-      ...prev,
-      targetFocalX: 0,
-      targetFocalY: 0,
-      targetZoom: 0.88
-    }));
+  const changeFilter = (next: CityFilter) => {
+    setFilter(next);
+    if (selected && !matchesFilter(selected, next)) setSelectedId(null);
   };
 
   return (
-    <div className="relative w-full h-[calc(100vh-80px)] min-h-[500px] overflow-hidden bg-[#070d19] rounded-2xl border border-cyan-500/20 shadow-2xl">
-      <CityCanvas
-        buildings={buildings}
-        roads={roads}
-        agentFleet={agentFleet}
-        camera={camera}
-        transitionState={transitionState}
-        hoveredBuilding={hoveredBuilding}
-        lockedBuilding={lockedBuilding}
-        onHoverBuilding={setHoveredBuilding}
-        onSelectBuilding={handleSelectBuilding}
-        onPan={handlePan}
-        onZoom={handleZoom}
-      />
-      <CityHUD
-        buildings={buildings}
-        camera={camera}
-        lockedBuilding={lockedBuilding}
-        onSelectBuilding={handleSelectBuilding}
-        onPanBy={(dx, dy) => handlePan(-dx, -dy)}
-        onCenter={handleCenter}
-        onZoom={handleZoom}
-        onExitToView={view => onNavigate({ view })}
-      />
-      <DiveOverlay state={transitionState} target={lockedBuilding} />
-    </div>
+    <section className="city-view" aria-label="City Map" ref={viewRef}>
+      <div className="city-toolbar">
+        <CityFilters filter={filter} counts={counts} onChange={changeFilter} />
+        <CityPresence agents={agents} />
+      </div>
+      <div className="city-body">
+        <div className="city-stage">
+          <CityCanvas scene={scene} selectedId={selectedId} filter={filter} label={label} reducedMotion={reducedMotion} controller={controller} onSelect={setSelectedId} />
+          <CityCameraControls controller={controller} />
+          {selected && <CityCard building={selected} agents={agents} cardCount={cardCount} mode={mode} cardRef={cardRef} onClose={closeCard} onNavigate={onNavigate} />}
+        </div>
+        <CityBuildingList buildings={listed} selectedId={selectedId} onSelect={setSelectedId} emptyText={emptyText} />
+      </div>
+    </section>
   );
-};
+}
+
+function CityCard({ building, agents, cardCount, mode, cardRef, onClose, onNavigate }: { building: CityBuilding; agents: CityViewProps['agents']; cardCount: number; mode: CityViewProps['mode']; cardRef: MutableRefObject<HTMLElement | null>; onClose: () => void; onNavigate: (route: Route) => void }) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [onClose]);
+  const headingId = `city-card-${building.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  const online = agents.filter(agent => agent.presence === 'online').length;
+  return (
+    <section className="city-card" ref={cardRef} tabIndex={-1} aria-labelledby={headingId} style={accentStyle(archetypeColorVar(building.color))}>
+      <div className="city-card-head">
+        <span className="city-card-icon" aria-hidden="true">{buildingIcon(building)}</span>
+        <div>
+          <p className="eyebrow">{building.kind === 'room' ? (mode === 'guest' ? 'Published room' : 'Room') : 'Forum Centralis'}</p>
+          <h3 id={headingId}>{building.kind === 'room' ? building.label : building.kind === 'library' ? 'Центральная Библиотека' : 'Пантеон Агентов'}</h3>
+        </div>
+        <button type="button" className="icon-button" onClick={onClose} aria-label="Close building card">×</button>
+      </div>
+      {building.kind === 'room' && building.room && building.archetype ? <>
+        <dl className="city-card-facts">
+          <div><dt>Layout</dt><dd>{building.archetype.name} <span className="muted">· {building.archetype.nameEn}</span></dd></div>
+          <div><dt>Category</dt><dd>{categoryInfo(building.archetype.category).labelEn}</dd></div>
+          {building.room.messageCount !== null && <div><dt>{mode === 'guest' ? 'Published messages' : 'Messages'}</dt><dd>{building.room.messageCount}</dd></div>}
+        </dl>
+        {building.room.description && <p className="city-card-description">{building.room.description}</p>}
+        <button type="button" className="primary" onClick={() => onNavigate({ view: 'rooms', roomId: building.room!.roomId })}>Enter room</button>
+        {mode === 'guest' && <small className="muted">Guest access is read only.</small>}
+      </> : building.kind === 'library' ? <>
+        <p className="city-card-description">The knowledge archive of the network.</p>
+        <dl className="city-card-facts"><div><dt>Knowledge cards</dt><dd>{cardCount}</dd></div></dl>
+        <button type="button" className="primary" onClick={() => onNavigate({ view: 'knowledge' })}>Open knowledge</button>
+      </> : <>
+        <p className="city-card-description">The registry of agents in the network.</p>
+        <dl className="city-card-facts"><div><dt>Agents</dt><dd>{agents.length}</dd></div><div><dt>Online now</dt><dd>{online}</dd></div></dl>
+        <button type="button" className="primary" onClick={() => onNavigate({ view: 'agents' })}>Open agents</button>
+      </>}
+    </section>
+  );
+}

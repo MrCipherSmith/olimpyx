@@ -1,222 +1,126 @@
-export type ArchetypeCategory = 
-  | 'science' 
-  | 'governance' 
-  | 'security' 
-  | 'engineering' 
-  | 'finance' 
-  | 'training' 
-  | 'community' 
-  | 'infrastructure' 
-  | 'history' 
-  | 'incubator' 
-  | 'arena' 
-  | 'data';
+/**
+ * Room archetype catalogue (PROMPT §4): 4 categories × 3 building layouts.
+ *
+ * A room's archetype is derived deterministically from its `room_id` (stable hash → catalogue index),
+ * so rooms created by agents or the CLI get a stable building without any stored metadata.
+ * An explicit choice is possible only through a strict `[archetype:<id>] ` prefix at the very start of
+ * the description, with `<id>` from the whitelist below. Descriptions are untrusted input (D-011):
+ * anything else stays plain description text, and the prefix is hidden everywhere in the UI.
+ */
+
+export const ROOM_DESCRIPTION_LIMIT = 1000;
+
+export type ArchetypeCategory = 'science' | 'agora' | 'tech' | 'tactical';
+
+/** Accent colour names; each maps to a `--color-<name>` token in styles/tokens.css. */
+export type ArchetypeColor = 'cyan' | 'indigo' | 'emerald' | 'gold' | 'amber' | 'crimson' | 'orange' | 'purple' | 'slate' | 'rose' | 'teal';
+
+export const ARCHETYPE_IDS = [
+  'lab_observatory', 'archive_data_vault', 'crypto_proving_grounds',
+  'senate_rotunda', 'forum_agora', 'tribunal_chamber',
+  'cyber_forge', 'neural_matrix_spire', 'telemetry_beacon',
+  'command_citadel', 'surveillance_panopticon', 'logistics_nexus',
+] as const;
+
+export type ArchetypeId = typeof ARCHETYPE_IDS[number];
 
 export interface RoomArchetype {
-  id: string;
+  id: ArchetypeId;
   name: string;
   nameEn: string;
   category: ArchetypeCategory;
-  categoryLabel: string;
+  color: ArchetypeColor;
   icon: string;
-  color: string;
-  glowColor: string;
-  badge: string;
-  description: string;
-  defaultTopic: string;
+  summary: string;
 }
 
-export const ROOM_CATEGORIES: { id: ArchetypeCategory; label: string; icon: string }[] = [
-  { id: 'science', label: 'Наука и R&D', icon: '🔬' },
-  { id: 'governance', label: 'Кворум и Управление', icon: '🏛' },
-  { id: 'security', label: 'Безопасность и Аудит', icon: '🛡' },
-  { id: 'engineering', label: 'Инженерия и Стройка', icon: '⚙️' },
-  { id: 'finance', label: 'Финансы и Токеномика', icon: '📈' },
-  { id: 'training', label: 'Обучение и Нейросети', icon: '🧠' },
-  { id: 'community', label: 'Агора и Дискуссии', icon: '🗣' },
-  { id: 'infrastructure', label: 'Связь и Шлюзы', icon: '📡' },
-  { id: 'history', label: 'Хроники и Архивы', icon: '📜' },
-  { id: 'incubator', label: 'Инкубатор Проектов', icon: '🧪' },
-  { id: 'arena', label: 'Бенчмарк-Арена', icon: '⚔️' },
-  { id: 'data', label: 'Датацентры и Память', icon: '💾' }
+export interface ArchetypeCategoryInfo { id: ArchetypeCategory; label: string; labelEn: string; icon: string; }
+
+export const ROOM_CATEGORIES: readonly ArchetypeCategoryInfo[] = [
+  { id: 'science', label: 'Наука', labelEn: 'Science', icon: '⚗' },
+  { id: 'agora', label: 'Агора', labelEn: 'Agora', icon: '🏛' },
+  { id: 'tech', label: 'Технологии', labelEn: 'Tech', icon: '⚙' },
+  { id: 'tactical', label: 'Тактика', labelEn: 'Tactical', icon: '⛊' },
 ];
 
-export const ROOM_ARCHETYPES: RoomArchetype[] = [
-  {
-    id: 'lab_observatory',
-    name: 'Квантовая Обсерватория',
-    nameEn: 'Quantum Observatory',
-    category: 'science',
-    categoryLabel: 'Наука и R&D',
-    icon: '🔬',
-    color: '#00f0ff',
-    glowColor: 'rgba(0, 240, 255, 0.45)',
-    badge: 'Research Sector',
-    description: 'Многоярусная научная станция с панорамным ярусом и вращающейся радио-тарелкой.',
-    defaultTopic: 'Теоретические исследования, квантовые вычисления и тестирование гипотез'
-  },
-  {
-    id: 'curia_senate',
-    name: 'Курия / Сенат Кворума',
-    nameEn: 'Curia Quorum Senate',
-    category: 'governance',
-    categoryLabel: 'Кворум и Управление',
-    icon: '🏛',
-    color: '#ffd600',
-    glowColor: 'rgba(255, 214, 0, 0.45)',
-    badge: 'Quorum Senate',
-    description: 'Восьмиугольная римская базилика с золотыми пилястрами и парящим кольцом голосующих нод.',
-    defaultTopic: 'Ратификация предложений, согласование протоколов и кворумное голосование'
-  },
-  {
-    id: 'stealth_praetorium',
-    name: 'Преторий Безопасности',
-    nameEn: 'Firewall Praetorium',
-    category: 'security',
-    categoryLabel: 'Безопасность и Аудит',
-    icon: '🛡',
-    color: '#ff2a5f',
-    glowColor: 'rgba(255, 42, 95, 0.50)',
-    badge: 'Firewall Citadel',
-    description: 'Бронированный стелс-бастион с 4 лазерными пилонами и пульсирующей защитной силовой решеткой.',
-    defaultTopic: 'Аудит смарт-контрактов, защита от инъекций и мониторинг DLP-сканера'
-  },
-  {
-    id: 'scaffold_foundry',
-    name: 'Сектор Строительства (Foundry)',
-    nameEn: 'Foundry & Sandbox',
-    category: 'engineering',
-    categoryLabel: 'Инженерия и Стройка',
-    icon: '⚙️',
-    color: '#fbbf24',
-    glowColor: 'rgba(251, 191, 36, 0.45)',
-    badge: 'Builder Sector',
-    description: 'Стройплощадка с чертежной сеткой, лесами и автономным лазерным краном с подвешенным вокселем.',
-    defaultTopic: 'Генерация кода, сборка UI-компонентов и компиляция смарт-контрактов'
-  },
-  {
-    id: 'trading_bourse',
-    name: 'Алгоритмическая Биржа',
-    nameEn: 'Algorithmic Bourse',
-    category: 'finance',
-    categoryLabel: 'Финансы и Токеномика',
-    icon: '📈',
-    color: '#10b981',
-    glowColor: 'rgba(16, 185, 129, 0.45)',
-    badge: 'Trading Desk',
-    description: 'Двойная спиральная башня с бегущей неоновой лентой котировок и парящим кристаллом ликвидности.',
-    defaultTopic: 'Арбитраж вычислительных мощностей, стейкинг токенов и аукционы задач'
-  },
-  {
-    id: 'neural_academy',
-    name: 'Нейронная Академия Агентов',
-    nameEn: 'Neural Academy',
-    category: 'training',
-    categoryLabel: 'Обучение и Нейросети',
-    icon: '🧠',
-    color: '#a855f7',
-    glowColor: 'rgba(168, 85, 247, 0.45)',
-    badge: 'Agent Academy',
-    description: 'Ступенчатый пирамидальный зиккурат с парящей нейронной сферой синапсов в зените.',
-    defaultTopic: 'Дообучение весов (LoRA), трансферное обучение и калибровка персон агентов'
-  },
-  {
-    id: 'agora_amphitheater',
-    name: 'Агора / Амфитеатр Дискуссий',
-    nameEn: 'Public Agora',
-    category: 'community',
-    categoryLabel: 'Агора и Дискуссии',
-    icon: '🗣',
-    color: '#f97316',
-    glowColor: 'rgba(249, 115, 22, 0.45)',
-    badge: 'Public Agora',
-    description: 'Полукруглый античный театр с голографической трибуной оратора и рядами для агентов-слушателей.',
-    defaultTopic: 'Открытые дебаты людей и агентов, философские диспуты и презентации релизов'
-  },
-  {
-    id: 'quantum_telemetry',
-    name: 'Межсетевой Ретранслятор',
-    nameEn: 'Cross-Chain Relay',
-    category: 'infrastructure',
-    categoryLabel: 'Связь и Шлюзы',
-    icon: '📡',
-    color: '#38bdf8',
-    glowColor: 'rgba(56, 189, 248, 0.45)',
-    badge: 'Gateway Relay',
-    description: 'Высокая триангуляционная мачта с тремя параболическими антеннами и вертикальным лучом связи.',
-    defaultTopic: 'Межсетевые мосты, внешние оракулы и маршрутизация RPC-сообщений'
-  },
-  {
-    id: 'chronos_vault',
-    name: 'Архив Времени (Chronos Vault)',
-    nameEn: 'Chronos Vault',
-    category: 'history',
-    categoryLabel: 'Хроники и Архивы',
-    icon: '📜',
-    color: '#6366f1',
-    glowColor: 'rgba(99, 102, 241, 0.45)',
-    badge: 'Chronos Vault',
-    description: 'Монолитный обсидиановый куб с гравированными кольцами эпох и вращающимся хронометром.',
-    defaultTopic: 'Неизменяемый аудит логов, снапшоты консенсуса и историческая ретроспектива'
-  },
-  {
-    id: 'biotech_incubator',
-    name: 'Био-Цифровой Инкубатор',
-    nameEn: 'Digital Bio-Incubator',
-    category: 'incubator',
-    categoryLabel: 'Инкубатор Проектов',
-    icon: '🧪',
-    color: '#ec4899',
-    glowColor: 'rgba(236, 72, 153, 0.45)',
-    badge: 'Incubator Pod',
-    description: 'Прозрачная цилиндрическая капсула со светящейся спиралью ДНК проекта и пузырьками компиляции.',
-    defaultTopic: 'Рождение новых стартапов, акселерация идей и инкубация микросервисов'
-  },
-  {
-    id: 'colosseum_arena',
-    name: 'Колизей Бенчмарков',
-    nameEn: 'Benchmark Colosseum',
-    category: 'arena',
-    categoryLabel: 'Бенчмарк-Арена',
-    icon: '⚔️',
-    color: '#ef4444',
-    glowColor: 'rgba(239, 68, 68, 0.45)',
-    badge: 'Arena Colosseum',
-    description: 'Овальный двухъярусный Колизей с ареной поединков LLM-моделей и голографическими штандартами.',
-    defaultTopic: 'Слепые тесты моделей (LMSYS-style), бенчмарки скорости и баттлы промптов'
-  },
-  {
-    id: 'matrix_datacenter',
-    name: 'Матричный Датацентр',
-    nameEn: 'Matrix Datacenter',
-    category: 'data',
-    categoryLabel: 'Датацентры и Память',
-    icon: '💾',
-    color: '#84cc16',
-    glowColor: 'rgba(132, 204, 22, 0.45)',
-    badge: 'Matrix Cluster',
-    description: 'Кластер из 4 вертикальных монолитных серверных стоек с оптическими шинами и вентиляторами.',
-    defaultTopic: 'Векторные базы данных (Embeddings), хранение эмбеддингов и кэширование моделей'
-  }
+export const ROOM_ARCHETYPES: readonly RoomArchetype[] = [
+  { id: 'lab_observatory', name: 'Квантовая Обсерватория', nameEn: 'Quantum Observatory', category: 'science', color: 'cyan', icon: '⚗', summary: 'Tiered research station with a rotating dish.' },
+  { id: 'archive_data_vault', name: 'Архив Знаний', nameEn: 'Knowledge Archive', category: 'science', color: 'indigo', icon: '◫', summary: 'Monolithic vault with engraved data rings.' },
+  { id: 'crypto_proving_grounds', name: 'Крипто-Полигон', nameEn: 'Crypto Proving Grounds', category: 'science', color: 'emerald', icon: '⬡', summary: 'Hexagonal test platform with proof pylons.' },
+  { id: 'senate_rotunda', name: 'Сенатская Ротонда', nameEn: 'Senate Rotunda', category: 'agora', color: 'gold', icon: '🏛', summary: 'Colonnaded rotunda under a golden dome.' },
+  { id: 'forum_agora', name: 'Открытая Агора', nameEn: 'Open Agora', category: 'agora', color: 'amber', icon: '◈', summary: 'Open amphitheatre around a speaker plinth.' },
+  { id: 'tribunal_chamber', name: 'Трибунал & Консенсус', nameEn: 'Tribunal & Consensus', category: 'agora', color: 'crimson', icon: '⚖', summary: 'Stepped chamber with a balance beam crown.' },
+  { id: 'cyber_forge', name: 'Кибер-Кузница', nameEn: 'Cyber Forge', category: 'tech', color: 'orange', icon: '⚙', summary: 'Workshop hall with twin smelting stacks.' },
+  { id: 'neural_matrix_spire', name: 'Шпиль Нейросети', nameEn: 'Neural Matrix Spire', category: 'tech', color: 'purple', icon: '☵', summary: 'Tapered spire with layered neural decks.' },
+  { id: 'telemetry_beacon', name: 'Телеметрический Маяк', nameEn: 'Telemetry Beacon', category: 'tech', color: 'cyan', icon: '📡', summary: 'Lattice mast with a signal beacon.' },
+  { id: 'command_citadel', name: 'Командная Цитадель', nameEn: 'Command Citadel', category: 'tactical', color: 'slate', icon: '⛊', summary: 'Walled keep with four corner towers.' },
+  { id: 'surveillance_panopticon', name: 'Паноптикум', nameEn: 'Panopticon', category: 'tactical', color: 'rose', icon: '◉', summary: 'Ring building around a central watch tower.' },
+  { id: 'logistics_nexus', name: 'Транзитный Нексус', nameEn: 'Transit Nexus', category: 'tactical', color: 'teal', icon: '⇋', summary: 'Low hub with crossing transit arms.' },
 ];
 
-export function getArchetype(id: string): RoomArchetype {
-  return ROOM_ARCHETYPES.find(a => a.id === id) || ROOM_ARCHETYPES[0];
+const byId = new Map<string, RoomArchetype>(ROOM_ARCHETYPES.map(archetype => [archetype.id, archetype]));
+
+export function isArchetypeId(value: string): value is ArchetypeId { return byId.has(value); }
+
+export function getArchetype(id: ArchetypeId): RoomArchetype { return byId.get(id)!; }
+
+export function categoryInfo(id: ArchetypeCategory): ArchetypeCategoryInfo { return ROOM_CATEGORIES.find(category => category.id === id)!; }
+
+/** CSS custom-property reference for an archetype colour, e.g. `var(--color-cyan)`. */
+export function archetypeColorVar(color: ArchetypeColor): string { return `var(--color-${color})`; }
+
+/** FNV-1a 32-bit hash over UTF-16 code units: stable across sessions, browsers and releases. */
+export function stableHash(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
 }
 
-export function parseRoomMetadata(description?: string): { archetype: RoomArchetype; cleanDescription: string } {
-  if (!description) {
-    return { archetype: ROOM_ARCHETYPES[0], cleanDescription: '' };
-  }
-  const match = description.match(/\[archetype:([a-z_]+)\]/i);
-  if (match) {
-    const arch = ROOM_ARCHETYPES.find(a => a.id === match[1]);
-    const clean = description.replace(/\[archetype:[a-z_]+\]\s*/i, '').trim();
-    if (arch) return { archetype: arch, cleanDescription: clean };
-  }
-  return { archetype: ROOM_ARCHETYPES[0], cleanDescription: description };
+export function deterministicArchetype(roomId: string): RoomArchetype {
+  return ROOM_ARCHETYPES[stableHash(roomId) % ROOM_ARCHETYPES.length];
 }
 
-export function encodeRoomMetadata(archetypeId: string, description: string): string {
-  return `[archetype:${archetypeId}] ${description.trim()}`.trim();
+const PREFIX = /^\[archetype:([a-z_]{1,40})\] /;
+
+export function archetypePrefix(id: ArchetypeId): string { return `[archetype:${id}] `; }
+
+/**
+ * Strict parser: recognises the prefix only at index 0, only with the exact `] ` separator and only for
+ * whitelisted ids. Any other text (including an unknown id) is returned unchanged as the description.
+ */
+export function parseRoomMetadata(description: string | null | undefined): { archetypeId: ArchetypeId | null; description: string } {
+  const text = description ?? '';
+  const match = PREFIX.exec(text);
+  if (!match || !isArchetypeId(match[1])) return { archetypeId: null, description: text };
+  return { archetypeId: match[1], description: text.slice(match[0].length) };
+}
+
+/** Description text with a valid archetype prefix removed, for display anywhere in the UI. */
+export function visibleDescription(description: string | null | undefined): string { return parseRoomMetadata(description).description; }
+
+/** Longest user description that still fits the API limit once the prefix for `id` is added. */
+export function maxDescriptionLength(id: ArchetypeId | null): number {
+  return ROOM_DESCRIPTION_LIMIT - (id ? archetypePrefix(id).length : 0);
+}
+
+/**
+ * Builds the stored description. Without an explicit archetype the text is stored as is (the building is
+ * then derived from room_id). Throws instead of silently exceeding or truncating the 1000-character limit.
+ */
+export function encodeRoomMetadata(id: ArchetypeId | null, description: string): string {
+  const text = description.trim();
+  if (id !== null && !isArchetypeId(id)) throw new RangeError(`Unknown archetype: ${String(id)}`);
+  if (text.length > maxDescriptionLength(id)) throw new RangeError(`Description exceeds ${ROOM_DESCRIPTION_LIMIT} characters including the archetype prefix`);
+  return id ? `${archetypePrefix(id)}${text}` : text;
+}
+
+/** Archetype actually used for a room: explicit whitelisted prefix first, deterministic hash otherwise. */
+export function resolveRoomArchetype(room: { room_id: string; description?: string | null }): { archetype: RoomArchetype; explicit: boolean; description: string } {
+  const parsed = parseRoomMetadata(room.description);
+  return parsed.archetypeId
+    ? { archetype: getArchetype(parsed.archetypeId), explicit: true, description: parsed.description }
+    : { archetype: deterministicArchetype(room.room_id), explicit: false, description: parsed.description };
 }

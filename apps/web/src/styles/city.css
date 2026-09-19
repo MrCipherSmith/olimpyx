@@ -1,0 +1,435 @@
+/* =========================================================================
+   CITY MAP (PROMPT §3) and the create-room archetype picker additions.
+   Colours come from tokens.css; per-building accents arrive as --accent.
+   ========================================================================= */
+
+.city-view {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+}
+
+.city-toolbar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+
+.city-filters {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.city-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-pill);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) ease, color var(--motion-fast) ease, background var(--motion-fast) ease;
+}
+
+.city-chip:hover {
+  border-color: var(--color-cyan);
+  color: var(--text-primary);
+}
+
+.city-chip.active {
+  border-color: var(--color-cyan);
+  background: var(--tint-cyan-strong);
+  color: var(--color-cyan);
+  box-shadow: var(--glow-cyan-sm);
+}
+
+.city-chip-count {
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--tint-cyan);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.city-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.city-presence strong {
+  color: var(--color-emerald);
+}
+
+.city-presence-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-subtle);
+}
+
+.city-presence-dot.online {
+  background: var(--color-emerald);
+  box-shadow: 0 0 8px var(--color-emerald);
+}
+
+.city-body {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 270px;
+  gap: var(--space-3);
+}
+
+.city-stage {
+  position: relative;
+  min-width: 0;
+  height: clamp(360px, calc(100dvh - 250px), 780px);
+  overflow: hidden;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  background: var(--bg-base);
+  box-shadow: var(--shadow-panel);
+}
+
+.city-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.city-camera {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, 30px);
+  grid-auto-rows: 30px;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  backdrop-filter: var(--glass-blur);
+}
+
+.city-camera button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--color-cyan);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.city-camera .city-pan-up { grid-column: 2; grid-row: 2; font-size: 10px; }
+.city-camera .city-pan-left { grid-column: 1; grid-row: 3; font-size: 10px; }
+.city-camera .city-pan-right { grid-column: 3; grid-row: 3; font-size: 10px; }
+.city-camera .city-pan-down { grid-column: 2; grid-row: 4; font-size: 10px; }
+
+.city-camera button:hover {
+  border-color: var(--color-cyan);
+  color: var(--text-primary);
+}
+
+.city-card {
+  --accent: var(--color-cyan);
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: grid;
+  width: min(360px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  gap: 10px;
+  padding: 14px 16px;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel-solid);
+  box-shadow: var(--shadow-panel), 0 0 20px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+@supports (backdrop-filter: blur(1px)) {
+  .city-card {
+    background: var(--bg-panel);
+    backdrop-filter: var(--glass-blur);
+  }
+}
+
+.city-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.city-card-head > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.city-card-head .eyebrow {
+  margin-bottom: 2px;
+}
+
+.city-card-head h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.city-card-icon {
+  color: var(--accent);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.city-card-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+}
+
+.city-card-facts dt {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.city-card-facts dd {
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.city-card-description {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.city-card .primary {
+  justify-self: start;
+}
+
+.city-directory {
+  min-width: 0;
+  height: clamp(360px, calc(100dvh - 250px), 780px);
+  padding: 12px;
+  overflow-y: auto;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  background: var(--bg-panel);
+}
+
+.city-directory h3 {
+  margin: 2px 4px 10px;
+}
+
+.city-directory ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.city-building {
+  --accent: var(--color-cyan);
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) ease, background var(--motion-fast) ease;
+}
+
+.city-building:hover, .city-building.selected {
+  border-color: var(--accent);
+  background: var(--bg-card-hover);
+}
+
+.city-building.selected {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.city-building-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.city-building-text {
+  display: grid;
+  min-width: 0;
+}
+
+.city-building-text strong, .city-building-text small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.city-building-text strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.city-building-text small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.city-directory-empty {
+  margin: 12px 4px 0;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .city-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .city-directory {
+    height: auto;
+    max-height: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .city-stage {
+    height: clamp(320px, 62dvh, 520px);
+  }
+
+  .city-card {
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    width: auto;
+    padding: 12px;
+  }
+
+  .city-camera {
+    top: 8px;
+    right: 8px;
+  }
+}
+
+/* --- Create-room archetype picker (fieldset, automatic option, canvas preview) --- */
+
+fieldset.archetype-picker {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+
+.archetype-picker > legend {
+  display: block;
+  margin-bottom: 8px;
+  padding: 0;
+}
+
+.archetype-auto {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.archetype-auto.selected {
+  border-style: solid;
+  border-color: var(--color-cyan);
+  background: var(--tint-cyan);
+  color: var(--color-cyan);
+}
+
+.archetype-card span[lang] {
+  color: var(--text-muted);
+}
+
+.archetype-preview-canvas {
+  width: 120px;
+  height: 112px;
+  flex: none;
+}
+
+.archetype-preview-auto {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  flex: none;
+  place-items: center;
+  color: var(--accent);
+}
+
+@media (max-width: 420px) {
+  .archetype-preview-canvas {
+    width: 90px;
+    height: 84px;
+  }
+}
+
+.city-card:focus {
+  outline: none;
+}
+
+.city-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
