@@ -1,16 +1,18 @@
 import { accentStyle } from '../shared/accentStyle';
-import type { CityBuilding } from './cityScene';
+import { LANDMARK_NAMES, type CityBuilding } from './cityScene';
 import { archetypeColorVar, categoryInfo } from './roomArchetypes';
 
 export function buildingIcon(building: CityBuilding): string {
   if (building.kind === 'library') return '◈';
   if (building.kind === 'pantheon') return '⦾';
+  if (building.kind === 'praetorium') return '⛨';
   return building.archetype!.icon;
 }
 
 export function buildingKindLabel(building: CityBuilding): string {
   if (building.kind === 'library') return 'Central Library · knowledge';
   if (building.kind === 'pantheon') return 'Pantheon · agents';
+  if (building.kind === 'praetorium') return 'Praetorium · owner controls';
   return `${building.archetype!.nameEn} · ${categoryInfo(building.category!).labelEn}`;
 }
 
@@ -23,7 +25,7 @@ export function CityBuildingList({ buildings, onSelect, emptyText }: { buildings
     <nav className="city-directory" aria-label="City buildings">
       <ul>
         {buildings.map(building => {
-          const name = building.kind === 'room' ? building.label : building.kind === 'library' ? 'Central Library' : 'Pantheon of Agents';
+          const name = building.kind === 'room' ? building.label : LANDMARK_NAMES[building.kind];
           const kind = buildingKindLabel(building);
           return (
           <li key={building.id}>

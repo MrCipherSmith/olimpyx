@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildingOnScreen, createRenderCache, renderCity, staticLayerStale, truncateLabel, type StaticLayerKey } from './cityRenderer';
-import { buildCityScene } from './cityScene';
+import { buildingOnScreen, cardSubline, createRenderCache, labelAt, layoutLabels, renderCity, staticLayerStale, truncateLabel, type LabelLayoutInput, type PlacedLabel, type Rect, type StaticLayerKey } from './cityRenderer';
+import { buildCityScene, type CityBuilding } from './cityScene';
+import { worldToScreen } from './isometricMath';
 import { painterSort } from './isometricMath';
 import type { CityPalette } from './cityTokens';
 import { shouldSkipFrame, DECORATIVE_FRAME_MS } from './cityLoop';
@@ -174,5 +175,158 @@ describe('decorative frame cap', () => {
     expect(shouldSkipFrame({ ...base, dirty: true })).toBe(false);
     expect(shouldSkipFrame({ ...base, animating: true })).toBe(false);
     expect(shouldSkipFrame({ ...base, dragging: true })).toBe(false);
+  });
+});
+
+/** Canvas stand-in that records calls and the arguments of fillText; offscreen canvases get their own recorder. */
+function recordingCtx(calls: Record<string, number>, texts: string[] = [], assigned = new Set<string>()) {
+  const gradient = { addColorStop: vi.fn() };
+  return new Proxy({
+    measureText: (text: string) => { calls.measureText = (calls.measureText ?? 0) + 1; return { width: Array.from(text).length * 7 }; },
+    fillText: (text: string) => { texts.push(text); },
+    createRadialGradient: () => gradient, createLinearGradient: () => gradient,
+  } as Record<string, unknown>, {
+    get: (target, prop: string) => (prop in target ? target[prop] : () => { calls[prop] = (calls[prop] ?? 0) + 1; }),
+    set: (target, prop: string, value) => { assigned.add(prop); target[prop] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+}
+
+const measure = (building: CityBuilding, card: boolean) => Array.from(building.label).length * 7 + (card ? 22 : 14);
+const intersects = (a: Rect, b: Rect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+describe('label placement', () => {
+  const view = { width: 1000, height: 700 };
+  const camera = { focalX: 0, focalY: -20, zoom: 0.8 };
+  const scene = buildCityScene([{ room_id: 'rom_a', title: 'Alpha room' }]);
+  const base: LabelLayoutInput = { scene, camera, view, hoveredId: null, selectedId: null, filter: 'all' };
+  const layout = (extra: Partial<LabelLayoutInput> = {}) => {
+    const out: PlacedLabel[] = [];
+    const count = layoutLabels({ ...base, ...extra }, measure, out);
+    return out.slice(0, count);
+  };
+  const byId = (labels: PlacedLabel[], id: string) => labels.find(label => label.building.id === id)!;
+
+  it('centres an unobstructed label on its anchor above the roof', () => {
+    const library = byId(layout(), 'library');
+    const anchor = worldToScreen(library.building.x, library.building.y, library.building.height + 26, camera, view);
+    expect(library.visible).toBe(true);
+    expect((library.left + library.right) / 2).toBeCloseTo(anchor.x, 6);
+    expect((library.top + library.bottom) / 2).toBeCloseTo(anchor.y, 6);
+  });
+
+  it('nudges a label off a HUD occluder and never draws it underneath', () => {
+    const free = byId(layout(), 'library');
+    const occluder: Rect = { left: free.left - 10, top: free.top - 4, right: free.right + 10, bottom: free.bottom + 4 };
+    const moved = byId(layout({ occluders: [occluder] }), 'library');
+    expect(moved.visible).toBe(true);
+    expect(intersects(moved, occluder)).toBe(false);
+    expect(moved.bottom).toBeLessThanOrEqual(occluder.top); // moved up first
+  });
+
+  it('escapes sideways from a tall occluder and hides the label when nothing fits', () => {
+    const free = byId(layout(), 'library');
+    const column: Rect = { left: free.left - 20, top: -2000, right: free.left + 30, bottom: 2000 };
+    const sideways = byId(layout({ occluders: [column] }), 'library');
+    expect(sideways.visible).toBe(true);
+    expect(intersects(sideways, column)).toBe(false);
+    expect(sideways.top).toBeCloseTo(free.top, 6);
+    const everything: Rect = { left: -5000, top: -5000, right: 5000, bottom: 5000 };
+    expect(layout({ occluders: [everything] }).every(label => !label.visible)).toBe(true);
+  });
+
+  it('never lets two labels overlap: the lower-priority one is nudged or hidden', () => {
+    // Zoomed far out, every label converges on the centre of the screen.
+    const labels = layout({ camera: { focalX: 0, focalY: 0, zoom: MIN_TEST_ZOOM } });
+    const visible = labels.filter(label => label.visible);
+    for (let a = 0; a < visible.length; a++) for (let b = a + 1; b < visible.length; b++) expect(intersects(visible[a], visible[b])).toBe(false);
+    expect(byId(labels, 'library').visible).toBe(true);
+    expect(byId(labels, 'pantheon').visible).toBe(true);
+  });
+
+  it('places the hover card first, as a taller card, and keeps room labels hidden when zoomed out unless active', () => {
+    const far = { focalX: 0, focalY: -20, zoom: 0.2 };
+    expect(layout({ camera: far }).some(label => label.building.id === 'room:rom_a')).toBe(false);
+    const hovered = layout({ camera: far, hoveredId: 'room:rom_a' });
+    expect(hovered[0].building.id).toBe('room:rom_a');
+    expect(hovered[0].card).toBe(true);
+    expect(hovered[0].bottom - hovered[0].top).toBe(36);
+    // Selection alone also gets the card when nothing is hovered; hover wins otherwise.
+    expect(layout({ selectedId: 'library' })[0]).toMatchObject({ card: true, active: true });
+    expect(layout({ selectedId: 'library', hoveredId: 'pantheon' })[0].building.id).toBe('pantheon');
+  });
+});
+
+const MIN_TEST_ZOOM = 0.1;
+
+describe('hover card', () => {
+  const [room] = buildCityScene([
+    { room_id: 'rom_a', title: 'A', description: '[archetype:senate_rotunda] x', message_count: 42 },
+  ]).roomBuildings;
+
+  it('uses only real data in the subline: archetype plus message_count when present', () => {
+    expect(cardSubline(room)).toBe('Senate Rotunda · 42 messages');
+    expect(cardSubline({ ...room, room: { ...room.room!, messageCount: 1 } })).toBe('Senate Rotunda · 1 message');
+    expect(cardSubline({ ...room, room: { ...room.room!, messageCount: null } })).toBe('Senate Rotunda');
+    const scene = buildCityScene([], { includePraetorium: true });
+    expect(scene.buildings.filter(building => building.kind !== 'room').map(cardSubline)).toEqual(['Knowledge', 'Agents', 'Owner controls']);
+  });
+
+  it('draws the card text with fillText only, bidi-stripped and truncated, and measures it once', () => {
+    const title = `\u202Eevil\u2066 ${'long '.repeat(20)}`;
+    const scene = buildCityScene([{ room_id: 'rom_x', title, message_count: 7 }]);
+    const [building] = scene.roomBuildings;
+    const texts: string[] = [];
+    const calls: Record<string, number> = {};
+    const layerCalls: Record<string, number> = {};
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx(layerCalls) as never);
+    try {
+      const ctx = recordingCtx(calls, texts);
+      const cache = createRenderCache();
+      const iso = worldToScreen(building.x, building.y, 0, { focalX: 0, focalY: 0, zoom: 1 }, { width: 0, height: 0 });
+      const frame = { scene, camera: { focalX: iso.x, focalY: iso.y - 100, zoom: 1 }, view: { width: 900, height: 600 }, palette: { ground: '#000' } as CityPalette, time: 0, animate: false, hoveredId: building.id, selectedId: null, filter: 'all' as const, particles: 0, dpr: 1, cache };
+      renderCity(ctx, frame);
+      const cardTitle = texts.find(text => text.startsWith('evil'))!;
+      expect(cardTitle).toBeDefined();
+      expect(/[\u202A-\u202E\u2066-\u2069]/.test(texts.join(''))).toBe(false);
+      expect(Array.from(cardTitle).length).toBeLessThanOrEqual(32);
+      expect(texts).toContain(`${building.archetype!.nameEn} · 7 messages`);
+      const measured = calls.measureText;
+      renderCity(ctx, { ...frame, time: 50 });
+      expect(calls.measureText).toBe(measured); // card and tags come from the cache
+      // The label hit test sees the card where it was drawn.
+      const card = cache.placed[0];
+      expect(card.card).toBe(true);
+      expect(labelAt(cache, (card.left + card.right) / 2, (card.top + card.bottom) / 2)).toBe(building.id);
+      expect(labelAt(cache, -500, -500)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('Praetorium rendering', () => {
+  it('renders the owner city (plaza, Praetorium, details) without shadowBlur and passes occluders through', () => {
+    const assigned = new Set<string>();
+    const calls: Record<string, number> = {};
+    const layerCalls: Record<string, number> = {};
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx(layerCalls, [], assigned) as never);
+    try {
+      const texts: string[] = [];
+      const ctx = recordingCtx(calls, texts, assigned);
+      const scene = buildCityScene(Array.from({ length: 12 }, (_, index) => ({ room_id: `rom_${index}`, title: `Room ${index}` })), { includePraetorium: true });
+      const cache = createRenderCache();
+      const view = { width: 1200, height: 800 };
+      renderCity(ctx, { scene, camera: { focalX: 0, focalY: -20, zoom: 0.9 }, view, palette: { ground: '#000' } as CityPalette, time: 1234, animate: true, hoveredId: 'praetorium', selectedId: null, filter: 'all', particles: 4, dpr: 1, cache, occluders: [{ left: 0, top: 0, right: 1200, bottom: 60 }] });
+      expect(assigned.has('shadowBlur')).toBe(false);
+      expect(texts).toContain('Преторий');
+      expect(texts).toContain('Owner controls');
+      for (let index = 0; index < cache.placedCount; index++) {
+        const label = cache.placed[index];
+        if (label.visible) expect(intersects(label, { left: 0, top: 0, right: 1200, bottom: 60 })).toBe(false);
+      }
+      expect(layerCalls.clearRect).toBe(1); // plaza lives in the cached ground layer
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

@@ -16,12 +16,16 @@ export function CityFilters({ filter, counts, onChange }: { filter: CityFilter; 
   );
 }
 
-/** Bottom-left legend of the key Forum buildings; each entry opens that building's screen. */
-export function CityLegend({ onOpen }: { onOpen: (buildingId: string) => void }) {
+/**
+ * Bottom-left legend of the key Forum buildings; each entry opens that building's screen. The Praetorium
+ * entry appears only when the scene has one (signed-in owner), never for a guest.
+ */
+export function CityLegend({ onOpen, praetorium = false }: { onOpen: (buildingId: string) => void; praetorium?: boolean }) {
   return (
     <div className="hud hud-legend" role="group" aria-label="Key buildings">
       <button type="button" className="hud-legend-item legend-library" onClick={() => onOpen('library')}><span aria-hidden="true">◈</span>Library</button>
       <button type="button" className="hud-legend-item legend-pantheon" onClick={() => onOpen('pantheon')}><span aria-hidden="true">⦾</span>Pantheon</button>
+      {praetorium && <button type="button" className="hud-legend-item legend-praetorium" onClick={() => onOpen('praetorium')}><span aria-hidden="true">⛨</span>Praetorium</button>}
     </div>
   );
 }

@@ -33,6 +33,8 @@ export interface RenderFrame {
    * blitting the static layer would cost more than drawing the ground directly. The cache stays untouched
    * (not even invalidated) and is picked back up on the next idle/decorative frame. */
   cameraMoving?: boolean;
+  /** Screen rects (CSS px, canvas coordinates) of HUD panels over the canvas; labels are moved off them. */
+  occluders?: readonly Rect[];
 }
 
 type Ctx = CanvasRenderingContext2D;
@@ -74,10 +76,15 @@ export interface CityRenderCache {
   layer: { canvas: HTMLCanvasElement; ctx: Ctx; key: StaticLayerKey } | null | undefined;
   /** Truncated text and measured width per `${fontSize}|${building id}`. */
   labels: Map<string, LabelEntry>;
+  /** Measured hover cards per building id (re-measured when the label or the subline changes). */
+  cards: Map<string, CardEntry>;
+  /** Label boxes of the last frame (a pool reused every frame); read by labelAt() for label clicks. */
+  placed: PlacedLabel[];
+  placedCount: number;
 }
 
 export function createRenderCache(): CityRenderCache {
-  return { layer: undefined, labels: new Map() };
+  return { layer: undefined, labels: new Map(), cards: new Map(), placed: [], placedCount: 0 };
 }
 
 /** The ground + roads layer is rebuilt only when the camera, scene, palette, viewport or DPR changed. */
@@ -149,6 +156,7 @@ const ISO_HALFWIDTH_FACTOR = Math.SQRT2 * COS30;
 function buildingExtent(building: CityBuilding): { reach: number; top: number } {
   if (building.kind === 'library') return LIBRARY_EXTENT;
   if (building.kind === 'pantheon') return PANTHEON_EXTENT;
+  if (building.kind === 'praetorium') return PRAETORIUM_EXTENT;
   // The active/hovered-building halo (drawBuilding, below) is a screen-space circle of radius up to
   // max(size*1.6, height*0.8)*zoom — at zoom above ~1.1 that reaches further sideways than the plain
   // footprint reach (70) scaled by the isometric width factor, so a tall room near the viewport edge
@@ -161,12 +169,18 @@ function buildingExtent(building: CityBuilding): { reach: number; top: number } 
 }
 const LIBRARY_EXTENT = { reach: 90, top: 200 };
 const PANTHEON_EXTENT = { reach: 70, top: 380 }; // includes the light beam above the oculus
+const PRAETORIUM_EXTENT = { reach: 70, top: 150 }; // includes the standard and its glow
 const ROOM_EXTENT = { reach: 70, top: 0 };
+
+/** Conservative screen box of everything a building may paint (silhouette, halo, beam), written into `out`. */
+export function buildingScreenBox(building: CityBuilding, camera: Camera, view: Viewport, out: ScreenBox = { left: 0, top: 0, right: 0, bottom: 0 }): ScreenBox {
+  const { reach, top } = buildingExtent(building);
+  return footprintScreenBox(building.x, building.y, reach, top, camera, view, out);
+}
 
 /** Whether any pixel of the building can land inside the viewport (plus CULL_MARGIN). */
 export function buildingOnScreen(building: CityBuilding, camera: Camera, view: Viewport): boolean {
-  const { reach, top } = buildingExtent(building);
-  return boxInViewport(footprintScreenBox(building.x, building.y, reach, top, camera, view, BOX), view, CULL_MARGIN);
+  return boxInViewport(buildingScreenBox(building, camera, view, BOX), view, CULL_MARGIN);
 }
 
 /* ------------------------------------------------------------------ ground */
@@ -238,8 +252,10 @@ function drawRoads(painter: Painter) {
   const to = point();
 
   // Radial avenues: four cardinal ones to the city edge plus one per room building (precomputed in the scene).
+  // Avenues start under the square plaza (drawn afterwards) so none leaves a gap at its edge.
+  const avenueStart = scene.plazaHalf > 0 ? scene.plazaHalf * 0.9 : scene.forumRadius;
   for (const avenue of scene.avenues) {
-    at(avenue.cos * scene.forumRadius, avenue.sin * scene.forumRadius, 0, from);
+    at(avenue.cos * avenueStart, avenue.sin * avenueStart, 0, from);
     at(avenue.cos * avenue.length, avenue.sin * avenue.length, 0, to);
     strokeLine(ctx, from, to, palette.panel, 1, Math.max(2, 16 * zoom));
     strokeLine(ctx, from, to, palette.cyan, 0.28, Math.max(0.6, 1.2 * zoom));
@@ -253,16 +269,135 @@ function drawRoads(painter: Painter) {
     ctx.setLineDash([10 * zoom, 12 * zoom]); ctx.stroke(); ctx.setLineDash([]);
   }
 
-  // Forum Centralis plaza.
-  isoEllipse(ctx, centre, scene.forumRadius, zoom);
-  ctx.globalAlpha = 0.85; ctx.fillStyle = palette.raised; ctx.fill();
-  ctx.globalAlpha = 0.55; ctx.strokeStyle = palette.gold; ctx.lineWidth = Math.max(0.8, 2 * zoom); ctx.stroke();
-  isoEllipse(ctx, centre, scene.forumRadius * 0.82, zoom);
-  ctx.globalAlpha = 0.25; ctx.setLineDash([4 * zoom, 6 * zoom]); ctx.stroke(); ctx.setLineDash([]);
-  // Via Sacra between the Library and the Pantheon.
-  strokeLine(ctx, at(0, -150, 0, from), at(0, 150, 0, to), palette.gold, 0.35, Math.max(1, 6 * zoom));
+  drawPlaza(painter);
   ctx.globalAlpha = 1;
 }
+
+/* ------------------------------------------------------------------ Forum plaza (static layer) */
+
+/** How far the platform's side faces drop below the ground plane, so buildings stand flush on its top. */
+const PLAZA_DEPTH = 10;
+const PLAZA_TILE = 40;
+const PLAZA_QUAD = pool(4);
+const PLAZA_FROM = point();
+const PLAZA_TO = point();
+const PLAZA_STYLE: Style = { color: '', fill: 0.05, stroke: 0.4 };
+
+/**
+ * Forum Centralis after the prototype's drawRomanForumPlaza: a square raised platform with a paving grid,
+ * arches on its four corners, a lit Via Sacra between the Library and the Pantheon (plus a spur to the
+ * Praetorium when the owner sees one) and the golden milestone at the centre. Part of the cached ground layer.
+ */
+function drawPlaza(painter: Painter) {
+  const { ctx, frame, at, zoom } = painter;
+  const { palette, scene } = frame;
+  const half = scene.plazaHalf;
+  const centre = at(0, 0, 0);
+  if (half <= 0) {
+    // Legacy round forum for scenes without a plaza.
+    isoEllipse(ctx, centre, scene.forumRadius, zoom);
+    ctx.globalAlpha = 0.85; ctx.fillStyle = palette.raised; ctx.fill();
+    ctx.globalAlpha = 0.55; ctx.strokeStyle = palette.gold; ctx.lineWidth = Math.max(0.8, 2 * zoom); ctx.stroke();
+    ctx.globalAlpha = 1;
+    return;
+  }
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(0.8, 1.5 * zoom);
+  PLAZA_STYLE.color = palette.cyan;
+  // Side faces facing the viewer (+x, +y), dropping below the ground plane.
+  at(half, -half, -PLAZA_DEPTH, PLAZA_QUAD[0]); at(half, half, -PLAZA_DEPTH, PLAZA_QUAD[1]); at(half, half, 0, PLAZA_QUAD[2]); at(half, -half, 0, PLAZA_QUAD[3]);
+  face(ctx, PLAZA_QUAD, 4, palette.panel, PLAZA_STYLE, 0.6);
+  at(-half, half, -PLAZA_DEPTH, PLAZA_QUAD[0]); at(half, half, -PLAZA_DEPTH, PLAZA_QUAD[1]); at(half, half, 0, PLAZA_QUAD[2]); at(-half, half, 0, PLAZA_QUAD[3]);
+  face(ctx, PLAZA_QUAD, 4, palette.panel, PLAZA_STYLE, 1);
+  // Top slab with a golden inlay rim.
+  at(-half, -half, 0, PLAZA_QUAD[0]); at(half, -half, 0, PLAZA_QUAD[1]); at(half, half, 0, PLAZA_QUAD[2]); at(-half, half, 0, PLAZA_QUAD[3]);
+  ctx.beginPath();
+  ctx.moveTo(PLAZA_QUAD[0].x, PLAZA_QUAD[0].y);
+  for (let index = 1; index < 4; index++) ctx.lineTo(PLAZA_QUAD[index].x, PLAZA_QUAD[index].y);
+  ctx.closePath();
+  ctx.globalAlpha = 0.92; ctx.fillStyle = palette.raised; ctx.fill();
+  ctx.globalAlpha = 0.65; ctx.strokeStyle = palette.gold; ctx.lineWidth = Math.max(0.8, 2 * zoom); ctx.stroke();
+  // Paving grid.
+  ctx.beginPath();
+  for (let offset = -half + PLAZA_TILE; offset < half; offset += PLAZA_TILE) {
+    at(offset, -half, 0, PLAZA_FROM); at(offset, half, 0, PLAZA_TO);
+    ctx.moveTo(PLAZA_FROM.x, PLAZA_FROM.y); ctx.lineTo(PLAZA_TO.x, PLAZA_TO.y);
+    at(-half, offset, 0, PLAZA_FROM); at(half, offset, 0, PLAZA_TO);
+    ctx.moveTo(PLAZA_FROM.x, PLAZA_FROM.y); ctx.lineTo(PLAZA_TO.x, PLAZA_TO.y);
+  }
+  ctx.globalAlpha = 0.08; ctx.strokeStyle = palette.cyan; ctx.lineWidth = 1; ctx.stroke();
+  // Inner compass circle (kept from the round forum).
+  isoEllipse(ctx, centre, half * 0.86, zoom);
+  ctx.globalAlpha = 0.25; ctx.strokeStyle = palette.gold; ctx.lineWidth = Math.max(0.6, 1.2 * zoom);
+  ctx.setLineDash([4 * zoom, 6 * zoom]); ctx.stroke(); ctx.setLineDash([]);
+  drawViaSacra(painter);
+  // Golden milestone (Milliarium Aureum) at the centre.
+  strokeLine(ctx, centre, at(0, 0, 30, PLAZA_TO), palette.gold, 0.95, Math.max(1, 4 * zoom));
+  glowDot(painter, palette.gold, PLAZA_TO, 4, 0.95);
+  // Arches on the four corners.
+  const inset = half - 14;
+  for (let index = 0; index < 4; index++) drawArch(painter, index & 1 ? inset : -inset, index & 2 ? inset : -inset);
+  ctx.globalAlpha = 1;
+}
+
+function drawArch({ ctx, frame, at, zoom }: Painter, x: number, y: number) {
+  const base = at(x, y, 0, PLAZA_FROM);
+  const spread = 11 * zoom;
+  const rise = 18 * zoom;
+  ctx.beginPath();
+  ctx.moveTo(base.x - spread, base.y); ctx.lineTo(base.x - spread, base.y - rise);
+  ctx.arc(base.x, base.y - rise, spread, Math.PI, 0);
+  ctx.lineTo(base.x + spread, base.y);
+  ctx.globalAlpha = 0.8; ctx.strokeStyle = frame.palette.cyan; ctx.lineWidth = Math.max(0.8, 2.4 * zoom); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(base.x - spread * 1.35, base.y - rise - spread); ctx.lineTo(base.x + spread * 1.35, base.y - rise - spread);
+  ctx.globalAlpha = 0.9; ctx.strokeStyle = frame.palette.gold; ctx.lineWidth = Math.max(0.8, 2 * zoom); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+const LAMP_POINT = point();
+
+/** The lit road between the Library and the Pantheon, with lamps on both sides; a spur leads to the Praetorium. */
+function drawViaSacra(painter: Painter) {
+  const { ctx, frame, at, zoom } = painter;
+  const { palette, scene } = frame;
+  let library: CityBuilding | null = null;
+  let pantheon: CityBuilding | null = null;
+  let praetorium: CityBuilding | null = null;
+  for (const building of scene.buildings) {
+    if (building.kind === 'library') library = building;
+    else if (building.kind === 'pantheon') pantheon = building;
+    else if (building.kind === 'praetorium') praetorium = building;
+  }
+  if (praetorium) {
+    at(0, 0, 0, PLAZA_FROM); at(praetorium.x, praetorium.y, 0, PLAZA_TO);
+    strokeLine(ctx, PLAZA_FROM, PLAZA_TO, palette.amber, 0.22, Math.max(1, 14 * zoom));
+    strokeLine(ctx, PLAZA_FROM, PLAZA_TO, palette.amber, 0.7, Math.max(0.6, 1.4 * zoom));
+  }
+  if (!library || !pantheon) return;
+  at(library.x, library.y, 0, PLAZA_FROM); at(pantheon.x, pantheon.y, 0, PLAZA_TO);
+  strokeLine(ctx, PLAZA_FROM, PLAZA_TO, palette.gold, 0.22, Math.max(2, 24 * zoom));
+  ctx.setLineDash([8 * zoom, 8 * zoom]);
+  strokeLine(ctx, PLAZA_FROM, PLAZA_TO, palette.gold, 0.85, Math.max(0.8, 2.4 * zoom));
+  ctx.setLineDash([]);
+  // Lamps every ~40 world units on both kerbs (perpendicular offset along the world (1, 1) diagonal).
+  const dx = pantheon.x - library.x;
+  const dy = pantheon.y - library.y;
+  const steps = Math.max(1, Math.round(Math.hypot(dx, dy) / 40));
+  const length = Math.hypot(dx, dy) || 1;
+  const kerbX = (-dy / length) * 17;
+  const kerbY = (dx / length) * 17;
+  for (let step = 1; step < steps; step++) {
+    const t = step / steps;
+    for (const side of KERB_SIDES) {
+      at(library.x + dx * t + kerbX * side, library.y + dy * t + kerbY * side, 6, LAMP_POINT);
+      // Halo scales with the zoom (unlike glowDot's fixed one) so the lamps never swell into blobs far out.
+      drawGlow(ctx, palette.gold, LAMP_POINT.x, LAMP_POINT.y, Math.max(1.5, 8 * zoom), 0.55);
+      ctx.globalAlpha = 0.9; ctx.fillStyle = palette.gold;
+      ctx.beginPath(); ctx.arc(LAMP_POINT.x, LAMP_POINT.y, Math.max(0.6, 1.8 * zoom), 0, TAU); ctx.fill();
+    }
+  }
+}
+const KERB_SIDES = [-1, 1] as const;
 
 function strokeLine(ctx: Ctx, from: Point, to: Point, color: string, alpha: number, width: number) {
   ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width;
@@ -528,39 +663,120 @@ function withFill(s: Style, fill: number): Style {
 }
 
 const SHAPE_POINT = point();
+const SHAPE_POINT_B = point();
+
+/* Detail helpers in the prototype's spirit: cheap strokes batched into a single path each. */
+
+/** Horizontal light bands across the two viewer-facing faces of a box footprint (window strips, LED rails). */
+function bands(p: Painter, color: string, x: number, y: number, hx: number, hy: number, heights: readonly number[], alpha = 0.55) {
+  const { ctx, at } = p;
+  ctx.beginPath();
+  for (const z of heights) {
+    at(x + hx, y - hy, z, MAST_FROM); at(x + hx, y + hy, z, MAST_TO);
+    ctx.moveTo(MAST_FROM.x, MAST_FROM.y); ctx.lineTo(MAST_TO.x, MAST_TO.y);
+    at(x - hx, y + hy, z, MAST_FROM);
+    ctx.lineTo(MAST_FROM.x, MAST_FROM.y);
+  }
+  ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = Math.max(0.5, 1 * p.zoom); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+/** Vertical pilasters on the front half of a cylinder or drum. */
+function pilasters(p: Painter, color: string, x: number, y: number, r: number, z0: number, z1: number, count: number) {
+  const { ctx, at } = p;
+  ctx.beginPath();
+  for (let index = 0; index < count; index++) {
+    // Spread over the front half (angles −45°…135° face the viewer).
+    const angle = -Math.PI / 4 + ((index + 0.5) * Math.PI) / count;
+    const px = x + Math.cos(angle) * r; const py = y + Math.sin(angle) * r;
+    at(px, py, z0, MAST_FROM); at(px, py, z1, MAST_TO);
+    ctx.moveTo(MAST_FROM.x, MAST_FROM.y); ctx.lineTo(MAST_TO.x, MAST_TO.y);
+  }
+  ctx.globalAlpha = 0.75; ctx.strokeStyle = color; ctx.lineWidth = Math.max(0.6, 1.8 * p.zoom); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+const APEX = point();
+
+/** Square pyramid roof: the two viewer-facing triangles. */
+function pyramid(p: Painter, style: Style, x: number, y: number, z: number, hx: number, h: number) {
+  const { at, ctx, frame } = p;
+  at(x, y, z + h, APEX);
+  at(x + hx, y - hx, z, QUAD[0]); at(x + hx, y + hx, z, QUAD[1]); QUAD[2].x = APEX.x; QUAD[2].y = APEX.y;
+  face(ctx, QUAD, 3, frame.palette.panel, style, 0.6);
+  at(x - hx, y + hx, z, QUAD[0]); at(x + hx, y + hx, z, QUAD[1]); QUAD[2].x = APEX.x; QUAD[2].y = APEX.y;
+  face(ctx, QUAD, 3, frame.palette.raised, style, 1);
+}
+
+/** Floating quorum ring with validator nodes (prototype's Consensus Chamber); nodes orbit only when animated. */
+function quorumRing(p: Painter, color: string, nodeColor: string, x: number, y: number, z: number, radius: number) {
+  const { ctx, frame, zoom } = p;
+  const centre = p.at(x, y, z, SHAPE_POINT_B);
+  const rx = radius * zoom; const ry = rx * 0.42;
+  const spin = frame.time * 0.0009;
+  ctx.globalAlpha = 0.85; ctx.strokeStyle = color; ctx.lineWidth = Math.max(0.6, 1.6 * zoom);
+  ctx.beginPath(); ctx.ellipse(centre.x, centre.y, rx, ry, 0, 0, TAU); ctx.stroke();
+  ctx.globalAlpha = 0.95; ctx.fillStyle = nodeColor;
+  ctx.beginPath();
+  const dot = Math.max(1, 2.6 * zoom);
+  for (let node = 0; node < 5; node++) {
+    const angle = spin + (node * TAU) / 5;
+    const nx = centre.x + Math.cos(angle) * rx; const ny = centre.y + Math.sin(angle) * ry;
+    ctx.moveTo(nx + dot, ny); ctx.arc(nx, ny, dot, 0, TAU);
+  }
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
 
 const SHAPES: Record<CityBuilding['shape'], ShapeDrawer> = {
   library: drawLibrary,
   pantheon: drawPantheon,
+  praetorium: drawPraetorium,
   lab_observatory(p, s, { x, y }) {
     box(p, s, x, y, 0, 36, 36, 40);
+    bands(p, s.color, x, y, 36, 36, LAB_BANDS);
     cylinder(p, s, x, y, 40, 22, 30);
+    pilasters(p, s.color, x, y, 22, 42, 68, 4);
     dome(p, s, x, y, 70, 22);
     const top = p.at(x, y, 108, SHAPE_POINT);
     const tilt = p.frame.time * 0.0006;
     p.ctx.globalAlpha = s.stroke; p.ctx.strokeStyle = s.color;
     p.ctx.beginPath(); p.ctx.ellipse(top.x, top.y, 16 * p.zoom, 6 * p.zoom, tilt, 0, TAU); p.ctx.stroke();
     mast(p, s.color, x, y, 88, 108, 1.5);
+    glowDot(p, p.frame.palette.text, top, 1.6, 0.9);
   },
   archive_data_vault(p, s, { x, y }) {
     box(p, s, x, y, 0, 40, 40, 62);
+    bands(p, s.color, x, y, 40, 40, VAULT_BANDS, 0.35);
     for (const z of VAULT_RING_Z) { isoEllipse(p.ctx, p.at(x, y, z, SHAPE_POINT), 60, p.zoom); p.ctx.globalAlpha = 0.6; p.ctx.strokeStyle = s.color; p.ctx.stroke(); }
+    glowDot(p, s.color, p.at(x, y, 62, GLOW_POINT), 3, 0.8);
     p.ctx.globalAlpha = 1;
   },
   crypto_proving_grounds(p, s, { x, y }) {
     prism(p, s, x, y, 0, 46, 14, 6, Math.PI / 6);
     for (let index = 0; index < 3; index++) box(p, s, x + PYLON_COS[index] * 30, y + PYLON_SIN[index] * 30, 14, 5, 5, 44);
+    // Proof links between the pylon tips.
+    const { ctx } = p;
+    ctx.beginPath();
+    for (let index = 0; index <= 3; index++) {
+      const tip = p.at(x + PYLON_COS[index % 3] * 30, y + PYLON_SIN[index % 3] * 30, 58, SHAPE_POINT);
+      if (index === 0) ctx.moveTo(tip.x, tip.y); else ctx.lineTo(tip.x, tip.y);
+    }
+    ctx.globalAlpha = 0.6; ctx.strokeStyle = s.color; ctx.lineWidth = Math.max(0.6, 1.2 * p.zoom); ctx.stroke(); ctx.globalAlpha = 1;
     glowDot(p, s.color, p.at(x, y, 40, GLOW_POINT), 5, 0.9);
   },
   senate_rotunda(p, s, { x, y }) {
     box(p, s, x, y, 0, 42, 42, 8);
     cylinder(p, s, x, y, 8, 34, 38);
+    pilasters(p, p.frame.palette.gold, x, y, 34, 10, 44, 6);
     dome(p, s, x, y, 46, 34);
+    glowDot(p, p.frame.palette.gold, p.at(x, y, 46 + 34 * 0.85 * 1.1, GLOW_POINT), 2.5, 0.9);
   },
   forum_agora(p, s, { x, y }) {
     cylinder(p, s, x, y, 0, 46, 8);
     cylinder(p, s, x, y, 8, 34, 8);
     cylinder(p, s, x, y, 16, 20, 6);
+    pilasters(p, s.color, x, y, 40, 8, 16, 7);
     mast(p, s.color, x, y, 22, 46, 3);
     glowDot(p, s.color, p.at(x, y, 48, GLOW_POINT), 4, 0.9);
   },
@@ -568,19 +784,25 @@ const SHAPES: Record<CityBuilding['shape'], ShapeDrawer> = {
     box(p, s, x, y, 0, 44, 44, 14);
     box(p, s, x, y, 14, 32, 32, 14);
     box(p, s, x, y, 28, 20, 20, 32);
+    bands(p, s.color, x, y, 20, 20, TRIBUNAL_BANDS);
     strokeLine(p.ctx, p.at(x - 22, y + 22, 72, MAST_FROM), p.at(x + 22, y - 22, 72, MAST_TO), s.color, 0.95, Math.max(1, 2 * p.zoom));
     mast(p, s.color, x, y, 60, 74, 2);
+    quorumRing(p, s.color, p.frame.palette.emerald, x, y, 90, 24);
   },
   cyber_forge(p, s, { x, y }) {
     cylinder(p, s, x - 22, y - 14, 0, 8, 80);
     cylinder(p, s, x + 6, y - 22, 0, 8, 70);
     box(p, s, x, y + 6, 0, 44, 26, 44);
+    bands(p, s.color, x, y + 6, 44, 26, FORGE_BANDS, 0.4);
+    drawCrane(p, s.color, x + 26, y + 22, 44);
     const flicker = p.frame.animate ? 0.6 + 0.4 * Math.abs(Math.sin(p.frame.time * 0.004)) : 0.8;
     glowDot(p, s.color, p.at(x - 22, y - 14, 84, GLOW_POINT), 4, flicker);
   },
   neural_matrix_spire(p, s, { x, y }) {
     box(p, s, x, y, 0, 30, 30, 44);
+    bands(p, s.color, x, y, 30, 30, SPIRE_BANDS_LOW);
     box(p, s, x, y, 44, 21, 21, 40);
+    bands(p, s.color, x, y, 21, 21, SPIRE_BANDS_MID);
     box(p, s, x, y, 84, 12, 12, 36);
     mast(p, s.color, x, y, 120, 146, 1.5);
     glowDot(p, s.color, p.at(x, y, 148, GLOW_POINT), 3, 0.9);
@@ -588,19 +810,37 @@ const SHAPES: Record<CityBuilding['shape'], ShapeDrawer> = {
   telemetry_beacon(p, s, { x, y }) {
     box(p, s, x, y, 0, 28, 28, 10);
     box(p, withFill(s, s.fill * 0.4), x, y, 10, 8, 8, 124);
+    // Lattice cross-bracing on the mast's front faces.
+    const { ctx } = p;
+    ctx.beginPath();
+    for (let z = 10; z < 130; z += 20) {
+      at2(p, x + 8, y - 8, z, x + 8, y + 8, z + 20); at2(p, x + 8, y + 8, z, x + 8, y - 8, z + 20);
+      at2(p, x - 8, y + 8, z, x + 8, y + 8, z + 20); at2(p, x + 8, y + 8, z, x - 8, y + 8, z + 20);
+    }
+    ctx.globalAlpha = 0.45; ctx.strokeStyle = s.color; ctx.lineWidth = Math.max(0.5, 0.9 * p.zoom); ctx.stroke(); ctx.globalAlpha = 1;
     const pulse = p.frame.animate ? 0.5 + 0.5 * Math.abs(Math.sin(p.frame.time * 0.002)) : 0.9;
     glowDot(p, s.color, p.at(x, y, 140, GLOW_POINT), 6, pulse);
   },
   command_citadel(p, s, { x, y }) {
     box(p, s, x - 40, y - 40, 0, 9, 9, 56);
     box(p, s, x, y, 0, 44, 44, 32);
+    bands(p, s.color, x, y, 44, 44, CITADEL_BANDS, 0.4);
     box(p, s, x, y, 32, 18, 18, 56);
     box(p, s, x + 40, y - 40, 0, 9, 9, 56);
     box(p, s, x - 40, y + 40, 0, 9, 9, 56);
     box(p, s, x + 40, y + 40, 0, 9, 9, 56);
+    // Shield grid between the front tower tops, with emitters (prototype's security bastion).
+    const { ctx } = p;
+    const a = p.at(x - 40, y + 40, 62, MAST_FROM); ctx.beginPath(); ctx.moveTo(a.x, a.y);
+    const b = p.at(x + 40, y + 40, 62, MAST_FROM); ctx.lineTo(b.x, b.y);
+    const c = p.at(x + 40, y - 40, 62, MAST_FROM); ctx.lineTo(c.x, c.y);
+    ctx.globalAlpha = 0.7; ctx.strokeStyle = s.color; ctx.lineWidth = Math.max(0.6, 1.6 * p.zoom); ctx.stroke(); ctx.globalAlpha = 1;
+    for (let index = 0; index < 4; index++) glowDot(p, s.color, p.at(x + CORNER_X[index] * 40, y + CORNER_Y[index] * 40, 62, GLOW_POINT), 2, 0.9);
+    mast(p, s.color, x, y, 88, 108, 1.4);
   },
   surveillance_panopticon(p, s, { x, y }) {
     cylinder(p, s, x, y, 0, 44, 28);
+    pilasters(p, s.color, x, y, 44, 4, 24, 9);
     cylinder(p, s, x, y, 28, 10, 72);
     const eye = p.at(x, y, 100, GLOW_POINT);
     const sweep = p.frame.time * 0.0008;
@@ -613,8 +853,90 @@ const SHAPES: Record<CityBuilding['shape'], ShapeDrawer> = {
     box(p, s, x, y, 0, 46, 10, 14);
     box(p, s, x, y, 0, 10, 46, 14);
     box(p, s, x, y, 14, 20, 20, 30);
+    // Landing pad on the hub roof and running lights along the transit arms.
+    isoEllipse(p.ctx, p.at(x, y, 44, SHAPE_POINT), 13, p.zoom);
+    p.ctx.globalAlpha = 0.7; p.ctx.strokeStyle = s.color; p.ctx.stroke();
+    const run = p.frame.animate ? (p.frame.time * 0.0004) % 1 : 0.5;
+    for (let index = 0; index < 4; index++) {
+      const distance = 14 + run * 30;
+      glowDot(p, s.color, p.at(x + CROSS_X[index] * distance, y + CROSS_Y[index] * distance, 15, GLOW_POINT), 1.8, 0.85);
+    }
+    p.ctx.globalAlpha = 1;
   },
 };
+
+/** Adds a segment (world → screen) to the current path. */
+function at2(p: Painter, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) {
+  p.at(x0, y0, z0, MAST_FROM); p.at(x1, y1, z1, MAST_TO);
+  p.ctx.moveTo(MAST_FROM.x, MAST_FROM.y); p.ctx.lineTo(MAST_TO.x, MAST_TO.y);
+}
+
+/** Construction crane (prototype's Foundry): mast, a slowly slewing jib and a hanging voxel. */
+function drawCrane(p: Painter, color: string, x: number, y: number, z: number) {
+  const { ctx, frame, zoom } = p;
+  const top = p.at(x, y, z + 50, SHAPE_POINT);
+  mast(p, color, x, y, z, z + 50, 2.4);
+  const angle = frame.animate ? frame.time * 0.0005 : 0.6;
+  const arm = 30 * zoom;
+  const endX = top.x + Math.cos(angle) * arm; const endY = top.y + Math.sin(angle) * arm * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(top.x - Math.cos(angle) * 10 * zoom, top.y - Math.sin(angle) * 5 * zoom); ctx.lineTo(endX, endY);
+  ctx.moveTo(endX, endY); ctx.lineTo(endX, endY + 16 * zoom);
+  ctx.globalAlpha = 0.9; ctx.strokeStyle = frame.palette.gold; ctx.lineWidth = Math.max(0.6, 1.6 * zoom); ctx.stroke();
+  const voxel = 7 * zoom;
+  ctx.beginPath(); ctx.rect(endX - voxel / 2, endY + 16 * zoom, voxel, voxel);
+  ctx.globalAlpha = 0.6; ctx.fillStyle = frame.palette.cyan; ctx.fill();
+  ctx.globalAlpha = 0.9; ctx.strokeStyle = frame.palette.cyan; ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+const LAB_BANDS = [14, 26] as const;
+const VAULT_BANDS = [10, 30, 52] as const;
+const TRIBUNAL_BANDS = [40, 50] as const;
+const FORGE_BANDS = [16, 30] as const;
+const SPIRE_BANDS_LOW = [12, 24, 36] as const;
+const SPIRE_BANDS_MID = [56, 70] as const;
+const CITADEL_BANDS = [12, 22] as const;
+const CORNER_X = [-1, 1, -1, 1] as const;
+const CORNER_Y = [-1, -1, 1, 1] as const;
+const CROSS_X = [1, -1, 0, 0] as const;
+const CROSS_Y = [0, 0, 1, -1] as const;
+
+/* The Praetorium: owner-only slate-and-gold citadel at the front of the Forum (entrance to Owner controls). */
+const PRAETORIUM_WALL: Style = { color: '', fill: 0.2, stroke: 0.85 };
+const PRAETORIUM_GOLD: Style = { color: '', fill: 0.32, stroke: 0.95 };
+
+function drawPraetorium(p: Painter, s: Style, { x, y }: CityBuilding) {
+  const { palette } = p.frame;
+  const active = s.fill > 0.3;
+  PRAETORIUM_WALL.color = palette.slate; PRAETORIUM_WALL.fill = active ? 0.3 : 0.2;
+  PRAETORIUM_GOLD.color = s.color;
+  const gold = palette.gold;
+  // Stepped plinth.
+  box(p, PRAETORIUM_GOLD, x, y, 0, 52, 52, 6);
+  box(p, PRAETORIUM_WALL, x, y, 6, 46, 46, 8);
+  // Back and side towers, the keep, then the front tower (painter order within the building).
+  praetoriumTower(p, x - 34, y - 34); praetoriumTower(p, x + 34, y - 34); praetoriumTower(p, x - 34, y + 34);
+  box(p, PRAETORIUM_WALL, x, y, 14, 28, 28, 44);
+  bands(p, gold, x, y, 28, 28, PRAETORIUM_BANDS, 0.7);
+  // Gate on the front (+y) face.
+  const gate = p.at(x, y + 28, 14, SHAPE_POINT);
+  const { ctx, zoom } = p;
+  ctx.beginPath(); ctx.moveTo(gate.x - 7 * zoom, gate.y + 2 * zoom); ctx.lineTo(gate.x - 7 * zoom, gate.y - 14 * zoom);
+  ctx.arc(gate.x, gate.y - 14 * zoom, 7 * zoom, Math.PI, 0); ctx.lineTo(gate.x + 7 * zoom, gate.y + 2 * zoom);
+  ctx.globalAlpha = 0.9; ctx.fillStyle = palette.ground; ctx.fill(); ctx.strokeStyle = gold; ctx.lineWidth = Math.max(0.6, 1.4 * zoom); ctx.stroke(); ctx.globalAlpha = 1;
+  pyramid(p, PRAETORIUM_GOLD, x, y, 58, 28, 24);
+  praetoriumTower(p, x + 34, y + 34);
+  // Standard with a golden crest.
+  mast(p, gold, x, y, 82, 104, 1.6);
+  glowDot(p, gold, p.at(x, y, 106, GLOW_POINT), 4, 0.95);
+}
+const PRAETORIUM_BANDS = [26, 40, 52] as const;
+
+function praetoriumTower(p: Painter, x: number, y: number) {
+  cylinder(p, PRAETORIUM_WALL, x, y, 14, 8, 50);
+  dome(p, PRAETORIUM_GOLD, x, y, 64, 8, 0.9);
+}
 
 const VAULT_RING_Z = [18, 44] as const;
 const PYLON_COS = [0, 1, 2].map(index => Math.cos(Math.PI / 6 + index * (TAU / 3)));
@@ -732,46 +1054,271 @@ const LABEL_FONTS: Record<11 | 12, string> = {
   11: `600 11px ${LABEL_FONT_FAMILY}`,
   12: `600 12px ${LABEL_FONT_FAMILY}`,
 };
-const LABEL_ANCHOR = point();
+const CARD_TITLE_FONT = `700 12px ${LABEL_FONT_FAMILY}`;
+const CARD_SUB_FONT = `500 10px ${LABEL_FONT_FAMILY}`;
 const LABEL_PADDING = 14;
+const CARD_PADDING = 22;
+const CARD_HEIGHT = 36;
+/** Room labels are hidden below this zoom unless their building is hovered or selected. */
+export const ROOM_LABEL_MIN_ZOOM = 0.32;
+/** World height above a building's roof at which its label is anchored. */
+const LABEL_LIFT = 26;
 
-function labelFor(ctx: Ctx, cache: CityRenderCache | undefined, building: CityBuilding, fontSize: number): LabelEntry {
+/** A screen-space rectangle in CSS pixels of the canvas (same edges as a DOMRect). */
+export interface Rect { left: number; top: number; right: number; bottom: number; }
+
+const LANDMARK_SUBLINES: Record<Exclude<CityBuilding['kind'], 'room'>, string> = {
+  library: 'Knowledge',
+  pantheon: 'Agents',
+  praetorium: 'Owner controls',
+};
+
+/**
+ * Second line of the hover card, from real data only: the archetype name, plus `message_count` when the API
+ * returned one for the room; landmarks name the screen they open. Never an invented metric.
+ */
+export function cardSubline(building: CityBuilding): string {
+  if (building.kind !== 'room') return LANDMARK_SUBLINES[building.kind];
+  const name = building.archetype?.nameEn ?? '';
+  const count = building.room?.messageCount;
+  if (typeof count !== 'number' || !Number.isFinite(count)) return name;
+  const whole = Math.max(0, Math.floor(count));
+  const messages = `${whole} ${whole === 1 ? 'message' : 'messages'}`;
+  return name ? `${name} · ${messages}` : messages;
+}
+
+interface CardEntry { source: string; subSource: string; title: string; sub: string; width: number; }
+
+function labelFor(ctx: Ctx, cache: CityRenderCache | undefined, building: CityBuilding, fontSize: 11 | 12): LabelEntry {
   const key = `${fontSize}|${building.id}`;
   const cached = cache?.labels.get(key);
   if (cached && cached.source === building.label) return cached;
   const text = truncateLabel(building.label);
+  ctx.font = LABEL_FONTS[fontSize];
   const entry: LabelEntry = { source: building.label, text, width: ctx.measureText(text).width + LABEL_PADDING };
   cache?.labels.set(key, entry);
   return entry;
 }
 
+function cardFor(ctx: Ctx, cache: CityRenderCache | undefined, building: CityBuilding): CardEntry {
+  const sub = cardSubline(building);
+  const cached = cache?.cards.get(building.id);
+  if (cached && cached.source === building.label && cached.subSource === sub) return cached;
+  const title = truncateLabel(building.label, 32);
+  const subText = truncateLabel(sub, 40);
+  ctx.font = CARD_TITLE_FONT;
+  const titleWidth = ctx.measureText(title).width;
+  ctx.font = CARD_SUB_FONT;
+  const subWidth = ctx.measureText(subText).width;
+  const entry: CardEntry = { source: building.label, subSource: sub, title, sub: subText, width: Math.max(titleWidth, subWidth) + CARD_PADDING };
+  cache?.cards.set(building.id, entry);
+  return entry;
+}
+
+/* ------------------------------------------------------------------ label placement */
+
+/** One label box produced by layoutLabels; `left/top/right/bottom` is where it is drawn when `visible`. */
+export interface PlacedLabel extends Rect {
+  building: CityBuilding;
+  /** Screen point where the label would sit undisturbed (above the roof). */
+  anchorX: number;
+  anchorY: number;
+  /** The hover card (name + subline) instead of the plain name tag. */
+  card: boolean;
+  active: boolean;
+  visible: boolean;
+}
+
+export interface LabelLayoutInput {
+  scene: CityScene;
+  camera: Camera;
+  view: Viewport;
+  hoveredId: string | null;
+  selectedId: string | null;
+  filter: ArchetypeCategory | 'all';
+  /** Screen rects of HUD panels over the canvas; labels are nudged off them or hidden. */
+  occluders?: readonly Rect[];
+}
+
+/** Measures a label (plain name tag, or the hover card when `card`); returns the box width in CSS px. */
+export type LabelMeasure = (building: CityBuilding, card: boolean) => number;
+
+const LABEL_GAP = 3;
+const OCCLUDER_GAP = 6;
+/** Vertical nudges tried in order, in label steps: in place, up 1–3 steps, one step down. */
+const NUDGES = [0, -1, -2, -3, 1] as const;
+const NO_OCCLUDERS: readonly Rect[] = [];
+
+function overlaps(left: number, top: number, right: number, bottom: number, other: Rect, gap: number): boolean {
+  return left < other.right + gap && right > other.left - gap && top < other.bottom + gap && bottom > other.top - gap;
+}
+
+function blocked(left: number, top: number, right: number, bottom: number, out: readonly PlacedLabel[], placedCount: number, occluders: readonly Rect[]): boolean {
+  for (let index = 0; index < occluders.length; index++) if (overlaps(left, top, right, bottom, occluders[index], OCCLUDER_GAP)) return true;
+  for (let index = 0; index < placedCount; index++) {
+    const other = out[index];
+    if (other.visible && overlaps(left, top, right, bottom, other, LABEL_GAP)) return true;
+  }
+  return false;
+}
+
+function setBox(label: PlacedLabel, left: number, top: number, width: number, height: number) {
+  label.left = left; label.top = top; label.right = left + width; label.bottom = top + height; label.visible = true;
+}
+
+/** Tries the vertical nudges, then a sideways escape off each occluder under the label; hides it when nothing fits. */
+function place(label: PlacedLabel, width: number, height: number, out: readonly PlacedLabel[], placedCount: number, occluders: readonly Rect[]) {
+  const baseLeft = label.anchorX - width / 2;
+  const baseTop = label.anchorY - height / 2;
+  const step = height + LABEL_GAP * 2;
+  for (let index = 0; index < NUDGES.length; index++) {
+    const top = baseTop + NUDGES[index] * step;
+    if (!blocked(baseLeft, top, baseLeft + width, top + height, out, placedCount, occluders)) { setBox(label, baseLeft, top, width, height); return; }
+  }
+  for (let index = 0; index < occluders.length; index++) {
+    const occluder = occluders[index];
+    if (!overlaps(baseLeft, baseTop, baseLeft + width, baseTop + height, occluder, OCCLUDER_GAP)) continue;
+    const toRight = occluder.right + OCCLUDER_GAP + 1 - baseLeft;
+    const toLeft = occluder.left - OCCLUDER_GAP - 1 - (baseLeft + width);
+    const first = Math.abs(toRight) <= Math.abs(toLeft) ? toRight : toLeft;
+    const second = first === toRight ? toLeft : toRight;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const dx = attempt === 0 ? first : second;
+      if (Math.abs(dx) > width) continue;
+      if (!blocked(baseLeft + dx, baseTop, baseLeft + dx + width, baseTop + height, out, placedCount, occluders)) { setBox(label, baseLeft + dx, baseTop, width, height); return; }
+    }
+  }
+  label.visible = false;
+}
+
+function labelSlot(out: PlacedLabel[], index: number, building: CityBuilding): PlacedLabel {
+  let slot = out[index];
+  if (!slot) { slot = { building, anchorX: 0, anchorY: 0, left: 0, top: 0, right: 0, bottom: 0, card: false, active: false, visible: false }; out[index] = slot; }
+  slot.building = building;
+  return slot;
+}
+
+const LAYOUT_ANCHOR = point();
+
+/**
+ * Collision-free label layout, recomputed each frame into the caller-owned `out` pool (no sorting and no
+ * per-label allocation once the pool is warm). Priority: the hover card first, then the Forum landmarks,
+ * then room labels from the nearest building outwards. A label that would cover another label or a HUD
+ * occluder is nudged up (then once down, then sideways off the occluder); if nothing fits it is hidden.
+ * Returns how many entries of `out` are in use this frame (hidden ones included, with `visible: false`).
+ */
+export function layoutLabels(input: LabelLayoutInput, measure: LabelMeasure, out: PlacedLabel[]): number {
+  const { scene, camera, view, filter } = input;
+  const occluders = input.occluders ?? NO_OCCLUDERS;
+  const showRoomLabels = camera.zoom >= ROOM_LABEL_MIN_ZOOM;
+  const plainHeight = (camera.zoom < 0.5 ? 11 : 12) + 8;
+  const cardId = input.hoveredId ?? input.selectedId;
+  const drawOrder = scene.drawOrder;
+  let count = 0;
+  // Pass 0: the hover card; pass 1: landmarks; pass 2: rooms, nearest (end of the painter order) first.
+  for (let pass = 0; pass < 3; pass++) {
+    for (let order = drawOrder.length - 1; order >= 0; order--) {
+      const building = drawOrder[order];
+      const isCard = building.id === cardId;
+      if (pass === 0 ? !isCard : isCard || (pass === 1) === (building.kind === 'room')) continue;
+      if (!matchesFilter(building, filter)) continue;
+      const active = isCard || building.id === input.selectedId || building.id === input.hoveredId;
+      if (building.kind === 'room' && !showRoomLabels && !active) continue;
+      const anchor = worldToScreen(building.x, building.y, building.height + LABEL_LIFT, camera, view, LAYOUT_ANCHOR);
+      const height = isCard ? CARD_HEIGHT : plainHeight;
+      // The card grows upwards from where the plain tag would sit, so it never covers its own building more.
+      const centreY = anchor.y - (height - plainHeight) / 2;
+      // Cheap reject before measuring: labels are at most a few hundred pixels wide.
+      if (centreY + height / 2 < -CULL_MARGIN || centreY - height / 2 > view.height + CULL_MARGIN) continue;
+      const width = measure(building, isCard);
+      if (anchor.x + width / 2 < -CULL_MARGIN || anchor.x - width / 2 > view.width + CULL_MARGIN) continue;
+      const label = labelSlot(out, count, building);
+      label.anchorX = anchor.x; label.anchorY = centreY;
+      label.card = isCard; label.active = active;
+      place(label, width, height, out, count, occluders);
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Id of the building whose visible label (or hover card) contains the screen point in the last rendered
+ * frame, or null. Lets the canvas treat a click on a label like a click on its building.
+ */
+export function labelAt(cache: CityRenderCache, sx: number, sy: number): string | null {
+  // Later entries were placed around earlier ones, so any hit is unambiguous; the card (index 0) wins ties.
+  for (let index = 0; index < cache.placedCount; index++) {
+    const label = cache.placed[index];
+    if (label.visible && sx >= label.left && sx <= label.right && sy >= label.top && sy <= label.bottom) return label.building.id;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ label drawing */
+
+const LEADER_POINT = point();
+
 function drawLabels(p: Painter) {
   const { ctx, frame, zoom } = p;
-  const { view } = frame;
-  const showRoomLabels = zoom >= 0.32;
-  const fontSize = zoom < 0.5 ? 11 : 12;
-  const height = fontSize + 8;
-  ctx.font = LABEL_FONTS[fontSize];
+  const cache = frame.cache;
+  const out = cache ? cache.placed : [];
+  const fontSize: 11 | 12 = zoom < 0.5 ? 11 : 12;
+  const measure: LabelMeasure = (building, card) => (card ? cardFor(ctx, cache, building).width : labelFor(ctx, cache, building, fontSize).width);
+  const count = layoutLabels(frame, measure, out);
+  if (cache) cache.placedCount = count;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  const drawOrder = frame.scene.drawOrder;
-  for (let index = 0; index < drawOrder.length; index++) {
-    const building = drawOrder[index];
-    const active = building.id === frame.selectedId || building.id === frame.hoveredId;
-    if (!matchesFilter(building, frame.filter)) continue;
-    if (building.kind === 'room' && !showRoomLabels && !active) continue;
-    const anchor = p.at(building.x, building.y, building.height + 26, LABEL_ANCHOR);
-    // Cheap reject before measuring: labels are at most a few hundred pixels wide.
-    if (anchor.y + height / 2 < -CULL_MARGIN || anchor.y - height / 2 > view.height + CULL_MARGIN) continue;
-    const label = labelFor(ctx, frame.cache, building, fontSize);
-    const width = label.width;
-    if (anchor.x + width / 2 < -CULL_MARGIN || anchor.x - width / 2 > view.width + CULL_MARGIN) continue;
-    ctx.globalAlpha = active ? 0.95 : 0.78;
+  let card: PlacedLabel | null = null;
+  // Plain tags never overlap each other after layout, so their drawing order does not matter; the card goes last.
+  for (let index = 0; index < count; index++) {
+    const label = out[index];
+    if (!label.visible) continue;
+    if (label.card) { card = label; continue; }
+    drawLeader(p, label);
+    const entry = labelFor(ctx, cache, label.building, fontSize);
+    const width = label.right - label.left;
+    ctx.font = LABEL_FONTS[fontSize];
+    ctx.globalAlpha = label.active ? 0.95 : 0.78;
     ctx.fillStyle = frame.palette.panel;
-    ctx.beginPath(); ctx.roundRect(anchor.x - width / 2, anchor.y - height / 2, width, height, 5); ctx.fill();
-    ctx.strokeStyle = frame.palette[building.color]; ctx.lineWidth = 1; ctx.globalAlpha = active ? 1 : 0.55; ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(label.left, label.top, width, label.bottom - label.top, 5); ctx.fill();
+    ctx.strokeStyle = frame.palette[label.building.color]; ctx.lineWidth = 1; ctx.globalAlpha = label.active ? 1 : 0.55; ctx.stroke();
     ctx.globalAlpha = 1;
-    ctx.fillStyle = active ? frame.palette.text : frame.palette.textMuted;
-    ctx.fillText(label.text, anchor.x, anchor.y + 0.5);
+    ctx.fillStyle = label.active ? frame.palette.text : frame.palette.textMuted;
+    ctx.fillText(entry.text, label.left + width / 2, (label.top + label.bottom) / 2 + 0.5);
   }
+  if (card) drawCard(p, card);
+}
+
+/** Pin from the roof to the label edge: always for the card, and for a plain tag that had to move away. */
+function drawLeader(p: Painter, label: PlacedLabel, always = false) {
+  const centreX = (label.left + label.right) / 2;
+  const centreY = (label.top + label.bottom) / 2;
+  if (!always && Math.abs(centreX - label.anchorX) < 2 && Math.abs(centreY - label.anchorY) < 2) return;
+  const { ctx, frame } = p;
+  const roof = p.at(label.building.x, label.building.y, label.building.height, LEADER_POINT);
+  const endY = roof.y < label.top ? label.top : label.bottom;
+  const endX = Math.min(label.right - 6, Math.max(label.left + 6, roof.x));
+  ctx.globalAlpha = always ? 0.8 : 0.45; ctx.strokeStyle = frame.palette[label.building.color]; ctx.lineWidth = always ? 1.2 : 1;
+  ctx.beginPath(); ctx.moveTo(roof.x, roof.y); ctx.lineTo(endX, endY); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+/** Hover card: accent pin, panel, name and a real-data subline. Text is untrusted and only ever filled. */
+function drawCard(p: Painter, label: PlacedLabel) {
+  const { ctx, frame } = p;
+  const entry = cardFor(ctx, frame.cache, label.building);
+  const accent = frame.palette[label.building.color];
+  const width = label.right - label.left;
+  const centreX = label.left + width / 2;
+  drawLeader(p, label, true);
+  drawGlow(ctx, accent, centreX, (label.top + label.bottom) / 2, width * 0.62, 0.18);
+  ctx.globalAlpha = 0.97; ctx.fillStyle = frame.palette.panel;
+  ctx.beginPath(); ctx.roundRect(label.left, label.top, width, CARD_HEIGHT, 6); ctx.fill();
+  ctx.globalAlpha = 1; ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.font = CARD_TITLE_FONT; ctx.fillStyle = frame.palette.text;
+  ctx.fillText(entry.title, centreX, label.top + 13);
+  ctx.font = CARD_SUB_FONT; ctx.fillStyle = accent;
+  ctx.fillText(entry.sub, centreX, label.top + 26);
+  ctx.globalAlpha = 1;
 }

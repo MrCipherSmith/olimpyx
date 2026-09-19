@@ -226,6 +226,7 @@
 
 .legend-library span { color: var(--color-indigo); }
 .legend-pantheon span { color: var(--color-gold); }
+.legend-praetorium span { color: var(--color-amber); }
 
 /* --- D-pad camera and zoom (bottom right) --- */
 
