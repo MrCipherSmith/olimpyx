@@ -207,6 +207,179 @@ test('listen handles unrecoverable error like HTTP 401 with status error payload
   await rm(root, { recursive: true, force: true });
 });
 
+// ---------------------------------------------------------------------------
+// Q-016: typed session-failure mapping, best-effort inbox cursor ack, and the
+// local session_minutes budget ending listen with BUDGET_EXHAUSTED.
+// ---------------------------------------------------------------------------
+
+function baseSessionFiles(stateDir) {
+  return Promise.all([
+    writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' })),
+    writeFile(join(stateDir, 'session-credential'), 'secret-session-token\n', { mode: 0o600 }),
+    writeFile(join(stateDir, 'session.json'), JSON.stringify({
+      session_id: 'ses_1',
+      caller_id: 'call_1',
+      caller_deadline: new Date(Date.now() + 60000).toISOString(),
+      inbox_cursor: 'c0'
+    }))
+  ]);
+}
+
+for (const [heartbeatCode, heartbeatStatus, expectedCliCode] of [
+  ['session_stopped', 401, 'STOP_REQUESTED'],
+  ['session_superseded', 401, 'SESSION_SUPERSEDED'],
+  ['agent_revoked', 401, 'AGENT_REVOKED'],
+  ['restricted', 403, 'RESTRICTED'],
+  ['session_expired', 401, 'SESSION_EXPIRED']
+]) {
+  test(`listen maps ${heartbeatCode} (HTTP ${heartbeatStatus}) to ${expectedCliCode}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
+    const stateDir = join(root, '.olimpyx');
+    await mkdir(stateDir, { recursive: true });
+    await baseSessionFiles(stateDir);
+
+    const preloadPath = join(root, 'mock.mjs');
+    await writeFile(preloadPath, `
+      globalThis.fetch = async (url) => {
+        const u = String(url);
+        if (u.includes('/heartbeat')) {
+          return new Response(JSON.stringify({ error: { message: 'blocked', code: '${heartbeatCode}' } }), {
+            status: ${heartbeatStatus},
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+      };
+    `);
+
+    const res = await run(['listen', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
+    assert.equal(res.status, 1);
+    const parsed = JSON.parse(res.stdout);
+    assert.equal(parsed.status, 'error');
+    assert.equal(parsed.error.code, expectedCliCode);
+    await rm(root, { recursive: true, force: true });
+  });
+}
+
+test('listen sends a best-effort POST /v1/inbox/cursors after persisting the received cursor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await baseSessionFiles(stateDir);
+
+  const logFile = join(root, 'cursor-calls.log');
+  const preloadPath = join(root, 'mock.mjs');
+  await writeFile(preloadPath, `
+    import { appendFileSync } from 'node:fs';
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.includes('/heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/inbox/cursors')) {
+        appendFileSync('${logFile}', init.method + ' ' + u + ' body=' + (init.body || '') + '\\n');
+        return new Response(JSON.stringify({ data: {} }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/inbox/events')) {
+        return new Response(JSON.stringify({ data: [{ event_id: 'evt_1', cursor: 'c_received', type: 'message.created' }], page: { next_cursor: 'c_received' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const res = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '1'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+
+  const logs = await readFile(logFile, 'utf8');
+  assert.match(logs, /POST https:\/\/mock\.test\/v1\/inbox\/cursors body=\{"cursor":"c_received"\}/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('listen ignores a failing inbox-cursor ack and still succeeds', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await baseSessionFiles(stateDir);
+
+  const preloadPath = join(root, 'mock.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/inbox/cursors')) {
+        return new Response(JSON.stringify({ error: { message: 'boom' } }), { status: 500, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/inbox/events')) {
+        return new Response(JSON.stringify({ data: [{ event_id: 'evt_1', cursor: 'c_received', type: 'message.created' }], page: { next_cursor: 'c_received' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const res = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '1'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  const parsed = JSON.parse(res.stdout);
+  assert.equal(parsed.status, 'received');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('listen ends with BUDGET_EXHAUSTED once the local session_minutes budget has elapsed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await baseSessionFiles(stateDir);
+  await writeFile(join(stateDir, 'budget.json'), JSON.stringify({ help: 'on', contacts: [], session_minutes: 1 }));
+  // Pre-seed the ledger so the session already started well over a minute ago.
+  await writeFile(join(stateDir, 'budget-ledger.json'), JSON.stringify({ session_id: 'ses_1', session_started_at: Date.now() - (2 * 60_000) }));
+
+  const preloadPath = join(root, 'mock.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: 'c0' } }), { headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const res = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '1'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 1);
+  const parsed = JSON.parse(res.stdout);
+  assert.equal(parsed.status, 'error');
+  assert.equal(parsed.error.code, 'BUDGET_EXHAUSTED');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('listen without a budget.json is unaffected by session_minutes logic', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await baseSessionFiles(stateDir);
+
+  const preloadPath = join(root, 'mock.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/inbox/events')) {
+        return new Response(JSON.stringify({ data: [{ event_id: 'evt_1', cursor: 'c1', type: 'message.created' }], page: { next_cursor: 'c1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const res = await run(['listen', '--caller-id', 'call_1', '--max-wait-min', '1'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  const parsed = JSON.parse(res.stdout);
+  assert.equal(parsed.status, 'received');
+  await rm(root, { recursive: true, force: true });
+});
+
 test('listen traps SIGINT, ends session, clears session state, and exits 130', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');

@@ -156,3 +156,141 @@ test('listen CLI validates caller-id and active session', async () => {
   assert.match(noSession.stderr, /No local session/);
 });
 
+// ---------------------------------------------------------------------------
+// Q-016: agent stop, usage, limits, budget show|set, task decline
+// ---------------------------------------------------------------------------
+
+async function ownerConfiguredRoot(preloadBody) {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, preloadBody);
+  await run(['configure', '--server', 'https://mock.test'], { cwd: root, preload: preloadPath });
+  await writeFile(join(root, '.olimpyx', 'owner-credential'), 'owner-token-value', { mode: 0o600 });
+  return { root, preloadPath };
+}
+
+test('agent stop calls the owner stop route with --reason and an idempotency key', async () => {
+  const logFile = (root) => join(root, 'calls.log');
+  const { root, preloadPath } = await ownerConfiguredRoot('');
+  await writeFile(preloadPath, `
+    import { appendFileSync } from 'node:fs';
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      appendFileSync('${logFile(root)}', init.method + ' ' + u + ' auth=' + (init.headers?.authorization || '') + ' idem=' + (init.headers?.['idempotency-key'] || '') + ' body=' + (init.body || '') + '\\n');
+      return new Response(JSON.stringify({ data: { agent_id: 'agt_1', stop_requested: true } }), { headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const res = await run(['agent', 'stop', 'agt_1', '--reason', 'pausing'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).data.agent_id, 'agt_1');
+  const logs = await readFile(logFile(root), 'utf8');
+  assert.match(logs, /POST https:\/\/mock\.test\/v1\/owners\/me\/agents\/agt_1\/stop/);
+  assert.match(logs, /auth=Bearer owner-token-value/);
+  assert.match(logs, /idem=[^\s]+/);
+  assert.match(logs, /body=\{"reason":"pausing"\}/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('agent stop requires an agentId', async () => {
+  const { root, preloadPath } = await ownerConfiguredRoot('globalThis.fetch = async () => new Response("{}", { headers: { "content-type": "application/json" } });');
+  const res = await run(['agent', 'stop'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /agent stop requires <agentId>/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('usage calls the owner usage route without --caller-id', async () => {
+  const { root, preloadPath } = await ownerConfiguredRoot(`
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/v1/owners/me/usage')) return new Response(JSON.stringify({ data: { scope: 'owner' } }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ error: { message: 'unexpected ' + u } }), { status: 500, headers: { 'content-type': 'application/json' } });
+    };
+  `);
+  const res = await run(['usage'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).data.scope, 'owner');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('limits falls back to the owner credential when no --caller-id session is active', async () => {
+  const { root, preloadPath } = await ownerConfiguredRoot(`
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/v1/limits')) return new Response(JSON.stringify({ data: { actions: {} } }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ error: { message: 'unexpected ' + u } }), { status: 500, headers: { 'content-type': 'application/json' } });
+    };
+  `);
+  const res = await run(['limits'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout).data, { actions: {} });
+  await rm(root, { recursive: true, force: true });
+});
+
+test('budget show reports the default budget when no budget.json exists, and set persists a patch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
+  const show1 = await run(['budget', 'show'], { cwd: root });
+  assert.equal(show1.status, 0, show1.stderr);
+  assert.deepEqual(JSON.parse(show1.stdout), { help: 'on', contacts: [] });
+
+  const set = await run(['budget', 'set', '--help', 'contacts', '--contacts', 'agt_a,agt_b', '--messages-per-hour', '15', '--session-minutes', '90'], { cwd: root });
+  assert.equal(set.status, 0, set.stderr);
+  const setResult = JSON.parse(set.stdout);
+  assert.equal(setResult.help, 'contacts');
+  assert.deepEqual(setResult.contacts, ['agt_a', 'agt_b']);
+  assert.equal(setResult.messages_per_hour, 15);
+  assert.equal(setResult.session_minutes, 90);
+
+  const show2 = await run(['budget', 'show'], { cwd: root });
+  assert.deepEqual(JSON.parse(show2.stdout), setResult);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('budget set rejects an invalid --help value', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
+  const res = await run(['budget', 'set', '--help', 'bogus'], { cwd: root });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /--help must be one of: on, contacts, off/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('task decline sends a PATCH with status cancelled and the reason as result', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      const headers = { 'content-type': 'application/json' };
+      if (u.includes('/v1/sessions') && !u.includes('heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1', session_token: 'temp-token', expires_at: '2099-01-01T00:00:00Z', inbox_cursor: 'c1', bootstrap: {} } }), { headers });
+      }
+      if (u.includes('/heartbeat')) return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers });
+      if (u.includes('/v1/tasks/tsk_1')) {
+        return new Response(JSON.stringify({ data: { task_id: 'tsk_1', status: 'cancelled', result: JSON.parse(opts.body).result } }), { headers });
+      }
+      return new Response(JSON.stringify({ error: { message: 'missing ' + u } }), { status: 404, headers });
+    };
+  `);
+  await run(['configure', '--server', 'https://mock.test'], { cwd: root, preload: preloadPath });
+  await import('../src/state.js').then(async ({ LocalState }) => {
+    await new LocalState(join(root, '.olimpyx')).saveCredential('agent-token');
+  });
+  await run(['session', 'begin', '--caller-id', 'decline-test', '--host', 'codex'], { cwd: root, preload: preloadPath });
+
+  const res = await run(['task', 'decline', 'tsk_1', '--reason', 'overloaded', '--caller-id', 'decline-test'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  const parsed = JSON.parse(res.stdout);
+  assert.equal(parsed.data.status, 'cancelled');
+  assert.equal(parsed.data.result, 'overloaded');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('task decline requires --reason', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
+  const res = await run(['task', 'decline', 'tsk_1', '--caller-id', 'x'], { cwd: root });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /--reason is required/);
+  await rm(root, { recursive: true, force: true });
+});
+

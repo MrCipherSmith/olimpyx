@@ -5,6 +5,7 @@ import process from 'node:process';
 import { OlimpyxClient } from './client.js';
 import { LocalState } from './state.js';
 import { ParticipationSession } from './session.js';
+import { loadBudget, saveBudget, enforceSendBudget, recordSend, checkSessionBudget } from './budget.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -54,6 +55,23 @@ async function requireOwnerClient() {
   const config = await state.loadConfig();
   if (!config.serverUrl) throw new Error('Not configured. Run: olimpyx configure --server URL');
   return new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+}
+// Best-effort so the server can prune acknowledged inbox events (PRD §3.3); a failure
+// here must never interrupt the caller, which has already persisted the cursor locally.
+async function ackInboxCursor(client, cursor) {
+  if (!cursor) return;
+  try { await client.postInboxCursor(cursor); } catch { /* best-effort */ }
+}
+// listen surfaces the server's typed session-failure codes (PRD §3.2.5) as distinct
+// machine-readable codes; the CLI process exit code itself always stays 1.
+function mapListenErrorCode(error) {
+  const serverCode = error?.code;
+  if (serverCode === 'session_stopped') return 'STOP_REQUESTED';
+  if (serverCode === 'session_superseded') return 'SESSION_SUPERSEDED';
+  if (serverCode === 'agent_revoked') return 'AGENT_REVOKED';
+  if (error?.status === 403 && serverCode === 'restricted') return 'RESTRICTED';
+  if (error?.status === 401) return 'SESSION_EXPIRED';
+  return serverCode ?? error?.name ?? 'ERROR';
 }
 async function resolveMemoryAgentId(explicit) {
   const agentId = explicit ?? (await state.loadConfig()).agentId;
@@ -323,8 +341,22 @@ async function main() {
     }
     throw new Error('knowledge subcommands: card | review | publish | archive | inspect | list');
   }
-  if (command === 'message') { const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null); const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key'); if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required'); const { client } = await activeClient(option('caller-id')); const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`; const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) }; output(await mutation(client, 'POST', path, payload, explicitKey)); return; }
-  if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); output(page); return; }
+  if (command === 'message') {
+    const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null);
+    const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key');
+    if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required');
+    const { client } = await activeClient(option('caller-id'));
+    const config = await state.loadConfig();
+    const kind = recipient ? 'direct_message' : (replyTo ? 'reply' : 'message');
+    await enforceSendBudget(client, state.root, { agentId: config.agentId, kind, roomId, recipientAgentId: recipient, replyToMessageId: replyTo });
+    const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
+    const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) };
+    const result = await mutation(client, 'POST', path, payload, explicitKey);
+    await recordSend(state.root);
+    output(result);
+    return;
+  }
+  if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); await ackInboxCursor(client, cursor); output(page); return; }
   if (command === 'listen') {
     const callerId = option('caller-id');
     if (!callerId) throw new Error('--caller-id is required for participant commands');
@@ -347,6 +379,28 @@ async function main() {
     const pollTimeoutMs = Math.max(10, Math.round(pollTimeoutSec * 1000));
     const after = option('after');
     const client = await configuredClient(local.token);
+
+    // Local participation budget (PRD §3.4): session_minutes ends listen with
+    // BUDGET_EXHAUSTED. Without a budget.json this is a no-op (unchanged behavior).
+    const sessionBudgetNow = Date.now();
+    const sessionBudget = await checkSessionBudget(state.root, local.session_id, { now: sessionBudgetNow });
+    if (sessionBudget.exhausted) {
+      output({
+        status: 'error',
+        error: {
+          code: 'BUDGET_EXHAUSTED',
+          message: `Local session budget exhausted: session_minutes limit of ${sessionBudget.limitMinutes} reached.`,
+          waited_sec: 0,
+          poll_cycles: 0
+        }
+      });
+      process.exitCode = 1;
+      return;
+    }
+    const budgetRemainingMs = sessionBudget.limitMinutes
+      ? Math.max(0, sessionBudget.limitMinutes * 60_000 - sessionBudget.elapsedMinutes * 60_000)
+      : Infinity;
+    const effectiveMaxWaitMs = Math.min(maxWaitMs, budgetRemainingMs);
 
     const controller = new AbortController();
     let teardownPromise = null;
@@ -378,7 +432,7 @@ async function main() {
       const result = await client.listen({
         cursor: after || local.inbox_cursor,
         timeoutMs: pollTimeoutMs,
-        maxWaitMs: maxWaitMs,
+        maxWaitMs: effectiveMaxWaitMs,
         onHeartbeat: async () => {
           await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/heartbeat`, { observed_at: new Date().toISOString() });
           await state.renewSession(callerId);
@@ -386,6 +440,7 @@ async function main() {
         onCursor: async (nextCursor) => {
           if (nextCursor) {
             await state.renewSession(callerId, { inbox_cursor: nextCursor });
+            await ackInboxCursor(client, nextCursor);
           }
         },
         signal: controller.signal
@@ -394,6 +449,24 @@ async function main() {
       const finalCursor = result.page?.next_cursor ?? result.data?.at(-1)?.cursor;
       if (finalCursor) {
         await state.renewSession(callerId, { inbox_cursor: finalCursor });
+        await ackInboxCursor(client, finalCursor);
+      }
+
+      if (result.status === 'idle_timeout' && sessionBudget.limitMinutes) {
+        const recheck = await checkSessionBudget(state.root, local.session_id, { now: Date.now() });
+        if (recheck.exhausted) {
+          output({
+            status: 'error',
+            error: {
+              code: 'BUDGET_EXHAUSTED',
+              message: `Local session budget exhausted: session_minutes limit of ${recheck.limitMinutes} reached.`,
+              waited_sec: result.waited_sec,
+              poll_cycles: result.poll_cycles
+            }
+          });
+          process.exitCode = 1;
+          return;
+        }
       }
 
       output(result);
@@ -404,7 +477,7 @@ async function main() {
         return;
       }
       const waited_sec = error.waited_sec ?? Math.round((Date.now() - startTime) / 1000);
-      const code = error.status === 401 ? 'SESSION_EXPIRED' : (error.code ?? error.name ?? 'ERROR');
+      const code = mapListenErrorCode(error);
       output({
         status: 'error',
         error: {
@@ -742,10 +815,13 @@ async function main() {
       const isJson = Boolean(option('json'));
       const explicitKey = option('idempotency-key');
       const { client } = await activeClient(callerId);
+      const config = await state.loadConfig();
+      await enforceSendBudget(client, state.root, { agentId: config.agentId, kind: 'forum_post', roomId });
 
       const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
       const payload = { body, category, tags };
       const result = await mutation(client, 'POST', path, payload, explicitKey);
+      await recordSend(state.root);
       if (isJson) {
         output(result);
       } else {
@@ -842,7 +918,88 @@ async function main() {
     process.stdout.write(`${lines.join('\n')}\n`);
     return;
   }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations\n');
+  if (command === 'agent') {
+    const action = args.shift();
+    if (action === 'stop') {
+      const agentId = args.shift();
+      if (!agentId) throw new Error('agent stop requires <agentId>');
+      const reason = option('reason');
+      const explicitKey = option('idempotency-key');
+      const client = await requireOwnerClient();
+      output(await client.stopAgent(agentId, { reason }, explicitKey));
+      return;
+    }
+    throw new Error('agent actions: stop <agentId> [--reason TEXT]');
+  }
+  if (command === 'usage') {
+    const callerId = option('caller-id');
+    if (callerId) {
+      const { client } = await activeClient(callerId);
+      output(await client.myUsage());
+    } else {
+      const client = await requireOwnerClient();
+      output(await client.usage());
+    }
+    return;
+  }
+  if (command === 'limits') {
+    const callerId = option('caller-id');
+    let client;
+    if (callerId) {
+      ({ client } = await activeClient(callerId));
+    } else {
+      const ownerToken = await tryLoadOwnerToken();
+      if (ownerToken) {
+        const config = await state.loadConfig();
+        client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+      } else {
+        client = await configuredClient();
+      }
+    }
+    output(await client.limits());
+    return;
+  }
+  if (command === 'budget') {
+    const action = args.shift();
+    if (action === 'show') {
+      output((await loadBudget(state.root)) ?? { help: 'on', contacts: [] });
+      return;
+    }
+    if (action === 'set') {
+      const help = option('help');
+      if (help !== undefined && !['on', 'contacts', 'off'].includes(help)) {
+        throw new Error('--help must be one of: on, contacts, off');
+      }
+      const contactsRaw = option('contacts');
+      const contacts = contactsRaw !== undefined ? await parseJsonOrList(contactsRaw) : undefined;
+      const messagesPerHourRaw = option('messages-per-hour');
+      const sessionMinutesRaw = option('session-minutes');
+      const patch = {
+        ...(help !== undefined ? { help } : {}),
+        ...(contacts !== undefined ? { contacts } : {}),
+        ...(messagesPerHourRaw !== undefined ? { messages_per_hour: Number(messagesPerHourRaw) } : {}),
+        ...(sessionMinutesRaw !== undefined ? { session_minutes: Number(sessionMinutesRaw) } : {})
+      };
+      output(await saveBudget(state.root, patch));
+      return;
+    }
+    throw new Error('budget actions: show | set [--help on|contacts|off] [--contacts a,b] [--messages-per-hour N] [--session-minutes N]');
+  }
+  if (command === 'task') {
+    const action = args.shift();
+    if (action === 'decline') {
+      const taskId = args.shift();
+      if (!taskId) throw new Error('task decline requires <taskId>');
+      const reason = option('reason');
+      if (!reason) throw new Error('--reason is required');
+      const explicitKey = option('idempotency-key');
+      const { client } = await activeClient(option('caller-id'));
+      output(await mutation(client, 'PATCH', `/v1/tasks/${encodeURIComponent(taskId)}`, { status: 'cancelled', result: reason }, explicitKey));
+      return;
+    }
+    throw new Error('task actions: decline <taskId> --reason TEXT');
+  }
+  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task\n');
 }
 
-main().catch((error) => { process.stderr.write(`${error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });
+main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

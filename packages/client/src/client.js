@@ -2,7 +2,21 @@ import { randomInt } from 'node:crypto';
 import { assertSafeOutbound } from './redaction.js';
 
 export class OlimpyxHttpError extends Error {
-  constructor(status, message, requestId) { super(message); this.name = 'OlimpyxHttpError'; this.status = status; this.requestId = requestId; }
+  constructor(status, message, requestId, { code, details, retryAfterSec } = {}) {
+    super(message);
+    this.name = 'OlimpyxHttpError';
+    this.status = status;
+    this.requestId = requestId;
+    this.code = code;
+    this.details = details;
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
+function parseRetryAfterSec(header) {
+  if (header === null || header === undefined || header === '') return undefined;
+  const seconds = Number(header);
+  return Number.isFinite(seconds) ? seconds : undefined;
 }
 
 function buildPayload(status, data, nextCursor, startTime, pollCycles) {
@@ -87,7 +101,18 @@ export class OlimpyxClient {
       });
       const text = await response.text();
       const data = text ? (() => { try { return JSON.parse(text); } catch { return { message: text.slice(0, 500) }; } })() : null;
-      if (!response.ok) throw new OlimpyxHttpError(response.status, data?.error?.message ?? data?.message ?? `HTTP ${response.status}`, data?.error?.request_id ?? response.headers.get('x-request-id') ?? requestId);
+      if (!response.ok) {
+        throw new OlimpyxHttpError(
+          response.status,
+          data?.error?.message ?? data?.message ?? `HTTP ${response.status}`,
+          data?.error?.request_id ?? response.headers.get('x-request-id') ?? requestId,
+          {
+            code: data?.error?.code,
+            details: data?.error?.details,
+            retryAfterSec: parseRetryAfterSec(response.headers.get('retry-after'))
+          }
+        );
+      }
       return data;
     } finally {
       clearTimeout(timer);
@@ -322,6 +347,31 @@ export class OlimpyxClient {
     if (options.limit !== undefined && options.limit !== null) q.set('limit', String(options.limit));
     return this.request('GET', `/v1/recommendations?${q.toString()}`);
   }
+  stopAgent(agentId, { reason } = {}, idempotencyKey) {
+    if (!agentId) throw new Error('agentId is required');
+    return this.request('POST', `/v1/owners/me/agents/${encodeURIComponent(agentId)}/stop`, {
+      ...(reason !== undefined ? { reason } : {})
+    }, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  limits() {
+    return this.request('GET', '/v1/limits');
+  }
+  usage() {
+    return this.request('GET', '/v1/owners/me/usage');
+  }
+  myUsage() {
+    return this.request('GET', '/v1/agents/me/usage');
+  }
+  postInboxCursor(cursor) {
+    if (!cursor) throw new Error('cursor is required');
+    return this.request('POST', '/v1/inbox/cursors', { cursor });
+  }
+  declineTask(taskId, reason) {
+    if (!taskId) throw new Error('taskId is required');
+    return this.request('PATCH', `/v1/tasks/${encodeURIComponent(taskId)}`, { status: 'cancelled', result: reason });
+  }
   wait({ cursor, timeoutMs = 25_000, signal } = {}) {
     const bounded = Math.max(10, Math.min(Number(timeoutMs), 30_000));
     const query = new URLSearchParams({ ...(cursor ? { after_cursor: cursor } : {}), limit: '100' });
@@ -407,7 +457,18 @@ export class OlimpyxClient {
       }
 
       if (page?.data && page.data.length > 0) {
-        return buildPayload('received', page.data, currentCursor, startTime, pollCycles);
+        const payload = buildPayload('received', page.data, currentCursor, startTime, pollCycles);
+        // A task.cancelled event is only ever delivered into this agent's own inbox for a
+        // task assigned to it (PRD §3.2.4), so its mere presence here means "this agent's
+        // task", with no extra cross-referencing needed. Surface it as a stop hint distinct
+        // from agent.stop_requested/agent.restricted/agent.revoked, which stay informational
+        // (the real-time signal for those is the typed 401/403 on the next poll or heartbeat).
+        const cancelled = page.data.filter((event) => event?.type === 'task.cancelled');
+        if (cancelled.length > 0) {
+          const taskIds = [...new Set(cancelled.map((event) => event?.resource?.id ?? event?.resource_id).filter(Boolean))];
+          payload.stop = { code: 'TASK_CANCELLED', task_ids: taskIds };
+        }
+        return payload;
       }
     }
 
