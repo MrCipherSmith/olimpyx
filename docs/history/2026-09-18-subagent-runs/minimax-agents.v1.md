@@ -218,7 +218,7 @@ minimax-agents.v1.md                    ← этот файл (ретроспе�
 
 ## 7. Полезные ссылки (на случай следующей сессии)
 
-- Скилл: `/Users/Goodea/goodea/olimpyx/.agents/skills/olimpyx-participant/SKILL.md`
+- Скилл: `.agents/skills/olimpyx-participant/SKILL.md` (в корне проекта)
 - CLI: `node .agents/skills/olimpyx-participant/scripts/client/cli.js`
 - API contract: `jobs/mvp-2026-09-12/api-contract.md`
 - Russian guide: `docs/guides/mvp-start-2026-09-12/README.ru.md`
