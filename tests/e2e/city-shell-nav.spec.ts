@@ -38,16 +38,33 @@ test.describe('the dive transition (motion allowed)', () => {
     await expect(page.getByRole('heading', { name: 'Olimpyx city', exact: true })).toBeAttached();
     await expect(overlay(page)).not.toHaveClass(/visible/);
 
+    // The focusing/diving phases are brief (650ms/550ms — DIVE_TIMINGS in diveMachine.ts) and asserting on
+    // them against real wall-clock time is inherently racy on a loaded CI box: a slow tick before the click
+    // can push the window past a timeout, or past the next phase entirely. A virtual clock makes each phase
+    // transition an explicit, instant step instead of a real-time race.
+    await page.clock.install();
     await buildingList(page).getByRole('button', { name: /^Central Library/ }).click();
     // Focusing: the target lock names the building; nothing is routed yet.
     await expect(targetLock(page)).toContainText('TARGET LOCKED: Central Library of Knowledge');
+    await expect(overlay(page)).toHaveAttribute('data-phase', 'focusing');
     await expect(page).not.toHaveURL(/view=/);
-    // Diving: the full-screen "packet dive" overlay takes over.
-    await expect(overlay(page)).toHaveClass(/visible/, { timeout: 2000 });
-    await expect(overlay(page)).toContainText('/// INITIATING PACKET DIVE ///');
-    await expect(overlay(page)).toContainText('Central Library of Knowledge');
-    // Inside: the screen lands, its heading takes focus, and the target lock is gone.
-    await expect(page.getByRole('heading', { name: 'Central Library of Knowledge', exact: true })).toBeFocused({ timeout: 2000 });
+
+    // Diving: advance past the 650ms focus timer; the full-screen "packet dive" overlay takes over. Its
+    // visible label is set from a useEffect (DiveOverlay.tsx) that a virtual clock never flushes in this
+    // browser, so assert the dive through the (prop-driven, effect-free) live region instead — it carries
+    // the same "Opening <name>…" announcement and is what actually reaches assistive tech, the overlay
+    // itself being aria-hidden decoration.
+    await page.clock.runFor(650);
+    await expect(overlay(page)).toHaveAttribute('data-phase', 'diving');
+    await expect(overlay(page)).toHaveClass(/visible/);
+    await expect(page.locator('.dive-status')).toContainText('Opening');
+    await expect(page.locator('.dive-status')).toContainText('Central Library of Knowledge');
+
+    // Inside: advance past the 550ms dive timer; the screen lands, its heading takes focus, and the target
+    // lock is gone.
+    await page.clock.runFor(550);
+    await expect(overlay(page)).toHaveAttribute('data-phase', 'inside');
+    await expect(page.getByRole('heading', { name: 'Central Library of Knowledge', exact: true })).toBeFocused();
     await expect(page).toHaveURL(/view=knowledge/);
     await expect(targetLock(page)).toHaveCount(0);
     await expect(overlay(page)).not.toHaveClass(/visible/);
@@ -76,8 +93,9 @@ test.describe('the dive transition (motion allowed)', () => {
     // Deep links never animate in: the overlay never shows on load.
     await expect(page.getByRole('heading', { name: 'Pantheon of Agents', exact: true })).toBeFocused();
     await expect(overlay(page)).not.toHaveClass(/visible/);
-    // The city is still mounted underneath (just inert/aria-hidden while the screen covers it).
-    await expect(page.locator('.city-shell-world')).toHaveAttribute('aria-hidden', 'true');
+    // The city is still mounted underneath (just inert while the screen covers it: CityShell.tsx sets the
+    // attribute directly via a ref, not aria-hidden).
+    await expect(page.locator('.city-shell-world')).toHaveAttribute('inert', '');
 
     await page.getByRole('link', { name: 'Back to the city', exact: true }).click();
     await expect(overlay(page)).toHaveClass(/visible/);
@@ -85,15 +103,39 @@ test.describe('the dive transition (motion allowed)', () => {
     await expect(page).not.toHaveURL(/view=/);
   });
 
+  test('opening a room from the Rooms directory redives into it, with motion enabled', async ({ page }) => {
+    await fixture(page);
+    await page.goto('/');
+    // Rooms itself has no building (diveTargetFor falls back to the forum plaza), so this dive from idle
+    // lands without a specific target name; the interesting case here is the *second* dive it sets up.
+    await page.getByRole('link', { name: 'Rooms', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Rooms', exact: true })).toBeFocused({ timeout: 2000 });
+
+    // Screen → screen redive (diveMachine.ts: the rooms directory handing off to a room's building): the
+    // directory is hidden first (the URL reverts to the overview) and the overlay dives straight into the
+    // room's building, without a "Back to the city" round trip in between.
+    await page.locator('.room-list .room-row').filter({ hasText: room.title }).click();
+    await expect(overlay(page)).toHaveClass(/visible/, { timeout: 2000 });
+    await expect(overlay(page)).toContainText(room.title);
+    await expect(page.getByRole('heading', { name: room.title, exact: true })).toBeFocused({ timeout: 2000 });
+    await expect(page).toHaveURL(/room=room_shell/);
+    await expect(overlay(page)).not.toHaveClass(/visible/);
+  });
+
   test('Escape cancels an in-progress dive without ever navigating', async ({ page }) => {
     await fixture(page);
     await page.goto('/');
+    await page.clock.install();
     await buildingList(page).getByRole('button', { name: /^Pantheon of Agents/ }).click();
     await expect(targetLock(page)).toContainText('Pantheon of Agents');
     await page.keyboard.press('Escape');
-    // The dive is cancelled before the overlay ever becomes visible, and no route is ever committed.
+    // The dive is cancelled synchronously (diveMachine.ts clears its pending timer on the phase change), so
+    // no route is ever committed and the overlay never becomes visible. Advancing the clock past both the
+    // focus (650ms) and dive (550ms) timers proves that deterministically — a late, stale timer would still
+    // fire against the virtual clock — instead of padding the test with a real 1300ms wait that only proves
+    // the machine was fast enough to have already finished by then.
     await expect(overlay(page)).not.toHaveClass(/visible/);
-    await page.waitForTimeout(1300); // longer than focus+dive, to prove it never lands
+    await page.clock.runFor(1300);
     await expect(page.locator('.screen-layer')).toHaveCount(0);
     await expect(page).not.toHaveURL(/view=/);
     await expect(page.getByRole('heading', { name: 'Olimpyx city', exact: true })).toBeAttached();

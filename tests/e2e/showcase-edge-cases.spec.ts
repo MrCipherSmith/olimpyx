@@ -72,12 +72,15 @@ test('authenticated read 401 clears private shell and previously rendered owner 
   });
 
   await page.goto('/?view=rooms');
-  // The room also names a building in the (inert, aria-hidden) city underneath the open Rooms screen;
-  // scope the lookup to the directory list so the assertion matches a single, visible element.
+  // The room also names a building in the inert city underneath the open Rooms screen; scope the lookup
+  // to the directory list so the assertion matches a single, visible element.
   const roomList = page.locator('.room-list');
   await expect(roomList.getByText('Previous owner private room', { exact: true })).toBeVisible();
   rejectProtectedReads = true;
-  await page.getByRole('button', { name: /refresh/i }).click();
+  // The screen's Refresh action reuses the same element as the HUD account's copy (App.tsx `refresh`), so
+  // both are in the DOM; the HUD's copy is inert (CityShell.tsx sets the attribute via a ref, not
+  // aria-hidden) but a role query does not treat that as hidden, so scope to the open screen.
+  await page.locator('.screen-layer').getByRole('button', { name: /refresh/i }).click();
 
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem('olimpyx.session'))).toBeNull();
   await expect(page.getByText('Previous owner private room', { exact: true })).toHaveCount(0);

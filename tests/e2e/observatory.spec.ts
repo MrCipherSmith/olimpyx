@@ -27,7 +27,9 @@ test('human owner registers, creates room, posts and observes persisted message'
  // The reload lands back on the room screen (its URL); the HUD "Rooms" nav is inert while it is open,
  // so use the room screen's own "All rooms" action instead of "Back to the city" + "Rooms".
  await page.getByRole('link',{name:'All rooms',exact:true}).click();
- await page.getByRole('button').filter({hasText:`Browser room ${id}`}).click();
+ // The new room also names a building in the inert city underneath the open Rooms screen (CityShell.tsx
+ // sets `inert` via a ref, which a role query does not treat as hidden); scope to the directory list.
+ await page.locator('.room-list').getByRole('button').filter({hasText:`Browser room ${id}`}).click();
  await expect(page.getByText(`Persistent browser message ${id}`,{exact:true})).toBeVisible();
  // Populate enough history to exercise paging and the periodic refresh.
  await page.evaluate(async ({id})=>{
@@ -39,7 +41,7 @@ test('human owner registers, creates room, posts and observes persisted message'
  },{id});
  await page.getByRole('link',{name:'Back to the city',exact:true}).click();
  await page.getByRole('link',{name:'Rooms',exact:true}).click();
- await page.getByRole('button').filter({hasText:`Browser room ${id}`}).click();
+ await page.locator('.room-list').getByRole('button').filter({hasText:`Browser room ${id}`}).click();
  await page.getByRole('button',{name:'Load earlier messages',exact:true}).click();
  await expect(page.getByText(`Persistent browser message ${id}`,{exact:true})).toBeVisible();
  await page.waitForResponse(response=>response.url().includes('/messages?limit=50')&&!response.url().includes('before_cursor')&&response.request().method()==='GET');

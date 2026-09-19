@@ -77,6 +77,12 @@ test('the city overview is reachable and usable at desktop and mobile widths', a
   // published room appears as a building in the accessible directory.
   await expect(page.getByRole('heading', { name: 'Olimpyx city', exact: true })).toBeAttached();
   await expect(page.getByRole('button').filter({ hasText: room.title })).toBeVisible();
+  // The published knowledge card is reachable from the city too, not only via a direct deep link: the
+  // overview's accessible directory only lists buildings (Library, Pantheon, rooms), not individual cards.
+  await page.getByRole('link', { name: 'Knowledge', exact: true }).click();
+  await expect(page.getByText(card.latest.topic, { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Back to the city', exact: true }).click();
+  await expect(page.locator('.screen-layer')).toHaveCount(0);
   await page.screenshot({ path: 'output/playwright/showcase-overview.png', fullPage: true });
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 });
@@ -164,7 +170,11 @@ test('HUD navigation opens each screen, Back returns to the city, and refresh re
   await page.locator('.room-list .room-row').filter({ hasText: room.title }).click();
   await expect(page.getByText('History revision 0', { exact: true })).toBeVisible();
   revision = 1;
-  await page.getByRole('button', { name: /Refresh/ }).click();
+  // The room screen's own Refresh action reuses the same element reference as the HUD account's copy
+  // (App.tsx / PublicShowcase.tsx `refresh`), so both are in the DOM at once; only the HUD's copy is inert
+  // while the screen is open, but that isn't reflected in the accessibility tree here (CityShell.tsx sets
+  // `inert` via a ref, not aria-hidden), so scope to the open screen to avoid a strict-mode ambiguity.
+  await page.locator('.screen-layer').getByRole('button', { name: /Refresh/ }).click();
   await expect(page.getByText('History revision 1', { exact: true })).toBeVisible();
   await expect(page.getByText('History revision 0', { exact: true })).toHaveCount(0);
 });
@@ -200,6 +210,15 @@ test('all public views, detail pages, and auth forms fit desktop and mobile', as
     ] as const) {
       await page.goto(route);
       await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
+      if (route.includes('card=')) {
+        // The shared screen heading ("Central Library of Knowledge") is the same for every card: it alone
+        // doesn't prove this specific card rendered, so also check the card's own topic heading and a bit
+        // of its content.
+        await expect(page.getByRole('heading', { name: card.latest.topic, exact: true })).toBeVisible();
+        // The same summary text also appears in the (still-visible, split-layout) card list row on wider
+        // viewports, so scope to the detail panel to avoid a strict-mode ambiguity.
+        await expect(page.locator('.card-detail').getByText(card.latest.summary, { exact: true })).toBeVisible();
+      }
       if (route === '/') {
         // No screen open: the primary nav (HUD list or, on a phone, the tab bar) is reachable.
         await expect(page.getByRole('navigation', { name: 'Showcase navigation' })).toBeInViewport();
@@ -237,7 +256,7 @@ test('empty knowledge collection explains that no cards have been published', as
   await expect(page.getByText('No published knowledge matches this filter.')).toHaveCount(0);
 });
 
-test('mobile room prioritizes history and hides the tab bar, directory and "All rooms" while it is open', async ({ page }) => {
+test('mobile room prioritizes history and hides the tab bar and directory while it is open', async ({ page }) => {
   await publicFixture(page);
   await page.route('**/v1/showcase/rooms/*/messages*', route => route.fulfill({ json: {
     data: Array.from({ length: 40 }, (_, index) => ({ ...message, message_id: `focus_${index}`, body: message.body.repeat(6) })),
@@ -249,9 +268,18 @@ test('mobile room prioritizes history and hides the tab bar, directory and "All 
     const history = page.locator('.message-list');
     await expect(history.locator('.message')).toHaveCount(40);
     // W5: on a phone the tab bar is the primary nav, and — like the rest of the HUD — it is inert while
-    // a screen covers the city; only "Back to the city" (in the screen header) can close it.
-    await expect(page.getByRole('navigation')).toHaveCount(0);
-    await expect(page.getByRole('link', { name: 'All rooms', exact: true })).toBeHidden();
+    // a screen covers the city; only "Back to the city" (in the screen header) can close it. CityShell.tsx
+    // sets `inert` on the HUD via a ref rather than aria-hidden, which a role query does not treat as
+    // hidden, so assert the attribute directly instead of expecting zero navigation landmarks.
+    await expect(page.locator('.city-shell-hud')).toHaveAttribute('inert', '');
+    // "All rooms" collapses to a compact, icon-only button rather than disappearing (shell.css): it
+    // duplicates the (inert) tab bar's Rooms tab, but stays the one-tap way back to the room list.
+    const allRooms = page.getByRole('link', { name: 'All rooms', exact: true });
+    await expect(allRooms).toBeVisible();
+    await allRooms.click();
+    await expect(page.locator('.room-list')).toBeVisible();
+    await page.locator('.room-list .room-row').click();
+    await expect(history.locator('.message')).toHaveCount(40);
     expect(await history.evaluate(element => element.clientHeight)).toBeGreaterThan(viewport.height * .55);
     // The room description collapses behind a native <details> disclosure (PROMPT §7 / RoomHeader.tsx).
     await page.getByText('Description', { exact: true }).click();
@@ -263,7 +291,7 @@ test('mobile room prioritizes history and hides the tab bar, directory and "All 
     await expect.poll(() => history.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
     await page.screenshot({ path: `output/playwright/mobile-room-focus-${viewport.width}.png` });
-    // "All rooms" is dropped on a phone: close fully to the city, then reopen the Rooms directory.
+    // Closing fully to the city and reopening the Rooms directory from the tab bar still works too.
     await page.getByRole('link', { name: 'Back to the city', exact: true }).click();
     await expect(page.locator('.screen-layer')).toHaveCount(0);
     await expect(page.getByRole('navigation')).toBeVisible();

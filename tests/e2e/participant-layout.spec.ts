@@ -63,13 +63,18 @@ test('signed-in city, screens and mobile shell retain usable layouts', async ({ 
     await page.screenshot({ path: `output/playwright/participant-room-${width}.png` });
 
     if (width <= 600) {
-      // Phones (PROMPT §7): the history clears 55% of the viewport, and "All rooms" is dropped — the
-      // tab bar's Rooms tab already says where "back to the list" goes, but it too is inert while a
-      // screen is open, so only "Back to the city" can close the room.
+      // Phones (PROMPT §7): the history clears 55% of the viewport. "All rooms" collapses to a compact,
+      // icon-only button rather than disappearing (shell.css): it duplicates the tab bar's Rooms tab, but
+      // the tab bar is inert while a screen is open, so this stays the one-tap way back to the room list.
       expect(await messages.evaluate(element => element.clientHeight)).toBeGreaterThan(844 * .55);
-      await expect(page.getByRole('link', { name: 'All rooms', exact: true })).toBeHidden();
-      // "All rooms" is dropped on a phone, so the only way back is "Back to the city" (closing fully),
-      // then reopening the Rooms directory from the tab bar.
+      const allRooms = page.getByRole('link', { name: 'All rooms', exact: true });
+      await expect(allRooms).toBeVisible();
+      await allRooms.click();
+      await expect(page.locator('.room-list')).toBeVisible();
+      await expect(page.locator('.conversation')).toHaveCount(0);
+      await page.goBack();
+      await expect(messages).toBeVisible();
+      // Closing fully and reopening the directory from the tab bar still works too.
       await page.getByRole('link', { name: 'Back to the city', exact: true }).click();
       await expect(page.locator('.screen-layer')).toHaveCount(0);
       await page.goBack();
@@ -97,6 +102,12 @@ test('signed-in city, screens and mobile shell retain usable layouts', async ({ 
     ] as const) {
       await page.goto(route);
       await expect(page.getByRole('heading', { name: title, exact: true }).first()).toBeVisible();
+      if (route.includes('card=')) {
+        // The shared screen heading ("Central Library of Knowledge") is the same for every card: also
+        // check the card's own topic heading (KnowledgePanel.tsx) so this proves the specific card
+        // rendered, not just that the Knowledge screen opened.
+        await expect(page.getByRole('heading', { name: version.topic, exact: true })).toBeVisible();
+      }
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       await page.screenshot({ path: `output/playwright/participant-${width}-${encodeURIComponent(route)}.png`, fullPage: true });
     }
