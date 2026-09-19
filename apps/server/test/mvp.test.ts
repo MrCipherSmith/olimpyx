@@ -129,6 +129,50 @@ test("public rooms, durable inbox cursor and atomic idempotency", async (t) => {
   assert.equal(new Set([...pageOne.json().data, ...pageTwo.json().data].map((message: { message_id: string }) => message.message_id)).size, 4);
 });
 
+test("room, task, and report rows are stamped with created_at === updated_at (single clock read per insert)", async (t) => {
+  if (!pgAvailable || !app) { t.skip("PostgreSQL is not reachable at " + baseUrl); return; }
+  // Fully self-contained owner/agent so this test never shares a report target or incident
+  // with other tests in this file (e.g. the spam-watcher and moderation tests key off agentId).
+  const reg = await app.inject({ method: "POST", url: "/v1/owners/register", headers: { "idempotency-key": "ts-owner-register" }, payload: { email: "ts-owner@example.test", password: "very secure password", display_name: "Timestamp Owner" } });
+  const tsOwnerToken = reg.json().data.access_token;
+  const enrollment = await app.inject({ method: "POST", url: "/v1/owners/me/enrollment-tokens", headers: mutate(tsOwnerToken, "ts-enroll-code"), payload: {} });
+  const enrolled = await app.inject({ method: "POST", url: "/v1/agents/enroll", headers: { "idempotency-key": "ts-enroll-agent" }, payload: { enrollment_token: enrollment.json().data.enrollment_token, installation_id: "ts-install-1", profile: { name: "TsAgent", role: "tester", bio: "", interests: [], capabilities: [] } } });
+  const tsAgentId = enrolled.json().data.agent.agent_id;
+
+  // Compared at full ::text (microsecond) precision -- the JSON API response and node-pg's
+  // parsed Date both truncate to milliseconds, which would mask two clock_timestamp() calls
+  // that land in the same millisecond (common on a fast local Postgres) even though they are
+  // genuinely two distinct reads.
+
+  // room_create is capped at 10/day per owner (LIMITS.room_create.owner); stay comfortably
+  // under that with a fresh owner instead of hitting the registration rate limiter with more
+  // disposable owners (registration is IP-rate-limited across the whole test file).
+  let roomId = "";
+  for (let i = 0; i < 9; i++) {
+    const room = await app.inject({ method: "POST", url: "/v1/rooms", headers: mutate(tsOwnerToken, `ts-room-${i}`), payload: { title: `Timestamp room ${i}` } });
+    assert.equal(room.statusCode, 201);
+    const row = (await app.pg.query("SELECT created_at::text a, updated_at::text b FROM rooms WHERE id=$1", [room.json().data.room_id])).rows[0];
+    assert.equal(row.a, row.b, `room ${i}: created_at (${row.a}) must equal updated_at (${row.b})`);
+    if (i === 0) roomId = room.json().data.room_id;
+  }
+
+  for (let i = 0; i < 8; i++) {
+    const task = await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/tasks`, headers: mutate(tsOwnerToken, `ts-task-${i}`), payload: { assigned_agent_id: tsAgentId, title: `Timestamp task ${i}`, description: "check" } });
+    assert.equal(task.statusCode, 201);
+    const row = (await app.pg.query("SELECT created_at::text a, updated_at::text b FROM tasks WHERE id=$1", [task.json().data.task_id])).rows[0];
+    assert.equal(row.a, row.b, `task ${i}: created_at (${row.a}) must equal updated_at (${row.b})`);
+  }
+
+  for (let i = 0; i < 8; i++) {
+    const sent = await app.inject({ method: "POST", url: `/v1/rooms/${roomId}/messages`, headers: mutate(tsOwnerToken, `ts-report-msg-${i}`), payload: { body: `report target ${i}` } });
+    const messageId = sent.json().data.message_id;
+    const report = await app.inject({ method: "POST", url: "/v1/reports", headers: mutate(tsOwnerToken, `ts-report-${i}`), payload: { target: { kind: "message", id: messageId }, category: "spam", explanation: "Timestamp check" } });
+    assert.equal(report.statusCode, 201);
+    const row = (await app.pg.query("SELECT created_at::text a, updated_at::text b FROM reports WHERE id=$1", [report.json().data.report_id])).rows[0];
+    assert.equal(row.a, row.b, `report ${i}: created_at (${row.a}) must equal updated_at (${row.b})`);
+  }
+});
+
 test("knowledge versions are immutable and confirmation is sticky", async (t) => {
   if (!pgAvailable || !app) { t.skip("PostgreSQL is not reachable at " + baseUrl); return; }
   const card = await app.inject({ method: "POST", url: "/v1/knowledge/cards", headers: mutate(sessionToken, "card-1"), payload: { topic: "Cells", summary: "summary", body: "body", sources: [], references: [] } });

@@ -130,8 +130,14 @@ async function main() {
     // Cache this agent's owner id locally (budget.js isOwnTaskRoom/evaluateHelpPolicy
     // need it to tell "this agent's own owner" apart from any other owner in a shared
     // room -- see PRD §3.4). Best-effort: a config write failure here must not fail login.
-    if (result.data.owner?.owner_id) {
-      try { await state.saveConfig({ ...config, ownerId: result.data.owner.owner_id }); } catch { /* best-effort */ }
+    // Only adopt the logged-in owner's id when it's safe to: either no agent is enrolled
+    // yet locally (nothing to mix up), or it matches the already-cached ownerId. If an
+    // agent is already enrolled under a *different* owner, keep the existing ownerId --
+    // owner-login must never silently swap which owner an already-enrolled agent's "own
+    // owner" is believed to be.
+    const loggedInOwnerId = result.data.owner?.owner_id;
+    if (loggedInOwnerId && (!config.agentId || config.ownerId === loggedInOwnerId)) {
+      try { await state.saveConfig({ ...config, ownerId: loggedInOwnerId }); } catch { /* best-effort */ }
     }
     output({ owner: result.data.owner, expires_at: result.data.expires_at }); return;
   }
@@ -141,16 +147,16 @@ async function main() {
     const config = await state.loadConfig();
     const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
     const owner = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
-    // Resolve this agent's own owner id once and cache it locally (see owner-login above);
-    // `owner-login` normally already cached it, but `enroll` can also run with only
-    // OLIMPYX_OWNER_TOKEN set (no local owner-login), so fetch it here as a fallback.
-    let ownerId = config.ownerId ?? null;
-    if (!ownerId) {
-      try {
-        const me = await owner.request('GET', '/v1/owners/me');
-        ownerId = me?.data?.owner_id ?? null;
-      } catch { /* best-effort: local budget owner-scoping falls back to not-own until resolved */ }
-    }
+    // Always resolve this agent's own owner id from the owner token, even when config.ownerId
+    // is already cached: enroll is what actually binds this installation's agent to an owner,
+    // so a stale or previously-mismatched cached value must not be trusted here -- the owner
+    // token is already in hand, so re-resolving it via GET /v1/owners/me costs one request and
+    // guarantees ownerId always reflects the owner actually performing this enrollment.
+    let ownerId = null;
+    try {
+      const me = await owner.request('GET', '/v1/owners/me');
+      ownerId = me?.data?.owner_id ?? null;
+    } catch { /* best-effort: local budget owner-scoping falls back to not-own until resolved */ }
     const enrollment = await owner.request('POST', '/v1/owners/me/enrollment-tokens', { label: option('label', 'local CLI') }, { headers: { 'idempotency-key': crypto.randomUUID() } });
     const installationId = config.installationId ?? crypto.randomUUID();
     const result = await owner.request('POST', '/v1/agents/enroll', { enrollment_token: enrollment.data.enrollment_token, installation_id: installationId, profile }, { token: null, headers: { 'idempotency-key': crypto.randomUUID() } });
@@ -420,6 +426,10 @@ async function main() {
     const startTime = Date.now();
     try {
       const { client, local } = await activeClient(callerId);
+      // Local participation budget (PRD §3.4): `wait` doesn't enforce session_minutes itself
+      // (only `listen` does), but it must still touch the ledger's last-seen tracking so a
+      // wait-only session's elapsed time isn't silently lost -- see budget.js checkSessionBudget.
+      await checkSessionBudget(state.root, local.session_id);
       const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs });
       const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor;
       await state.renewSession(callerId, { inbox_cursor: cursor });

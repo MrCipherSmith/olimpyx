@@ -585,3 +585,34 @@ test('wait keeps ordinary local validation errors (no --caller-id) on the plain 
   assert.match(res.stderr, /--caller-id is required/);
   await rm(root, { recursive: true, force: true });
 });
+
+// Q-016 review finding: a session tracked only via `wait` (never `listen`) lost all of its
+// elapsed time toward session_minutes, because only `listen` touched the budget ledger. `wait`
+// must also update the ledger's last-seen tracking for the active session.
+test('wait touches the local session_minutes ledger so a wait-only session is not silently lost', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-wait-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await baseSessionFiles(stateDir);
+  await writeFile(join(stateDir, 'budget.json'), JSON.stringify({ help: 'on', contacts: [], session_minutes: 60 }));
+
+  const preloadPath = join(root, 'mock.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/inbox/events')) {
+        return new Response(JSON.stringify({ data: [], page: { next_cursor: 'c0' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const res = await run(['wait', '--caller-id', 'call_1', '--timeout-ms', '10'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+
+  const ledger = JSON.parse(await readFile(join(stateDir, 'budget-ledger.json'), 'utf8'));
+  assert.equal(ledger.session_id, 'ses_1');
+  assert.ok(ledger.session_started_at, 'wait must start tracking session_started_at for the active session');
+  assert.ok(ledger.last_seen_at, 'wait must record last_seen_at so the session\'s elapsed time is not lost');
+  await rm(root, { recursive: true, force: true });
+});

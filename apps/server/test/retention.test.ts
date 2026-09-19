@@ -152,6 +152,33 @@ test("sessions: past-retention rows are pruned but each agent's most-recent sess
   assert.equal(await rowExists("sessions", "id", withinRetention), true, "session inside the retention window is kept");
 });
 
+test("sessions: two sessions with identical last_heartbeat_at -> exactly one is kept (deterministic id tie-break)", async (t) => {
+  if (!ready(t)) return;
+  const owner = await makeOwner("tie");
+  const agent = await makeAgent(owner, "tie");
+  const a = `ses_${randomUUID().replaceAll("-", "")}`;
+  const b = `ses_${randomUUID().replaceAll("-", "")}`;
+  // Both rows are inserted by the same INSERT statement, so `now()` (constant for the whole
+  // statement/transaction) gives them a genuinely identical last_heartbeat_at -- a real tie, not
+  // just two close-but-different values. Without an id tie-break in the "latest" subquery,
+  // Postgres may pick either as "latest" and can then delete the other, wrongly leaving zero rows.
+  await app!.pg.query(
+    `INSERT INTO sessions(id,agent_id,token_hash,host,persona_revision,expires_at,last_heartbeat_at,ended_at,created_at)
+     VALUES
+       ($1,$3,'th_a','{}'::jsonb,1, now() - interval '40 days' + interval '1 hour', now() - interval '40 days', now() - interval '40 days', now() - interval '40 days'),
+       ($2,$3,'th_b','{}'::jsonb,1, now() - interval '40 days' + interval '1 hour', now() - interval '40 days', now() - interval '40 days', now() - interval '40 days')`,
+    [a, b, agent]
+  );
+  const tie = await app!.pg.query("SELECT last_heartbeat_at FROM sessions WHERE id=ANY($1)", [[a, b]]);
+  assert.equal(tie.rows[0].last_heartbeat_at.getTime(), tie.rows[1].last_heartbeat_at.getTime(), "fixture setup must produce a genuine tie");
+
+  const result = await pruneOnce(app!.pg, {});
+  assert.equal(result.skipped, false);
+  const aExists = await rowExists("sessions", "id", a);
+  const bExists = await rowExists("sessions", "id", b);
+  assert.notEqual(aExists, bExists, "exactly one of the two tied sessions must remain, never zero or both");
+});
+
 test("sessions: boundary just before/after OLIMPYX_RETENTION_SESSIONS_DAYS", async (t) => {
   if (!ready(t)) return;
   const owner = await makeOwner("s2");
@@ -273,11 +300,13 @@ test("two concurrent pruneOnce calls: exactly one skips (global advisory lock)",
   assert.equal(afterRelease.skipped, false, "once the other replica's lock is released, pruning must proceed");
 });
 
-test("migration adds the (agent_id, last_heartbeat_at DESC) index the session prune relies on", async (t) => {
+test("migration adds the (agent_id, last_heartbeat_at DESC, id DESC) index the session prune relies on", async (t) => {
   if (!ready(t)) return;
-  const def = (await app!.pg.query("SELECT indexdef FROM pg_indexes WHERE schemaname=$1 AND indexname='idx_sessions_agent_heartbeat'", [schema])).rows[0]?.indexdef as string | undefined;
-  assert.ok(def, "idx_sessions_agent_heartbeat must exist");
-  assert.match(def, /\(agent_id, last_heartbeat_at DESC\)/);
+  const def = (await app!.pg.query("SELECT indexdef FROM pg_indexes WHERE schemaname=$1 AND indexname='idx_sessions_agent_heartbeat_id'", [schema])).rows[0]?.indexdef as string | undefined;
+  assert.ok(def, "idx_sessions_agent_heartbeat_id must exist");
+  assert.match(def, /\(agent_id, last_heartbeat_at DESC, id DESC\)/);
+  const old = (await app!.pg.query("SELECT 1 FROM pg_indexes WHERE schemaname=$1 AND indexname='idx_sessions_agent_heartbeat'", [schema])).rows[0];
+  assert.equal(old, undefined, "the superseded index (without the id tie-break) must be dropped");
 });
 
 test("batched deletes: a small batch size loops until nothing is left and still reports full counts", async (t) => {

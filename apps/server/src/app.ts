@@ -168,7 +168,10 @@ export async function migrate(databaseUrl: string) {
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_agent_seq ON inbox_events(agent_id, sequence) WHERE agent_id IS NOT NULL",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_inbox_events_owner_seq ON inbox_events(owner_id, sequence) WHERE owner_id IS NOT NULL",
     // Retention keeps each agent's latest session: the per-row "latest" probe needs this index (Q-016).
-    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_agent_heartbeat ON sessions(agent_id, last_heartbeat_at DESC)"
+    // Superseded by idx_sessions_agent_heartbeat_id below, which adds an `id DESC` tie-break so the
+    // "latest" subquery in retention.ts is deterministic when two sessions share last_heartbeat_at.
+    "DROP INDEX CONCURRENTLY IF EXISTS idx_sessions_agent_heartbeat",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_agent_heartbeat_id ON sessions(agent_id, last_heartbeat_at DESC, id DESC)"
   ];
   for (const idx of indexes) {
     try {
@@ -663,7 +666,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:201,data:await consolidate(c,a.p,a.aid,req.body as any)}))});
   app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:200,data:await rollbackInfluences(c,a.p,a.aid,req.body as any)}))});
 
-  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("INSERT INTO rooms VALUES($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp()) RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
+  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO rooms SELECT $1,$2,$3,$4,$5,$6,t.c,t.c FROM t RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
   app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
   app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}}});
   app.get("/v1/rooms/:roomId/messages",async(req,reply)=>{
@@ -1594,7 +1597,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`agent:${assignee}`]);
     const cap=limits.capacity.open_tasks_per_assignee;
     if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2)",[assignee,TERMINAL_TASK])).rows[0].n)>=cap)throw new ApiError(409,"assignee_at_capacity",`The assignee already has ${cap} open tasks`,{limit:cap});
-    const r=await client.query("INSERT INTO tasks VALUES($1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,clock_timestamp(),clock_timestamp()) RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
+    const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO tasks SELECT $1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,t.c,t.c FROM t RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
     await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed"});
     return{status:201,data:taskFrom(r.rows[0])}})});
   app.get("/v1/rooms/:roomId/tasks",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE room_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).roomId,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(taskFrom),page:{next_cursor:null}}});
@@ -1676,7 +1679,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       }
 
       const ownerId = subject.owner_id, agentId = subject.agent_id ?? null;
-      await client.query("INSERT INTO reports VALUES($1,$2,$3,$4,$5,$6,$7,'escalated',clock_timestamp(),clock_timestamp())", [rid, p.type, p.id, b.target.kind, b.target.id, b.category, b.explanation]);
+      await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO reports SELECT $1,$2,$3,$4,$5,$6,$7,'escalated',t.c,t.c FROM t", [rid, p.type, p.id, b.target.kind, b.target.id, b.category, b.explanation]);
       await client.query("INSERT INTO incidents(id,report_id,owner_id,agent_id) VALUES($1,$2,$3,$4)", [iid, rid, ownerId, agentId]);
       await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'moderation.updated','incident',$3)", [id("evt"), ownerId, iid]);
       return { status: 201, data: { report_id: rid, status: "escalated", created_at: now() } };

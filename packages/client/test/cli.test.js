@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,6 +83,136 @@ test('login and enrollment serialize credentials only to private files', async (
   const ended = await run(['session', 'end'], { cwd: root, preload: preloadPath });
   assert.equal(ended.status, 0, ended.stderr);
 
+  await rm(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Q-016 review finding: a cached config.ownerId must never be trusted blindly --
+// `enroll` must always re-resolve it from the owner token, and `owner-login` must
+// never silently swap it out from under an already-enrolled agent.
+// ---------------------------------------------------------------------------
+
+test('enroll always resolves ownerId from GET /v1/owners/me, even when config.ownerId is already cached, and stores the fresh value', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-ownerid-'));
+  const stateRoot = join(root, '.olimpyx');
+  await mkdir(stateRoot, { recursive: true });
+  // Pre-seed a stale cached ownerId, as if this installation enrolled long ago under a
+  // different (or since-changed) owner mapping.
+  await writeFile(join(stateRoot, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test', ownerId: 'own_stale' }));
+  await writeFile(join(stateRoot, 'owner-credential'), 'owner-token-for-enroll', { mode: 0o600 });
+
+  const callCountPath = join(root, 'owners-me-calls.json');
+  await writeFile(callCountPath, '0');
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    import { readFileSync, writeFileSync } from 'node:fs';
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      const headers = { 'content-type': 'application/json' };
+      if (u.includes('/v1/owners/me/enrollment-tokens')) {
+        return new Response(JSON.stringify({ data: { enrollment_token: 'one-use-enrollment-secret', expires_at: '2099-01-01T00:00:00Z' } }), { headers });
+      }
+      if (u.includes('/v1/owners/me')) {
+        const n = Number(readFileSync('${callCountPath}', 'utf8')) + 1;
+        writeFileSync('${callCountPath}', String(n));
+        return new Response(JSON.stringify({ data: { owner_id: 'own_fresh', email: 'owner@example.test', display_name: 'Owner' } }), { headers });
+      }
+      if (u.includes('/v1/agents/enroll')) {
+        return new Response(JSON.stringify({ data: { agent: { agent_id: 'agt_fresh', profile_revision: 1 }, agent_token: 'agent-token-fresh', created_at: '2026-09-19T00:00:00Z' } }), { headers });
+      }
+      return new Response(JSON.stringify({ error: { message: 'missing ' + u } }), { status: 404, headers });
+    };
+  `);
+
+  const profile = JSON.stringify({ name: 'Nova', role: 'tester', bio: '', interests: [], capabilities: [] });
+  const enroll = await run(['enroll', '--profile', profile], { cwd: root, preload: preloadPath, env: { OLIMPYX_OWNER_TOKEN: 'owner-token-for-enroll' } });
+  assert.equal(enroll.status, 0, enroll.stderr);
+
+  const calls = Number(await readFile(callCountPath, 'utf8'));
+  assert.equal(calls, 1, 'enroll must call GET /v1/owners/me even though config.ownerId was already cached');
+
+  const config = JSON.parse(await readFile(join(stateRoot, 'config.json'), 'utf8'));
+  assert.equal(config.ownerId, 'own_fresh', 'the stale cached ownerId must be overwritten with the freshly resolved value');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('owner-login keeps the existing ownerId when an agentId is already enrolled and the logged-in owner differs (never mixes owners)', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-ownerid-'));
+  const stateRoot = join(root, '.olimpyx');
+  await mkdir(stateRoot, { recursive: true });
+  await writeFile(join(stateRoot, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test', agentId: 'agt_1', ownerId: 'own_A' }));
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      const headers = { 'content-type': 'application/json' };
+      if (u.includes('/v1/owners/login')) {
+        return new Response(JSON.stringify({ data: { owner: { owner_id: 'own_B', email: 'other-owner@example.test', display_name: 'Other Owner' }, access_token: 'owner-b-token', expires_at: '2099-01-01T00:00:00Z' } }), { headers });
+      }
+      return new Response(JSON.stringify({ error: { message: 'missing ' + u } }), { status: 404, headers });
+    };
+  `);
+
+  const login = await run(['owner-login', '--email', 'other-owner@example.test', '--password-stdin'], { cwd: root, input: 'a-safe-password\n', preload: preloadPath });
+  assert.equal(login.status, 0, login.stderr);
+
+  const config = JSON.parse(await readFile(join(stateRoot, 'config.json'), 'utf8'));
+  assert.equal(config.ownerId, 'own_A', 'ownerId must not be overwritten by a different owner\'s login while agentId is enrolled under own_A');
+  assert.equal(config.agentId, 'agt_1');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('owner-login sets ownerId when there is no agentId yet (fresh install, safe to adopt)', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-ownerid-'));
+  const stateRoot = join(root, '.olimpyx');
+  await mkdir(stateRoot, { recursive: true });
+  await writeFile(join(stateRoot, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      const headers = { 'content-type': 'application/json' };
+      if (u.includes('/v1/owners/login')) {
+        return new Response(JSON.stringify({ data: { owner: { owner_id: 'own_C', email: 'c@example.test', display_name: 'Owner C' }, access_token: 'owner-c-token', expires_at: '2099-01-01T00:00:00Z' } }), { headers });
+      }
+      return new Response(JSON.stringify({ error: { message: 'missing ' + u } }), { status: 404, headers });
+    };
+  `);
+
+  const login = await run(['owner-login', '--email', 'c@example.test', '--password-stdin'], { cwd: root, input: 'a-safe-password\n', preload: preloadPath });
+  assert.equal(login.status, 0, login.stderr);
+
+  const config = JSON.parse(await readFile(join(stateRoot, 'config.json'), 'utf8'));
+  assert.equal(config.ownerId, 'own_C', 'a fresh install (no agentId yet) may freely adopt the logged-in owner id');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('owner-login re-sets ownerId when the logged-in owner matches the already-cached ownerId', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-ownerid-'));
+  const stateRoot = join(root, '.olimpyx');
+  await mkdir(stateRoot, { recursive: true });
+  await writeFile(join(stateRoot, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test', agentId: 'agt_1', ownerId: 'own_A' }));
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      const headers = { 'content-type': 'application/json' };
+      if (u.includes('/v1/owners/login')) {
+        return new Response(JSON.stringify({ data: { owner: { owner_id: 'own_A', email: 'a@example.test', display_name: 'Owner A' }, access_token: 'owner-a-token', expires_at: '2099-01-01T00:00:00Z' } }), { headers });
+      }
+      return new Response(JSON.stringify({ error: { message: 'missing ' + u } }), { status: 404, headers });
+    };
+  `);
+
+  const login = await run(['owner-login', '--email', 'a@example.test', '--password-stdin'], { cwd: root, input: 'a-safe-password\n', preload: preloadPath });
+  assert.equal(login.status, 0, login.stderr);
+
+  const config = JSON.parse(await readFile(join(stateRoot, 'config.json'), 'utf8'));
+  assert.equal(config.ownerId, 'own_A');
+  assert.equal(config.agentId, 'agt_1');
   await rm(root, { recursive: true, force: true });
 });
 

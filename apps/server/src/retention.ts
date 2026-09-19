@@ -66,10 +66,14 @@ export async function pruneOnce(pool: Pool, env: Record<string, string | undefin
 
       // Keeps each agent's single most-recent session (by last_heartbeat_at) regardless of age, so
       // last_seen_at (max(last_heartbeat_at) over an agent's sessions, used by profileFrom) never regresses to null.
-      // The per-agent "latest" lookup is an index probe on idx_sessions_agent_heartbeat (agent_id, last_heartbeat_at DESC).
+      // The per-agent "latest" lookup is an index probe on idx_sessions_agent_heartbeat_id (agent_id, last_heartbeat_at DESC, id DESC).
+      // The `id DESC` tie-break makes "latest" deterministic when two sessions share the exact same
+      // last_heartbeat_at (e.g. both stamped by the same clock_timestamp() read): without it, Postgres
+      // may pick either row for the kept exception, and the *other* tied row would then be deleted from
+      // under whichever caller believed it was the kept one.
       const sessions = await deleteInBatches(client, "sessions", "s",
         `coalesce(s.ended_at, least(s.expires_at, s.last_heartbeat_at + interval '90 seconds')) < now() - make_interval(days => $2::int)
-         AND s.id <> (SELECT x.id FROM sessions x WHERE x.agent_id = s.agent_id ORDER BY x.last_heartbeat_at DESC LIMIT 1)`,
+         AND s.id <> (SELECT x.id FROM sessions x WHERE x.agent_id = s.agent_id ORDER BY x.last_heartbeat_at DESC, x.id DESC LIMIT 1)`,
         [sessionsDays], batchSize);
 
       // Only acknowledged events are eligible: agent events against the ('agent', agent_id) checkpoint,

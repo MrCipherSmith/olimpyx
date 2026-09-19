@@ -446,3 +446,70 @@ test('checkSessionBeginBudget ignores session history older than the trailing 24
   assert.equal(result.elapsedMinutes, 0);
   await rm(root, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// session_minutes: time must not be lost on crash, on a repeated `session begin`
+// without `session end`, or for a wait-only session (Q-016 review finding).
+// ---------------------------------------------------------------------------
+
+test('checkSessionBudget updates last-seen tracking on every call, so elapsed time keeps advancing across repeated polls (e.g. wait)', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { session_minutes: 10 });
+  const start = Date.now();
+  await checkSessionBudget(root, 'ses_1', { now: start });
+  // A second call for the *same* session (as a plain `wait` would trigger, not just `listen`)
+  // must not reset session_started_at -- elapsed keeps growing from the original start.
+  const later = await checkSessionBudget(root, 'ses_1', { now: start + 9 * 60_000 });
+  assert.equal(later.startedAt, start);
+  assert.equal(later.elapsedMinutes, 9);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('checkSessionBeginBudget counts a still-open (never cleanly ended) tracked session toward the 24h cumulative total -- a repeated `session begin` without `session end` must not lose that time', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { session_minutes: 30 });
+  const start = Date.now();
+  // ses_1 is tracked (as `listen`/`wait` would) but session end is never called -- simulates a
+  // repeated `session begin` where the previous session was never cleanly torn down.
+  await checkSessionBudget(root, 'ses_1', { now: start });
+  await checkSessionBudget(root, 'ses_1', { now: start + 20 * 60_000 });
+  const beforeNextBegin = await checkSessionBeginBudget(root, { now: start + 20 * 60_000 });
+  assert.equal(beforeNextBegin.exhausted, false);
+  assert.equal(beforeNextBegin.elapsedMinutes, 20, 'the still-open session\'s tracked time must count toward the cumulative total');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('crash recovery: a session tracked via checkSessionBudget but never ended is archived (using its last tracked activity) once a new session_id is observed', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { session_minutes: 30 });
+  const start = Date.now();
+  // ses_1 crashes after being observed at start and again at start+20min -- no `session end`,
+  // no `recordSessionEnd` call. Simulate the crash gap: real time passes (e.g. 3 hours) before
+  // the agent runs `session begin` again and starts tracking ses_2.
+  await checkSessionBudget(root, 'ses_1', { now: start });
+  await checkSessionBudget(root, 'ses_1', { now: start + 20 * 60_000 });
+  const crashGapLater = start + 3 * 60 * 60_000;
+  await checkSessionBudget(root, 'ses_2', { now: crashGapLater });
+
+  // ses_1's archived span must reflect its last observed activity (20 minutes), not the 3-hour
+  // gap until ses_2 was first observed -- otherwise a crash would inflate, not lose, the total.
+  const afterSwitch = await checkSessionBeginBudget(root, { now: crashGapLater });
+  assert.equal(afterSwitch.elapsedMinutes, 20, 'only the crashed session\'s last-observed elapsed time should be archived, not the crash gap');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('recordSessionEnd clears the tracked session so a later switch never double-archives it', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { session_minutes: 100 });
+  const start = Date.now();
+  await checkSessionBudget(root, 'ses_1', { now: start });
+  await recordSessionEnd(root, 'ses_1', { now: start + 20 * 60_000 });
+
+  // Switching to ses_2 must not re-archive ses_1 a second time (it was already archived above).
+  await checkSessionBudget(root, 'ses_2', { now: start + 21 * 60_000 });
+  await checkSessionBudget(root, 'ses_2', { now: start + 25 * 60_000 });
+
+  const result = await checkSessionBeginBudget(root, { now: start + 25 * 60_000 });
+  assert.equal(result.elapsedMinutes, 24, 'ses_1 (20min, archived once) + ses_2 (4min, still open) = 24, not 44');
+  await rm(root, { recursive: true, force: true });
+});

@@ -248,34 +248,6 @@ export async function enforceSendBudget(client, root, { agentId, ownerId, kind, 
   return { budget };
 }
 
-async function ensureSessionLedger(root, sessionId, now) {
-  const ledger = await loadLedger(root);
-  let changed = false;
-  if (ledger.session_id !== sessionId) {
-    ledger.session_id = sessionId;
-    ledger.session_started_at = now;
-    changed = true;
-  } else if (!ledger.session_started_at) {
-    ledger.session_started_at = now;
-    changed = true;
-  }
-  if (changed) await saveLedger(root, ledger);
-  return ledger.session_started_at;
-}
-
-/**
- * Tracks elapsed local-session time against `session_minutes`, keyed to `sessionId`
- * so a fresh `session begin` resets the clock. Returns `{ exhausted: false }`
- * immediately when there's no budget.json or no session_minutes set.
- */
-export async function checkSessionBudget(root, sessionId, { now = Date.now() } = {}) {
-  const budget = await loadBudget(root);
-  if (!budget?.session_minutes || !sessionId) return { exhausted: false };
-  const startedAt = await ensureSessionLedger(root, sessionId, now);
-  const elapsedMinutes = (now - startedAt) / 60_000;
-  return { exhausted: elapsedMinutes >= budget.session_minutes, startedAt, elapsedMinutes, limitMinutes: budget.session_minutes };
-}
-
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function pruneSessionHistory(history, now) {
@@ -283,13 +255,59 @@ function pruneSessionHistory(history, now) {
 }
 
 /**
+ * Tracks the currently-observed session in the ledger and keeps `last_seen_at` current --
+ * called by every budget-checked command (`listen` and `wait`, via checkSessionBudget) so
+ * elapsed time reflects the last moment activity was actually observed, not just the moment
+ * a session began. When `sessionId` differs from the ledger's tracked session, the previous
+ * one is archived into `session_history` first, using *its* last-seen time as the end point
+ * (not `now`) -- so a session that crashed or was never cleanly ended (no `session end` /
+ * `recordSessionEnd`) still contributes its real observed elapsed time instead of either the
+ * full crash-to-restart gap or nothing at all. A session already archived by `recordSessionEnd`
+ * (which clears the tracked fields) is never re-archived here.
+ */
+async function touchSession(root, sessionId, now) {
+  const ledger = await loadLedger(root);
+  if (ledger.session_id !== sessionId) {
+    if (ledger.session_id && ledger.session_started_at) {
+      const endedAt = ledger.last_seen_at ?? ledger.session_started_at;
+      const history = pruneSessionHistory(ledger.session_history, now);
+      history.push({ session_id: ledger.session_id, started_at: ledger.session_started_at, ended_at: endedAt });
+      ledger.session_history = history;
+    }
+    ledger.session_id = sessionId;
+    ledger.session_started_at = now;
+  } else if (!ledger.session_started_at) {
+    ledger.session_started_at = now;
+  }
+  ledger.last_seen_at = now;
+  await saveLedger(root, ledger);
+  return ledger.session_started_at;
+}
+
+/**
+ * Tracks elapsed local-session time against `session_minutes`, keyed to `sessionId`
+ * so a fresh `session begin` resets the clock. Returns `{ exhausted: false }`
+ * immediately when there's no budget.json or no session_minutes set. Every call
+ * (from `listen` or `wait`) advances the ledger's `last_seen_at` (see `touchSession`).
+ */
+export async function checkSessionBudget(root, sessionId, { now = Date.now() } = {}) {
+  const budget = await loadBudget(root);
+  if (!budget?.session_minutes || !sessionId) return { exhausted: false };
+  const startedAt = await touchSession(root, sessionId, now);
+  const elapsedMinutes = (now - startedAt) / 60_000;
+  return { exhausted: elapsedMinutes >= budget.session_minutes, startedAt, elapsedMinutes, limitMinutes: budget.session_minutes };
+}
+
+/**
  * Archives a just-finished session's tracked elapsed time into the rolling 24h ledger
  * history (`session_history`), so `checkSessionBeginBudget` can see it after the ledger
  * moves on to a new `session_id`. Only archives when the ledger was actively tracking
- * `sessionId` (i.e. `checkSessionBudget`/`listen` observed it at least once) -- a session
- * that never polled `listen` has nothing local to archive. Call this from `session end`
- * and from any teardown that ends a session (e.g. `listen`'s SIGINT/SIGTERM handler).
- * Best-effort: swallows errors so a failed archive never blocks session teardown.
+ * `sessionId` (i.e. `checkSessionBudget`/`listen`/`wait` observed it at least once) -- a
+ * session that never polled either has nothing local to archive. Call this from `session
+ * end` and from any teardown that ends a session (e.g. `listen`'s SIGINT/SIGTERM handler).
+ * Clears the ledger's tracked session afterward so a later `touchSession` switch never
+ * re-archives the same span a second time. Best-effort: swallows errors so a failed
+ * archive never blocks session teardown.
  */
 export async function recordSessionEnd(root, sessionId, { now = Date.now() } = {}) {
   if (!sessionId) return;
@@ -298,7 +316,7 @@ export async function recordSessionEnd(root, sessionId, { now = Date.now() } = {
     if (ledger.session_id !== sessionId || !ledger.session_started_at) return;
     const history = pruneSessionHistory(ledger.session_history, now);
     history.push({ session_id: sessionId, started_at: ledger.session_started_at, ended_at: now });
-    await saveLedger(root, { ...ledger, session_history: history });
+    await saveLedger(root, { ...ledger, session_id: null, session_started_at: null, last_seen_at: null, session_history: history });
   } catch {
     // best-effort
   }
@@ -307,10 +325,12 @@ export async function recordSessionEnd(root, sessionId, { now = Date.now() } = {
 /**
  * `session begin` (PRD §3.4: the CLI enforces the local budget "on listen and session"):
  * refuses locally, before any network call, when this agent's cumulative tracked
- * participation time across sessions in the trailing 24h (archived by `recordSessionEnd`)
- * already meets or exceeds `session_minutes`. This is distinct from `checkSessionBudget`,
- * which bounds a single already-running session; this bounds how much a *new* session is
- * allowed to begin after previous sessions already used up the daily allowance. A no-op
+ * participation time across sessions in the trailing 24h -- archived by `recordSessionEnd`,
+ * plus whatever the *currently* tracked session has accrued even though it was never cleanly
+ * ended -- already meets or exceeds `session_minutes`. This is distinct from
+ * `checkSessionBudget`, which bounds a single already-running session; this bounds how much
+ * a *new* session is allowed to begin after previous sessions already used up the daily
+ * allowance, including one still open from a crash or a missed `session end`. A no-op
  * (never exhausted) without a budget.json or without `session_minutes` set.
  */
 export async function checkSessionBeginBudget(root, { now = Date.now() } = {}) {
@@ -318,6 +338,11 @@ export async function checkSessionBeginBudget(root, { now = Date.now() } = {}) {
   if (!budget?.session_minutes) return { exhausted: false };
   const ledger = await loadLedger(root);
   const history = pruneSessionHistory(ledger.session_history, now);
-  const elapsedMinutes = history.reduce((sum, entry) => sum + Math.max(0, entry.ended_at - entry.started_at), 0) / 60_000;
+  let elapsedMs = history.reduce((sum, entry) => sum + Math.max(0, entry.ended_at - entry.started_at), 0);
+  if (ledger.session_id && ledger.session_started_at) {
+    const trackedEnd = ledger.last_seen_at ?? ledger.session_started_at;
+    elapsedMs += Math.max(0, trackedEnd - ledger.session_started_at);
+  }
+  const elapsedMinutes = elapsedMs / 60_000;
   return { exhausted: elapsedMinutes >= budget.session_minutes, elapsedMinutes, limitMinutes: budget.session_minutes };
 }
