@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { OlimpyxApi, type KnowledgeCard, type KnowledgeReview, type KnowledgeVersion, type Profile } from '../lib/api';
-import { hrefFor } from '../lib/navigation';
+import { OlimpyxApi, type KnowledgeCard, type KnowledgeReview, type KnowledgeVersion, type Profile } from '../../lib/api';
+import { hrefFor } from '../../lib/navigation';
 
 type State = { data: KnowledgeCard[]; loading: boolean; error: string | null };
 const status = (value: string) => <span className={`status ${value}`}>{value}</span>;
