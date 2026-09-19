@@ -21,3 +21,9 @@ export function usePrefersReducedMotion(): boolean {
 
 /** Phones (≤ 600px) get a short screen transition instead of the long dive (PROMPT §7). */
 export const PHONE_QUERY = '(max-width: 600px)';
+
+/** Tablets (601–900px): the compact desktop HUD, never the phone tab bar (PROMPT §7). */
+export const TABLET_QUERY = '(min-width: 601px) and (max-width: 900px)';
+
+/** Phones and tablets share some HUD compacting (a collapsed-by-default building directory). */
+export const COMPACT_QUERY = '(max-width: 900px)';

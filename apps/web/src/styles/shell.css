@@ -7,6 +7,7 @@
 :root {
   --hud-gap: 20px;
   --hud-camera-height: 170px;
+  --tab-bar-height: 64px;
 }
 
 .visually-hidden {
@@ -339,6 +340,37 @@
   -webkit-line-clamp: 2;
 }
 
+/* Phone room header (PROMPT §7): the description collapses behind a disclosure so the header stays
+   compact and the message history clears the 55%-of-viewport contract. Expanded text is shown in full. */
+.room-description-details summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.room-description-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.room-description-details summary::before {
+  content: '▸ ';
+}
+
+.room-description-details[open] summary::before {
+  content: '▾ ';
+}
+
+.screen-subline .room-description-details .room-description {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: initial;
+}
+
 .screen-actions {
   display: flex;
   flex: none;
@@ -451,61 +483,16 @@
 }
 
 /* =========================================================================
-   ≤ 900px: a simple stacked fallback until the phone/tablet HUD (W5).
-   The shell scrolls inside itself; screens stay full-screen layers.
+   ≤ 900px shared: tablets (601–900) and phones (≤ 600) both keep the city
+   full-bleed behind floating HUD panels (PROMPT §7) — only the desktop's
+   ≤ 900px stacked-page fallback goes away. Screen-layer polish (compact
+   header/body) applies at both widths; the HUD/nav split is width-specific
+   below.
    ========================================================================= */
 
 @media (max-width: 900px) {
   :root {
     --hud-gap: 12px;
-  }
-
-  .city-shell {
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-
-  .city-shell-hud {
-    position: static;
-    padding: var(--hud-gap) var(--hud-gap) 0;
-  }
-
-  .hud-main {
-    width: auto;
-    max-height: none;
-  }
-
-  .hud-nav {
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  }
-
-  .city-shell-main, .city-shell-world, .city-view {
-    position: relative;
-    inset: auto;
-  }
-
-  .city-view {
-    display: grid;
-    gap: var(--hud-gap);
-    padding: var(--hud-gap);
-  }
-
-  .city-stage {
-    position: relative;
-    height: min(60dvh, 520px);
-    border: 1px solid var(--border-glass);
-    border-radius: var(--radius-xl);
-  }
-
-  .hud, .hud-legend, .hud-directory, .city-camera {
-    position: static;
-    width: auto;
-    max-height: none;
-    transform: none;
-  }
-
-  .city-camera {
-    justify-self: end;
   }
 
   .screen-header {
@@ -532,6 +519,244 @@
   .screen-room .conversation {
     padding: 12px;
   }
+
+  /* Building directory collapsed by default (state, in CityView): keep it compact here too. */
+  .hud-directory {
+    width: 240px;
+  }
+}
+
+/* =========================================================================
+   Tablets (601–900px, PROMPT §7): the same floating HUD as desktop, made
+   compact so panels never overlap each other or each other's reachable
+   controls, and the network badge can no longer push the nav out of view
+   (the PR #21 regression this fixes).
+   ========================================================================= */
+
+@media (min-width: 601px) and (max-width: 900px) {
+  .hud-main {
+    width: 232px;
+    max-height: calc(100dvh - var(--hud-gap) * 2 - 48px);
+    padding: 10px;
+    gap: 8px;
+  }
+
+  /* The brand row wraps to two lines rather than squeezing the nav out of the card's max-height. */
+  .hud-brand-row {
+    flex-wrap: wrap;
+    padding-bottom: 8px;
+  }
+
+  .hud-stats {
+    display: none;
+  }
+
+  .hud-link {
+    min-height: 36px;
+    padding: 5px 8px;
+  }
+
+  .city-camera {
+    grid-template-columns: repeat(3, 32px);
+    grid-template-rows: repeat(3, 32px) 28px;
+  }
+
+  /* Centered-on-viewport, the guest "Refresh failed" banner reaches under the (top-right) building
+     directory at this width; keep it in the gap between the two top panels instead. */
+  .hud-alert {
+    left: calc(var(--hud-gap) * 3 + 232px);
+    max-width: calc(100vw - (var(--hud-gap) * 4) - 232px - 240px);
+    transform: none;
+  }
+}
+
+/* =========================================================================
+   Phones (≤ 600px, PROMPT §7): a compact top bar (brand + network + account)
+   replaces the HUD card; navigation moves to a bottom tab bar; the legend is
+   dropped; the camera control loses its D-pad; the building directory
+   becomes a reachable sheet above the tab bar. The city itself stays full
+   screen behind all of it.
+   ========================================================================= */
+
+@media (max-width: 600px) {
+  .city-shell-hud {
+    top: 0;
+    right: 0;
+    left: 0;
+    padding: 0;
+  }
+
+  /* The guest "Refresh failed" banner floats independently of the HUD; keep it below the compact top
+     bar instead of over the brand/account controls. */
+  .hud-alert {
+    top: calc(56px + env(safe-area-inset-top) + var(--hud-gap));
+  }
+
+  /* Room screen (PROMPT §7): a compact header and composer so the message history clears the
+     55%-of-viewport contract at 390×700 and 320×568. */
+  .screen-header {
+    padding: 4px 10px;
+    gap: 6px;
+  }
+
+  /* "Room" / "Forum · …" — the tab bar and title already say where we are. */
+  .screen-title-block .eyebrow {
+    display: none;
+  }
+
+  .screen-title-row {
+    gap: 4px 8px;
+  }
+
+  /* "All rooms" is redundant with the tab bar's Rooms tab; dropping it keeps Back + Refresh on one row
+     instead of the actions column wrapping to two lines and doubling the header's height. */
+  .screen-room .screen-actions a {
+    display: none;
+  }
+
+  .screen-room .composer {
+    padding-top: 2px;
+  }
+
+  .screen-room .composer .primary.compact {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  /* The hint ("Visible to registered participants") is dropped so Send message stays on the textarea's
+     row instead of stacking under it — the sitewide ≤ 560px composer rule below is for the narrower
+     sidebar contexts (auth, modals), not this full-screen room layer. */
+  .screen-room .composer small {
+    display: none;
+  }
+
+  .screen-room .composer > div {
+    margin-top: 4px;
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+
+  .screen-room .composer > div .primary {
+    width: auto;
+    min-width: 130px;
+  }
+
+  .hud-main {
+    width: auto;
+    max-height: none;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: max(8px, env(safe-area-inset-top)) 12px 8px;
+    border-radius: 0;
+    border-width: 0 0 1px;
+  }
+
+  /* Its own full-width row: at phone widths there is not enough room for the brand, the real network
+     status and the account controls on one line without the status text overlapping them. */
+  .hud-brand-row {
+    flex: 1 1 100%;
+    min-width: 0;
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+
+  /* No legend, no stats, no eyebrow/note copy, no HUD nav list: the tab bar is the one primary nav. */
+  .hud-eyebrow, .hud-note, .hud-stats, .hud-nav {
+    display: none;
+  }
+
+  .hud-account {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .hud-account > div {
+    display: none;
+  }
+
+  /* --- Bottom tab bar: the phone's one primary nav (PROMPT §7) --- */
+
+  .tab-bar {
+    position: fixed;
+    z-index: 25;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    height: var(--tab-bar-height);
+    padding: 4px max(4px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(4px, env(safe-area-inset-left));
+    border-top: 1px solid var(--border-glass);
+    background: var(--bg-panel-solid);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .tab-bar-item {
+    display: flex;
+    min-width: 44px;
+    min-height: 44px;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .tab-bar-icon {
+    color: var(--color-cyan);
+    font-size: 18px;
+  }
+
+  .tab-bar-item[aria-current="page"] {
+    background: var(--tint-cyan-strong);
+    box-shadow: var(--glow-cyan);
+    color: var(--text-primary);
+  }
+
+  /* --- Compact camera: zoom and reset only, drag/pinch cover panning --- */
+
+  .city-camera-compact {
+    grid-template-columns: repeat(3, 40px);
+    grid-template-rows: 40px;
+  }
+
+  .city-camera-compact button {
+    min-height: 40px;
+  }
+
+  .city-camera-compact .city-zoom-in { grid-column: 1; grid-row: 1; }
+  .city-camera-compact .city-reset { grid-column: 2; grid-row: 1; }
+  .city-camera-compact .city-zoom-out { grid-column: 3; grid-row: 1; }
+
+  /* --- Building directory: a reachable sheet above the tab bar, collapsed by default --- */
+
+  .hud-directory-sheet {
+    top: auto;
+    right: 8px;
+    bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + 8px);
+    left: 8px;
+    width: auto;
+    max-height: 50dvh;
+  }
+
+  /* Leave room so the directory sheet and the camera control clear the tab bar. */
+  .city-camera {
+    bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--hud-gap));
+  }
+
+  /* The conversation's own padding is on top of the header/composer budget; keep it tight so the
+     55%-of-viewport history contract holds at 320×568 too. */
+  .screen-room .conversation {
+    padding: 6px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -541,6 +766,15 @@
 
   .room-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Small phones (PROMPT §7, 320×568): the access badge is the least essential of the three room badges —
+   drop it so the title row wraps to one fewer line and the header stays short enough for the message
+   history to still clear 55% of the viewport. */
+@media (max-width: 360px) {
+  .screen-room .screen-title-row .public-badge {
+    display: none;
   }
 }
 

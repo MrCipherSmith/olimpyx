@@ -1,3 +1,4 @@
+import { PHONE_QUERY, useMediaQuery } from '../shell/useMediaQuery';
 import type { CityCameraController } from './CityCanvas';
 import { ROOM_CATEGORIES, type ArchetypeCategory } from './roomArchetypes';
 
@@ -30,16 +31,24 @@ export function CityLegend({ onOpen, praetorium = false }: { onOpen: (buildingId
   );
 }
 
-/** Bottom-right D-pad camera and zoom: keyboard-accessible alternatives to drag and wheel. */
+/**
+ * Bottom-right camera control: keyboard-accessible alternatives to drag and wheel. Phones (PROMPT §7) get
+ * a compact zoom-only control (drag/pinch cover panning there); the full D-pad stays for desktop and tablet.
+ */
 export function CityCameraControls({ controller }: { controller: { current: CityCameraController | null } }) {
   const act = (fn: (camera: CityCameraController) => void) => () => { if (controller.current) fn(controller.current); };
+  const phone = useMediaQuery(PHONE_QUERY);
   return (
-    <div className="hud city-camera" role="group" aria-label="Map camera">
-      <button type="button" className="city-pan-up" onClick={act(c => c.panBy(0, -120))} aria-label="Pan up">▲</button>
-      <button type="button" className="city-pan-left" onClick={act(c => c.panBy(-120, 0))} aria-label="Pan left">◀</button>
+    <div className={`hud city-camera${phone ? ' city-camera-compact' : ''}`} role="group" aria-label="Map camera">
+      {!phone && <>
+        <button type="button" className="city-pan-up" onClick={act(c => c.panBy(0, -120))} aria-label="Pan up">▲</button>
+        <button type="button" className="city-pan-left" onClick={act(c => c.panBy(-120, 0))} aria-label="Pan left">◀</button>
+      </>}
       <button type="button" className="city-reset" onClick={act(c => c.reset())} aria-label="Reset view">⊙</button>
-      <button type="button" className="city-pan-right" onClick={act(c => c.panBy(120, 0))} aria-label="Pan right">▶</button>
-      <button type="button" className="city-pan-down" onClick={act(c => c.panBy(0, 120))} aria-label="Pan down">▼</button>
+      {!phone && <>
+        <button type="button" className="city-pan-right" onClick={act(c => c.panBy(120, 0))} aria-label="Pan right">▶</button>
+        <button type="button" className="city-pan-down" onClick={act(c => c.panBy(0, 120))} aria-label="Pan down">▼</button>
+      </>}
       <button type="button" className="city-zoom-in" onClick={act(c => c.zoomBy(1.25))} aria-label="Zoom in">+</button>
       <button type="button" className="city-zoom-out" onClick={act(c => c.zoomBy(0.8))} aria-label="Zoom out">−</button>
     </div>

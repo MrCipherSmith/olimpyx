@@ -4,6 +4,16 @@ import { CityView } from './CityView';
 import { buildCityScene } from './cityScene';
 import { deterministicArchetype } from './roomArchetypes';
 
+/** Matches `(max-width: Npx)` / `(min-width: Npx)` queries against a fake viewport width. */
+function stubViewportWidth(width: number) {
+  vi.stubGlobal('matchMedia', (query: string) => {
+    const max = query.match(/max-width:\s*(\d+)px/);
+    const min = query.match(/min-width:\s*(\d+)px/);
+    const matches = (!max || width <= Number(max[1])) && (!min || width >= Number(min[1]));
+    return { matches, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+  });
+}
+
 /** Canvas 2D context stub: records nothing, but lets the real renderer run end-to-end in jsdom. */
 function stubContext(): CanvasRenderingContext2D {
   const gradient = { addColorStop: vi.fn() };
@@ -117,6 +127,51 @@ describe('CityView accessible building list', () => {
     unmount();
     expect(cancel).toHaveBeenCalled();
     expect(removeListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+  });
+});
+
+describe('CityView phones and tablets (PROMPT §7)', () => {
+  it('phone: hides the legend but keeps the Library and Pantheon reachable from the (collapsed) directory', () => {
+    stubViewportWidth(390);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
+    expect(screen.queryByRole('group', { name: 'Key buildings' })).toBeNull();
+    const toggle = screen.getByRole('button', { name: /Buildings/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('navigation', { name: 'City buildings' })).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const list = screen.getByRole('navigation', { name: 'City buildings' });
+    expect(within(list).getByRole('button', { name: /Central Library/ })).toBeInTheDocument();
+    expect(within(list).getByRole('button', { name: /Pantheon of Agents/ })).toBeInTheDocument();
+  });
+
+  it('tablet: keeps the legend, but the directory panel is collapsed by default too', () => {
+    stubViewportWidth(768);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
+    expect(screen.getByRole('group', { name: 'Key buildings' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Buildings/ })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('desktop: the directory panel stays open by default, as before', () => {
+    stubViewportWidth(1280);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
+    expect(screen.getByRole('button', { name: /Buildings/ })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('phone: the camera control drops the D-pad, keeping zoom and reset', () => {
+    stubViewportWidth(390);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
+    const camera = screen.getByRole('group', { name: 'Map camera' });
+    expect(within(camera).queryByRole('button', { name: 'Pan up' })).toBeNull();
+    expect(within(camera).getByRole('button', { name: 'Zoom in' })).toBeInTheDocument();
+    expect(within(camera).getByRole('button', { name: 'Reset view' })).toBeInTheDocument();
+  });
+
+  it('desktop: the camera control keeps the full D-pad', () => {
+    stubViewportWidth(1280);
+    render(<CityView rooms={rooms} mode="participant" onNavigate={vi.fn()} />);
+    const camera = screen.getByRole('group', { name: 'Map camera' });
+    expect(within(camera).getByRole('button', { name: 'Pan up' })).toBeInTheDocument();
   });
 });
 

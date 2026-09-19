@@ -2,14 +2,19 @@ import { type MutableRefObject, useMemo, useRef, useState } from 'react';
 import type { Route } from '../../lib/navigation';
 import type { DiveState } from '../shell/diveMachine';
 import { TargetLock } from '../shell/DiveOverlay';
-import { usePrefersReducedMotion } from '../shell/useMediaQuery';
+import { COMPACT_QUERY, PHONE_QUERY, useMediaQuery, usePrefersReducedMotion } from '../shell/useMediaQuery';
 import { CityBuildingList } from './CityBuildingList';
 import { CityCanvas, type CityCameraController } from './CityCanvas';
 import { CityCameraControls, CityFilters, CityLegend, type CityFilter } from './CityHUD';
 import { buildCityScene, matchesFilter, type CityBuilding, type CityRoomInput, type CityScene } from './cityScene';
+import type { InhabitantActivityInput, InhabitantAgentInput } from './inhabitants';
 import { ROOM_CATEGORIES } from './roomArchetypes';
 
 export type { CityRoomInput } from './cityScene';
+
+/** Stable empty defaults so an absent agents/activity prop never looks like "a new array" to CityCanvas. */
+const NO_AGENTS: readonly InhabitantAgentInput[] = [];
+const NO_ACTIVITY: readonly InhabitantActivityInput[] = [];
 
 interface CityViewProps {
   /** Participant: rooms from api.rooms(). Guest: only the rooms of the published showcase snapshot. */
@@ -24,6 +29,11 @@ interface CityViewProps {
   camera?: MutableRefObject<CityCameraController | null>;
   /** The dive in progress: the target lock frame and the highlighted building. */
   dive?: DiveState;
+  /** Real agents to walk the roads (City Shell §6): api.agents() for a participant, snapshot.agents for a
+   * guest. Omitted draws none. */
+  agents?: readonly InhabitantAgentInput[];
+  /** Real, already-loaded agent↔room links (recent activity, relationships or loaded messages). */
+  activity?: readonly InhabitantActivityInput[];
   onNavigate: (route: Route) => void;
 }
 
@@ -46,11 +56,15 @@ export function routeForBuilding(building: Pick<CityBuilding, 'room'> & { kind: 
  * The persistent city behind every screen: the full-bleed canvas plus its floating HUD parts (legend,
  * building directory, camera). Clicking a building, a legend entry or a directory entry opens its screen.
  */
-export function CityView({ rooms, mode, loading = false, paused = false, scene: sharedScene, camera, dive, onNavigate }: CityViewProps) {
+export function CityView({ rooms, mode, loading = false, paused = false, scene: sharedScene, camera, dive, agents = NO_AGENTS, activity = NO_ACTIVITY, onNavigate }: CityViewProps) {
   const ownScene = useMemo(() => (sharedScene ? null : buildCityScene(rooms)), [sharedScene, rooms]);
   const scene = sharedScene ?? ownScene!;
   const [filter, setFilter] = useState<CityFilter>('all');
-  const [directoryOpen, setDirectoryOpen] = useState(true);
+  // Phones and tablets (PROMPT §7): the building directory panel is collapsed by default, reachable via
+  // its toggle (a phone-width sheet above the tab bar; a top-right panel, as on desktop, for tablets).
+  const compact = useMediaQuery(COMPACT_QUERY);
+  const phone = useMediaQuery(PHONE_QUERY);
+  const [directoryOpen, setDirectoryOpen] = useState(() => !compact);
   const ownController = useRef<CityCameraController | null>(null);
   const controller = camera ?? ownController;
   const diving = dive && (dive.phase === 'focusing' || dive.phase === 'diving') ? dive.target : null;
@@ -79,11 +93,13 @@ export function CityView({ rooms, mode, loading = false, paused = false, scene: 
     <section className="city-view" aria-label="City Map">
       <h1 className="visually-hidden">Olimpyx city</h1>
       <div className="city-stage">
-        <CityCanvas scene={scene} selectedId={diving?.key ?? null} filter={filter} label={label} reducedMotion={reducedMotion} paused={paused} controller={controller} onSelect={open} />
+        <CityCanvas scene={scene} selectedId={diving?.key ?? null} filter={filter} label={label} reducedMotion={reducedMotion} paused={paused} controller={controller} onSelect={open} agents={agents} activity={activity} />
         <TargetLock target={dive?.phase === 'focusing' ? diving : null} />
       </div>
-      <CityLegend onOpen={open} praetorium={scene.buildings.some(building => building.kind === 'praetorium')} />
-      <aside className="hud hud-directory" aria-label="Building directory">
+      {/* Phones (PROMPT §7): no legend, a simplified HUD. The Library and Pantheon stay reachable via the
+          building directory below. */}
+      {!phone && <CityLegend onOpen={open} praetorium={scene.buildings.some(building => building.kind === 'praetorium')} />}
+      <aside className={`hud hud-directory${phone ? ' hud-directory-sheet' : ''}`} aria-label="Building directory">
         <button type="button" className="hud-directory-toggle" aria-expanded={directoryOpen} aria-controls="city-directory-panel" onClick={() => setDirectoryOpen(value => !value)}>
           <span>Buildings</span><span className="hud-badge" aria-hidden="true">{scene.buildings.length}</span><span aria-hidden="true">{directoryOpen ? '▴' : '▾'}</span>
         </button>

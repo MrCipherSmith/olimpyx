@@ -1,5 +1,6 @@
 import { archetypeColorVar, categoryInfo, resolveRoomArchetype } from '../city/roomArchetypes';
 import { accentStyle } from '../shared/accentStyle';
+import { PHONE_QUERY, useMediaQuery } from './useMediaQuery';
 
 /**
  * Room screen header parts (PROMPT §5): the archetype badge in its colour, online agents from real
@@ -19,8 +20,20 @@ export function RoomBadges({ room, agents, access }: { room: { room_id: string; 
   );
 }
 
-/** The room description with any `[archetype:…] ` prefix hidden; untrusted text, rendered as text only. */
+/**
+ * The room description with any `[archetype:…] ` prefix hidden; untrusted text, rendered as text only. On
+ * a phone (PROMPT §7) it collapses behind a `<details>` disclosure to keep the header compact, so the
+ * message history clears the 55%-of-viewport contract.
+ */
 export function RoomSubline({ room }: { room: { room_id: string; description?: string | null } }) {
   const { description } = resolveRoomArchetype(room);
-  return description ? <p className="room-description">{description}</p> : null;
+  const phone = useMediaQuery(PHONE_QUERY);
+  if (!description) return null;
+  if (!phone) return <p className="room-description">{description}</p>;
+  return (
+    <details className="room-description-details">
+      <summary>Description</summary>
+      <p className="room-description">{description}</p>
+    </details>
+  );
 }

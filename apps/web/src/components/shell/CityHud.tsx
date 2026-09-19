@@ -3,6 +3,8 @@ import type { Route, View } from '../../lib/navigation';
 import type { NetworkStatus } from '../../lib/networkStatus';
 import { NetworkStatusBadge } from '../layout/NetworkStatus';
 import { RouteLink } from '../shared/RouteLink';
+import { MobileTabBar } from './MobileTabBar';
+import { PHONE_QUERY, useMediaQuery } from './useMediaQuery';
 
 export interface HudNavItem {
   view: View;
@@ -30,42 +32,52 @@ interface CityHudProps {
   onNavigate: (route: Route) => void;
 }
 
-/** Top-left HUD card over the city (PROMPT §2): brand, network status, navigation with counters, stats, account. */
+/**
+ * Top-left HUD card over the city (PROMPT §2): brand, network status, navigation with counters, stats,
+ * account. Phones (PROMPT §7) get a compact top bar instead — no legend, no stats, and navigation moves to
+ * a bottom tab bar (MobileTabBar), which then becomes the page's one primary `nav` under `navLabel`.
+ */
 export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, account, note, onNavigate }: CityHudProps) {
   const shown = stats.filter(stat => stat.value !== null);
+  const phone = useMediaQuery(PHONE_QUERY);
   return (
-    <header className="hud hud-main">
-      <div className="hud-brand-row">
-        <div className="hud-brand">
-          <span className="brand-mark" aria-hidden="true">◈</span>
-          <span>OLIMPYX</span>
-          <span className="hud-brand-tag">CITY</span>
+    <>
+      <header className="hud hud-main">
+        <div className="hud-brand-row">
+          <div className="hud-brand">
+            <span className="brand-mark" aria-hidden="true">◈</span>
+            <span>OLIMPYX</span>
+            <span className="hud-brand-tag">CITY</span>
+          </div>
+          <NetworkStatusBadge status={network} />
         </div>
-        <NetworkStatusBadge status={network} />
-      </div>
-      <p className="eyebrow hud-eyebrow">{eyebrow}</p>
-      {note}
-      <nav aria-label={navLabel} className="hud-nav">
-        {items.map(item => {
-          const descriptionId = item.badge && item.badgeLabel ? `hud-nav-${item.view}-count` : undefined;
-          return (
-            <RouteLink key={item.view} className="hud-link" route={{ view: item.view }} current={activeView === item.view} navView={item.view} describedBy={descriptionId} onNavigate={onNavigate}>
-              <span className="hud-link-icon" aria-hidden="true">{item.icon}</span>
-              <span className="hud-link-label">{item.label}</span>
-              {item.badge && <span className="hud-badge" aria-hidden="true">{item.badge}</span>}
-            </RouteLink>
-          );
-        })}
-        {/* Referenced descriptions live outside the links so each link's name stays its label. */}
-        {items.map(item => item.badge && item.badgeLabel ? <span key={item.view} id={`hud-nav-${item.view}-count`} hidden>{item.badgeLabel}</span> : null)}
-      </nav>
-      {shown.length > 0 && (
-        <dl className="hud-stats" aria-label="City statistics">
-          {shown.map(stat => <div key={stat.label}><dt>{stat.label}</dt><dd>{stat.value}</dd></div>)}
-        </dl>
-      )}
-      <div className="hud-account">{account}</div>
-    </header>
+        <p className="eyebrow hud-eyebrow">{eyebrow}</p>
+        {note}
+        {!phone && (
+          <nav aria-label={navLabel} className="hud-nav">
+            {items.map(item => {
+              const descriptionId = item.badge && item.badgeLabel ? `hud-nav-${item.view}-count` : undefined;
+              return (
+                <RouteLink key={item.view} className="hud-link" route={{ view: item.view }} current={activeView === item.view} navView={item.view} describedBy={descriptionId} onNavigate={onNavigate}>
+                  <span className="hud-link-icon" aria-hidden="true">{item.icon}</span>
+                  <span className="hud-link-label">{item.label}</span>
+                  {item.badge && <span className="hud-badge" aria-hidden="true">{item.badge}</span>}
+                </RouteLink>
+              );
+            })}
+            {/* Referenced descriptions live outside the links so each link's name stays its label. */}
+            {items.map(item => item.badge && item.badgeLabel ? <span key={item.view} id={`hud-nav-${item.view}-count`} hidden>{item.badgeLabel}</span> : null)}
+          </nav>
+        )}
+        {!phone && shown.length > 0 && (
+          <dl className="hud-stats" aria-label="City statistics">
+            {shown.map(stat => <div key={stat.label}><dt>{stat.label}</dt><dd>{stat.value}</dd></div>)}
+          </dl>
+        )}
+        <div className="hud-account">{account}</div>
+      </header>
+      {phone && <MobileTabBar navLabel={navLabel} items={items} activeView={activeView} onNavigate={onNavigate} />}
+    </>
   );
 }
 
