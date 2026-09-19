@@ -59,6 +59,14 @@ describe('Forum layout (City Shell §3)', () => {
   });
 });
 
+describe('scene lookups', () => {
+  it('resolves the Pantheon once per scene (no per-frame find in the renderer)', () => {
+    const scene = buildCityScene(rooms(2));
+    expect(scene.pantheon).toBe(scene.buildings.find(building => building.kind === 'pantheon'));
+    expect(scene.pantheon).toMatchObject(PANTHEON_POSITION);
+  });
+});
+
 describe('Praetorium (owner only)', () => {
   it('is absent from the guest city and by default', () => {
     expect(find(buildCityScene(rooms(3)), 'praetorium')).toBeUndefined();

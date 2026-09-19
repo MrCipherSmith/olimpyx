@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildingOnScreen, cardSubline, createRenderCache, labelAt, layoutLabels, renderCity, staticLayerStale, truncateLabel, type LabelLayoutInput, type PlacedLabel, type Rect, type StaticLayerKey } from './cityRenderer';
+import { buildingOnScreen, cardSubline, clearLabelCache, createRenderCache, labelAt, layoutLabels, renderCity, staticLayerStale, truncateLabel, type LabelLayoutInput, type PlacedLabel, type Rect, type StaticLayerKey } from './cityRenderer';
 import { buildCityScene, type CityBuilding } from './cityScene';
 import { worldToScreen } from './isometricMath';
 import { painterSort } from './isometricMath';
@@ -258,6 +258,83 @@ describe('label placement', () => {
 });
 
 const MIN_TEST_ZOOM = 0.1;
+
+describe('label layout cache', () => {
+  const scene = buildCityScene(Array.from({ length: 6 }, (_, index) => ({ room_id: `rom_${index}`, title: `Room ${index}` })));
+  const palette = { ground: '#000' } as CityPalette;
+  const occluders: Rect[] = [{ left: 0, top: 0, right: 200, bottom: 60 }];
+  const withCanvas = (run: (ctx: CanvasRenderingContext2D, calls: Record<string, number>) => void) => {
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx({}) as never);
+    const calls: Record<string, number> = {};
+    try { run(recordingCtx(calls), calls); } finally { spy.mockRestore(); }
+  };
+
+  it('lays building labels out once for identical frames and again only when an input changes', () => {
+    withCanvas(ctx => {
+      const cache = createRenderCache();
+      const frame = { scene, camera: { focalX: 0, focalY: -20, zoom: 0.8 }, view: { width: 1000, height: 700 }, palette, time: 0, animate: true, hoveredId: null, selectedId: null, filter: 'all' as const, particles: 0, dpr: 1, cache, occluders };
+      renderCity(ctx, frame);
+      expect(cache.layoutRuns).toBe(1);
+      const boxes = cache.placed.slice(0, cache.placedCount).map(label => ({ id: label.building.id, left: label.left, top: label.top, visible: label.visible }));
+      for (let tick = 1; tick <= 5; tick++) renderCity(ctx, { ...frame, time: tick * 33 }); // decorative frames
+      expect(cache.layoutRuns).toBe(1);
+      expect(cache.placed.slice(0, cache.placedCount).map(label => ({ id: label.building.id, left: label.left, top: label.top, visible: label.visible }))).toEqual(boxes);
+      renderCity(ctx, { ...frame, hoveredId: 'library' });
+      expect(cache.layoutRuns).toBe(2);
+      renderCity(ctx, { ...frame, hoveredId: 'library', time: 99 });
+      expect(cache.layoutRuns).toBe(2);
+      renderCity(ctx, { ...frame, camera: { focalX: 4, focalY: -20, zoom: 0.8 } });
+      expect(cache.layoutRuns).toBe(3);
+      renderCity(ctx, { ...frame, camera: { focalX: 4, focalY: -20, zoom: 0.8 }, occluders: [...occluders] });
+      expect(cache.layoutRuns).toBe(4);
+      renderCity(ctx, { ...frame, camera: { focalX: 4, focalY: -20, zoom: 0.8 }, occluders: [...occluders], selectedId: 'pantheon' });
+      renderCity(ctx, { ...frame, camera: { focalX: 4, focalY: -20, zoom: 0.8 }, filter: 'science' as const });
+      renderCity(ctx, { ...frame, view: { width: 999, height: 700 } });
+      expect(cache.layoutRuns).toBe(7);
+    });
+  });
+
+  it('clearLabelCache drops labels, name tags, cards and the "+N" tag and forces a relayout', () => {
+    withCanvas(ctx => {
+      const cache = createRenderCache();
+      const inhabitants = planInhabitants(Array.from({ length: 42 }, (_, index) => ({ agent_id: `a${String(index).padStart(2, '0')}`, name: `Agent ${index}`, presence: 'online' as const })), [], scene, 0);
+      const frame = { scene, camera: { focalX: 0, focalY: -20, zoom: 0.8 }, view: { width: 1000, height: 700 }, palette, time: 0, animate: false, hoveredId: 'library', selectedId: null, filter: 'all' as const, particles: 0, dpr: 1, cache, inhabitants };
+      renderCity(ctx, frame);
+      expect(cache.labels.size).toBeGreaterThan(0);
+      expect(cache.cards.size).toBe(1);
+      expect(cache.figureLabels.size).toBeGreaterThan(0);
+      expect(cache.overflow.count).toBe(2);
+      clearLabelCache(cache);
+      expect(cache.labels.size + cache.cards.size + cache.figureLabels.size).toBe(0);
+      expect(cache.overflow.count).toBe(-1);
+      renderCity(ctx, frame);
+      expect(cache.layoutRuns).toBe(2);
+    });
+  });
+
+  it('measures the "+N" overflow tag only when N changes', () => {
+    const measured: string[] = [];
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => recordingCtx({}) as never);
+    try {
+      const base = recordingCtx({});
+      const ctx = new Proxy(base as unknown as Record<string, unknown>, {
+        get: (target, prop: string) => (prop === 'measureText' ? (text: string) => { measured.push(text); return { width: text.length * 7 }; } : target[prop]),
+        set: (target, prop: string, value) => { target[prop] = value; return true; },
+      }) as unknown as CanvasRenderingContext2D;
+      const cache = createRenderCache();
+      const agents = (count: number) => Array.from({ length: count }, (_, index) => ({ agent_id: `a${String(index).padStart(2, '0')}`, name: `Agent ${index}`, presence: 'online' as const }));
+      const frame = { scene, camera: { focalX: 0, focalY: -20, zoom: 0.8 }, view: { width: 1000, height: 700 }, palette, time: 0, animate: false, hoveredId: null, selectedId: null, filter: 'all' as const, particles: 0, dpr: 1, cache, inhabitants: planInhabitants(agents(43), [], scene, 0) };
+      renderCity(ctx, frame);
+      renderCity(ctx, { ...frame, time: 40 });
+      renderCity(ctx, { ...frame, time: 80 });
+      expect(measured.filter(text => text === '+3')).toHaveLength(1);
+      renderCity(ctx, { ...frame, inhabitants: planInhabitants(agents(44), [], scene, 0) });
+      expect(measured.filter(text => text === '+4')).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
 
 describe('hover card', () => {
   const [room] = buildCityScene([

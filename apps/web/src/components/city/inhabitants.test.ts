@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildCityScene } from './cityScene';
 import {
-  DEFAULT_INHABITANT_CAP, hashUnit, inhabitantActivityFromMessages, inhabitantActivityFromShowcase,
+  DEFAULT_INHABITANT_CAP, INHABITANT_TRANSITION_MS, hashUnit, inhabitantActivityFromMessages, inhabitantActivityFromShowcase,
   inhabitantPosition, planInhabitants, type InhabitantAgentInput, type InhabitantOnlineFigure,
 } from './inhabitants';
 
@@ -102,6 +102,83 @@ describe('planInhabitants', () => {
   });
 });
 
+describe('planInhabitants replans (continuity)', () => {
+  const scene = buildCityScene(rooms(3));
+  const agents = [agent('a1', 'Athena'), agent('a2', 'Boreas', 'offline'), agent('a3', 'Circe')];
+  const activity = [{ agentId: 'a1', roomId: 'rom_0' }, { agentId: 'a3', roomId: 'rom_2' }];
+  const byId = (plan: ReturnType<typeof planInhabitants>, id: string) => plan.figures.find(figure => figure.id === id)!;
+  const close = (a: { x: number; y: number }, b: { x: number; y: number }) => { expect(a.x).toBeCloseTo(b.x, 6); expect(a.y).toBeCloseTo(b.y, 6); };
+
+  it('keeps every figure exactly where it is when the same activity is re-fetched (a fresh array)', () => {
+    const first = planInhabitants(agents, activity, scene, 1000);
+    const replanAt = 1000 + 5000; // the showcase poll
+    const second = planInhabitants(agents, activity.map(link => ({ ...link })), scene, replanAt, DEFAULT_INHABITANT_CAP, first);
+    for (const figure of first.figures) {
+      const again = byId(second, figure.id);
+      if (figure.online && again.online) expect(again.phaseAnchor).toBe(figure.phaseAnchor);
+      expect(again.transition).toBeUndefined();
+      for (const at of [replanAt, replanAt + 1, replanAt + 7777]) close(inhabitantPosition(again, at), inhabitantPosition(figure, at));
+    }
+  });
+
+  it('glides a figure whose linked room changed from where it was onto its new path, keeping its anchor', () => {
+    const first = planInhabitants(agents, activity, scene, 1000);
+    const replanAt = 6000;
+    const moved = [{ agentId: 'a1', roomId: 'rom_1' }, { agentId: 'a3', roomId: 'rom_2' }];
+    const second = planInhabitants(agents, moved, scene, replanAt, DEFAULT_INHABITANT_CAP, first);
+    const before = byId(first, 'a1') as InhabitantOnlineFigure;
+    const after = byId(second, 'a1') as InhabitantOnlineFigure;
+    const room1 = scene.roomBuildings.find(building => building.room?.roomId === 'rom_1')!;
+    expect(after.to).toEqual({ x: room1.x, y: room1.y });
+    expect(after.phaseAnchor).toBe(before.phaseAnchor);
+    // Continuous at the replan instant, and never a jump of more than a small step one frame later.
+    close(inhabitantPosition(after, replanAt), inhabitantPosition(before, replanAt));
+    const next = inhabitantPosition(after, replanAt + 16);
+    const now = inhabitantPosition(after, replanAt);
+    expect(Math.hypot(next.x - now.x, next.y - now.y)).toBeLessThan(10);
+    // Once the glide is over the figure walks its new path exactly.
+    const settled = { ...after, transition: undefined };
+    close(inhabitantPosition(after, replanAt + INHABITANT_TRANSITION_MS + 1), inhabitantPosition(settled, replanAt + INHABITANT_TRANSITION_MS + 1));
+    // Untouched figures are not re-pathed.
+    expect(byId(second, 'a3').transition).toBeUndefined();
+  });
+
+  it('carries a glide still under way through another replan instead of restarting it', () => {
+    const first = planInhabitants(agents, activity, scene, 1000);
+    const moved = [{ agentId: 'a1', roomId: 'rom_1' }];
+    const second = planInhabitants(agents, moved, scene, 6000, DEFAULT_INHABITANT_CAP, first);
+    const third = planInhabitants(agents, moved.map(link => ({ ...link })), scene, 6300, DEFAULT_INHABITANT_CAP, second);
+    expect(byId(third, 'a1').transition).toEqual(byId(second, 'a1').transition);
+    close(inhabitantPosition(byId(third, 'a1'), 6500), inhabitantPosition(byId(second, 'a1'), 6500));
+  });
+
+  it('glides between the walk and the resting spot when presence changes', () => {
+    const first = planInhabitants(agents, activity, scene, 1000);
+    const offline = agents.map(entry => (entry.agent_id === 'a1' ? { ...entry, presence: 'offline' as const } : entry));
+    const second = planInhabitants(offline, activity, scene, 6000, DEFAULT_INHABITANT_CAP, first);
+    const figure = byId(second, 'a1');
+    expect(figure.online).toBe(false);
+    close(inhabitantPosition(figure, 6000), inhabitantPosition(byId(first, 'a1'), 6000));
+    const rest = figure.online ? null : { x: figure.x, y: figure.y };
+    close(inhabitantPosition(figure, 6000 + INHABITANT_TRANSITION_MS), rest!);
+  });
+
+  it('moves at once with reduced motion (transitionMs = 0) while keeping the anchor', () => {
+    const first = planInhabitants(agents, activity, scene, 1000);
+    const second = planInhabitants(agents, [{ agentId: 'a1', roomId: 'rom_1' }], scene, 6000, DEFAULT_INHABITANT_CAP, first, 0);
+    const after = byId(second, 'a1') as InhabitantOnlineFigure;
+    expect(after.transition).toBeUndefined();
+    expect(after.phaseAnchor).toBe((byId(first, 'a1') as InhabitantOnlineFigure).phaseAnchor);
+  });
+
+  it('starts a newly shown agent at its deterministic phase and ignores agents that left', () => {
+    const first = planInhabitants([agent('a1', 'Athena')], [], scene, 1000);
+    const second = planInhabitants([agent('a3', 'Circe')], [], scene, 6000, DEFAULT_INHABITANT_CAP, first);
+    expect(second.figures.map(figure => figure.id)).toEqual(['a3']);
+    expect(second.figures[0]).toEqual(planInhabitants([agent('a3', 'Circe')], [], scene, 6000).figures[0]);
+  });
+});
+
 describe('hashUnit', () => {
   it('is deterministic and lands in [0, 1)', () => {
     expect(hashUnit('agent-1')).toBe(hashUnit('agent-1'));
@@ -135,6 +212,13 @@ describe('inhabitantPosition', () => {
     const minX = Math.min(figure.from.x, figure.to.x);
     const maxX = Math.max(figure.from.x, figure.to.x);
     for (const x of xs) { expect(x).toBeGreaterThanOrEqual(minX - 1e-6); expect(x).toBeLessThanOrEqual(maxX + 1e-6); }
+  });
+
+  it('writes into a caller-owned scratch point instead of allocating one', () => {
+    const figure = planInhabitants([agent('a1', 'Athena')], [], scene, 0).figures[0];
+    const out = { x: 0, y: 0 };
+    expect(inhabitantPosition(figure, 1234, out)).toBe(out);
+    expect(out).toEqual(inhabitantPosition(figure, 1234));
   });
 
   it('freezing the clock (reduced motion) freezes the figure in place', () => {

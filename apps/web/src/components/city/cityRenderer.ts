@@ -72,25 +72,67 @@ export interface StaticLayerKey {
   dpr: number;
 }
 
-interface LabelEntry { source: string; text: string; width: number; }
+/** Truncated label text plus its measured width at each label font size (NaN until measured). */
+interface LabelEntry { source: string; text: string; width11: number; width12: number; }
+/** Truncated agent name tag and its measured width. */
+interface FigureLabelEntry { source: string; text: string; width: number; }
+
+/** Everything the building-label layout depends on; the layout is reused while none of it changes. */
+export interface LabelLayoutKey {
+  scene: CityScene | null;
+  focalX: number;
+  focalY: number;
+  zoom: number;
+  width: number;
+  height: number;
+  hoveredId: string | null;
+  selectedId: string | null;
+  filter: ArchetypeCategory | 'all' | null;
+  occluders: readonly Rect[] | null;
+}
 
 export interface CityRenderCache {
   /** undefined: not created yet; null: offscreen canvases unavailable (draw directly). */
   layer: { canvas: HTMLCanvasElement; ctx: Ctx; key: StaticLayerKey } | null | undefined;
-  /** Truncated text and measured width per `${fontSize}|${building id}`. */
+  /** Truncated text and measured widths per building id (no per-frame key strings). */
   labels: Map<string, LabelEntry>;
+  /** Truncated name tag and measured width per inhabitant (agent) id. */
+  figureLabels: Map<string, FigureLabelEntry>;
   /** Measured hover cards per building id (re-measured when the label or the subline changes). */
   cards: Map<string, CardEntry>;
-  /** Label boxes of the last frame (a pool reused every frame); read by labelAt() for label clicks. */
+  /** Label boxes of the last layout (a pool reused across frames); read by labelAt() for label clicks. */
   placed: PlacedLabel[];
   placedCount: number;
+  /** Inputs of the layout in `placed`; `valid: false` forces the next frame to lay the labels out again. */
+  layoutKey: LabelLayoutKey & { valid: boolean };
+  /** How many times the building-label layout actually ran (diagnostics and tests). */
+  layoutRuns: number;
   /** Inhabitant name-tag boxes of the last frame (a pool reused every frame), so they never overlap a
    * building label or each other; see drawInhabitants(). */
   figureBoxes: Rect[];
+  /** The "+N" overflow tag: text and width, re-measured only when N changes. */
+  overflow: { count: number; text: string; width: number };
 }
 
 export function createRenderCache(): CityRenderCache {
-  return { layer: undefined, labels: new Map(), cards: new Map(), placed: [], placedCount: 0, figureBoxes: [] };
+  return {
+    layer: undefined, labels: new Map(), figureLabels: new Map(), cards: new Map(), placed: [], placedCount: 0,
+    layoutKey: { valid: false, scene: null, focalX: 0, focalY: 0, zoom: 0, width: 0, height: 0, hoveredId: null, selectedId: null, filter: null, occluders: null },
+    layoutRuns: 0, figureBoxes: [], overflow: { count: -1, text: '', width: 0 },
+  };
+}
+
+/**
+ * Drops every measured label, card and name tag (after a scene change, so entries of removed buildings and
+ * agents never pile up, or once the display font has loaded and the old widths are wrong) and forces the next
+ * frame to lay the labels out again.
+ */
+export function clearLabelCache(cache: CityRenderCache): void {
+  cache.labels.clear();
+  cache.figureLabels.clear();
+  cache.cards.clear();
+  cache.overflow.count = -1;
+  cache.layoutKey.valid = false;
 }
 
 /** The ground + roads layer is rebuilt only when the camera, scene, palette, viewport or DPR changed. */
@@ -1094,30 +1136,38 @@ export function cardSubline(building: CityBuilding): string {
   return name ? `${name} · ${messages}` : messages;
 }
 
-interface CardEntry { source: string; subSource: string; title: string; sub: string; width: number; }
+interface CardEntry { building: CityBuilding; source: string; subSource: string; title: string; sub: string; width: number; }
 
+/** Cached truncated label of a building, with its width at `fontSize` measured on first use. */
 function labelFor(ctx: Ctx, cache: CityRenderCache | undefined, building: CityBuilding, fontSize: 11 | 12): LabelEntry {
-  const key = `${fontSize}|${building.id}`;
-  const cached = cache?.labels.get(key);
-  if (cached && cached.source === building.label) return cached;
-  const text = truncateLabel(building.label);
-  ctx.font = LABEL_FONTS[fontSize];
-  const entry: LabelEntry = { source: building.label, text, width: ctx.measureText(text).width + LABEL_PADDING };
-  cache?.labels.set(key, entry);
+  let entry = cache?.labels.get(building.id);
+  if (!entry || entry.source !== building.label) {
+    entry = { source: building.label, text: truncateLabel(building.label), width11: NaN, width12: NaN };
+    cache?.labels.set(building.id, entry);
+  }
+  if (Number.isNaN(fontSize === 11 ? entry.width11 : entry.width12)) {
+    ctx.font = LABEL_FONTS[fontSize];
+    const width = ctx.measureText(entry.text).width + LABEL_PADDING;
+    if (fontSize === 11) entry.width11 = width; else entry.width12 = width;
+  }
   return entry;
 }
 
+const labelWidth = (entry: LabelEntry, fontSize: 11 | 12) => (fontSize === 11 ? entry.width11 : entry.width12);
+
 function cardFor(ctx: Ctx, cache: CityRenderCache | undefined, building: CityBuilding): CardEntry {
-  const sub = cardSubline(building);
   const cached = cache?.cards.get(building.id);
-  if (cached && cached.source === building.label && cached.subSource === sub) return cached;
+  // Buildings are immutable per scene: the same object means the same label and subline (no per-frame string).
+  if (cached && cached.building === building) return cached;
+  const sub = cardSubline(building);
+  if (cached && cached.source === building.label && cached.subSource === sub) { cached.building = building; return cached; }
   const title = truncateLabel(building.label, 32);
   const subText = truncateLabel(sub, 40);
   ctx.font = CARD_TITLE_FONT;
   const titleWidth = ctx.measureText(title).width;
   ctx.font = CARD_SUB_FONT;
   const subWidth = ctx.measureText(subText).width;
-  const entry: CardEntry = { source: building.label, subSource: sub, title, sub: subText, width: Math.max(titleWidth, subWidth) + CARD_PADDING };
+  const entry: CardEntry = { building, source: building.label, subSource: sub, title, sub: subText, width: Math.max(titleWidth, subWidth) + CARD_PADDING };
   cache?.cards.set(building.id, entry);
   return entry;
 }
@@ -1266,14 +1316,46 @@ export function labelAt(cache: CityRenderCache, sx: number, sy: number): string 
 
 const LEADER_POINT = point();
 
+/* Module-level measure state, so a relayout does not allocate a fresh closure. */
+let measureCtx: Ctx | null = null;
+let measureCache: CityRenderCache | undefined;
+let measureFontSize: 11 | 12 = 12;
+const measureLabel: LabelMeasure = (building, card) => (card
+  ? cardFor(measureCtx!, measureCache, building).width
+  : labelWidth(labelFor(measureCtx!, measureCache, building, measureFontSize), measureFontSize));
+
+/** Whether the building-label layout in `cache.placed` still matches this frame; records the frame's key when not. */
+function layoutStale(cache: CityRenderCache, frame: RenderFrame, occluders: readonly Rect[]): boolean {
+  const key = cache.layoutKey;
+  const { camera, view } = frame;
+  if (key.valid && key.scene === frame.scene && key.focalX === camera.focalX && key.focalY === camera.focalY && key.zoom === camera.zoom
+    && key.width === view.width && key.height === view.height && key.hoveredId === frame.hoveredId && key.selectedId === frame.selectedId
+    && key.filter === frame.filter && key.occluders === occluders) return false;
+  key.valid = true; key.scene = frame.scene; key.focalX = camera.focalX; key.focalY = camera.focalY; key.zoom = camera.zoom;
+  key.width = view.width; key.height = view.height; key.hoveredId = frame.hoveredId; key.selectedId = frame.selectedId;
+  key.filter = frame.filter; key.occluders = occluders;
+  return true;
+}
+
 function drawLabels(p: Painter) {
   const { ctx, frame, zoom } = p;
   const cache = frame.cache;
-  const out = cache ? cache.placed : [];
   const fontSize: 11 | 12 = zoom < 0.5 ? 11 : 12;
-  const measure: LabelMeasure = (building, card) => (card ? cardFor(ctx, cache, building).width : labelFor(ctx, cache, building, fontSize).width);
-  const count = layoutLabels(frame, measure, out);
-  if (cache) cache.placedCount = count;
+  const occluders = frame.occluders ?? NO_OCCLUDERS;
+  let out: PlacedLabel[];
+  let count: number;
+  // The full layout (~L² overlap checks) only reruns when the camera, hover, selection, filter, scene, viewport
+  // or occluders changed; an idle decorative frame redraws the cached boxes.
+  if (!cache || layoutStale(cache, frame, occluders)) {
+    measureCtx = ctx; measureCache = cache; measureFontSize = fontSize;
+    out = cache ? cache.placed : [];
+    count = layoutLabels(frame, measureLabel, out);
+    measureCtx = null; measureCache = undefined;
+    if (cache) { cache.placedCount = count; cache.layoutRuns++; }
+  } else {
+    out = cache.placed;
+    count = cache.placedCount;
+  }
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   let card: PlacedLabel | null = null;
@@ -1342,18 +1424,22 @@ const INHABITANT_GLYPH_Z = 6;
 const OVERFLOW_LIFT = LABEL_LIFT * 3;
 const EMPTY_PLACED: readonly PlacedLabel[] = [];
 const INHABITANT_POINT = point();
+const INHABITANT_WORLD = point();
 const OVERFLOW_POINT = point();
+/** Figure boxes when the frame has no render cache (tests, previews). */
+const UNCACHED_FIGURE_BOXES: Rect[] = [];
+/** "+N" tag when the frame has no render cache. */
+const UNCACHED_OVERFLOW = { count: -1, text: '', width: 0 };
 const INHABITANT_BOX: Rect = { left: 0, top: 0, right: 0, bottom: 0 };
 
 /** Measures (and caches) an agent's truncated name tag; untrusted text, only ever drawn with fillText. */
-function inhabitantLabelEntry(ctx: Ctx, cache: CityRenderCache | undefined, figure: InhabitantFigure): LabelEntry {
-  const key = `agent|${figure.id}`;
-  const cached = cache?.labels.get(key);
+function inhabitantLabelEntry(ctx: Ctx, cache: CityRenderCache | undefined, figure: InhabitantFigure): FigureLabelEntry {
+  const cached = cache?.figureLabels.get(figure.id);
   if (cached && cached.source === figure.name) return cached;
   const text = truncateLabel(figure.name, INHABITANT_LABEL_MAX);
   ctx.font = INHABITANT_FONT;
-  const entry: LabelEntry = { source: figure.name, text, width: ctx.measureText(text).width + INHABITANT_LABEL_PADDING };
-  cache?.labels.set(key, entry);
+  const entry: FigureLabelEntry = { source: figure.name, text, width: ctx.measureText(text).width + INHABITANT_LABEL_PADDING };
+  cache?.figureLabels.set(figure.id, entry);
   return entry;
 }
 
@@ -1400,15 +1486,17 @@ function drawInhabitants(painter: Painter, inhabitants: InhabitantPlan) {
   const { palette, view, cache } = frame;
   const buildingLabels = cache ? cache.placed : EMPTY_PLACED;
   const buildingCount = cache ? cache.placedCount : 0;
-  const figureBoxes = cache ? cache.figureBoxes : [];
+  const figureBoxes = cache ? cache.figureBoxes : UNCACHED_FIGURE_BOXES;
   const occluders = frame.occluders ?? NO_OCCLUDERS;
   const showLabels = zoom >= ROOM_LABEL_MIN_ZOOM;
   const labelHeight = (zoom < 0.5 ? 10 : 11) + 6;
   let figureCount = 0;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  for (const figure of inhabitants.figures) {
-    const world = inhabitantPosition(figure, frame.time);
+  const figures = inhabitants.figures;
+  for (let index = 0; index < figures.length; index++) {
+    const figure = figures[index];
+    const world = inhabitantPosition(figure, frame.time, INHABITANT_WORLD);
     const spot = at(world.x, world.y, INHABITANT_GLYPH_Z, INHABITANT_POINT);
     if (spot.x < -CULL_MARGIN || spot.x > view.width + CULL_MARGIN || spot.y < -CULL_MARGIN || spot.y > view.height + CULL_MARGIN) continue;
     const color = figure.online ? palette.cyan : palette.textMuted;
@@ -1441,14 +1529,20 @@ function drawInhabitantOverflow(
   figureBoxes: readonly Rect[], figureCount: number, occluders: readonly Rect[],
 ) {
   const { ctx, frame, at } = painter;
-  const pantheon = frame.scene.buildings.find(building => building.kind === 'pantheon');
+  const pantheon = frame.scene.pantheon;
   if (!pantheon) return;
   const anchor = at(pantheon.x, pantheon.y, pantheon.height + OVERFLOW_LIFT, OVERFLOW_POINT);
   const { view } = frame;
   if (anchor.x < -CULL_MARGIN || anchor.x > view.width + CULL_MARGIN || anchor.y < -CULL_MARGIN || anchor.y > view.height + CULL_MARGIN) return;
-  const text = `+${overflow}`;
-  ctx.font = INHABITANT_FONT;
-  const width = ctx.measureText(text).width + INHABITANT_LABEL_PADDING;
+  // Text and width are re-built only when N changes, not on every frame.
+  const tag = frame.cache ? frame.cache.overflow : UNCACHED_OVERFLOW;
+  if (tag.count !== overflow) {
+    tag.count = overflow;
+    tag.text = `+${overflow}`;
+    ctx.font = INHABITANT_FONT;
+    tag.width = ctx.measureText(tag.text).width + INHABITANT_LABEL_PADDING;
+  }
+  const { text, width } = tag;
   if (!placeInhabitantBox(anchor.x, anchor.y, width, INHABITANT_LABEL_HEIGHT, buildingLabels, buildingCount, figureBoxes, figureCount, occluders, INHABITANT_BOX)) return;
   const box = INHABITANT_BOX;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';

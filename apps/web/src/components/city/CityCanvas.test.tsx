@@ -1,11 +1,12 @@
 import { act, cleanup, render } from '@testing-library/react';
 import { createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CityCameraController } from './CityCanvas';
+import { CityCanvas, type CityCameraController } from './CityCanvas';
 import { CityView } from './CityView';
 import { DIVE_ZOOM, FOCUS_ZOOM, divePointCamera, hudSafeFit } from './cameraMath';
 import { buildCityScene } from './cityScene';
 import type { RenderFrame } from './cityRenderer';
+import type { InhabitantActivityInput, InhabitantAgentInput, InhabitantOnlineFigure } from './inhabitants';
 
 const frames: Array<RenderFrame & { occluders?: unknown }> = [];
 vi.mock('./cityRenderer', async importOriginal => ({
@@ -20,6 +21,7 @@ const PANELS: Record<string, { left: number; top: number; width: number; height:
   'hud-legend': { left: 20, top: 834, width: 240, height: 46 },
   'hud-directory': { left: 1130, top: 20, width: 290, height: 670 },
   'city-camera': { left: 1292, top: 710, width: 128, height: 170 },
+  'tab-bar': { left: 0, top: 836, width: 1440, height: 64 },
 };
 
 let rafCallbacks: FrameRequestCallback[] = [];
@@ -122,5 +124,87 @@ describe('CityCanvas camera', () => {
     act(() => camera.dive({ kind: 'return', ms: 0 }));
     flush();
     expect(lastCamera()).toEqual(fitted);
+  });
+});
+
+describe('CityCanvas HUD panels', () => {
+  /** ResizeObserver stand-in recording what is observed, so detached panels can be checked for release. */
+  class RecordingResizeObserver {
+    static instances: RecordingResizeObserver[] = [];
+    observed = new Set<Element>();
+    unobserved: Element[] = [];
+    constructor(public callback: ResizeObserverCallback) { RecordingResizeObserver.instances.push(this); }
+    observe(target: Element) { this.observed.add(target); }
+    unobserve(target: Element) { this.observed.delete(target); this.unobserved.push(target); }
+    disconnect() { this.observed.clear(); }
+  }
+
+  const controller = { current: null as CityCameraController | null };
+  function Shell({ legend = true, tabBar = true }: { legend?: boolean; tabBar?: boolean }) {
+    return (
+      <div className="city-shell">
+        {legend && <div className="hud hud-legend" />}
+        {tabBar && <nav className="tab-bar" />}
+        <CityCanvas scene={scene} selectedId={null} filter="all" label="City" reducedMotion={false} controller={controller} onSelect={vi.fn()} />
+      </div>
+    );
+  }
+
+  beforeEach(() => { RecordingResizeObserver.instances = []; vi.stubGlobal('ResizeObserver', RecordingResizeObserver); });
+
+  it('keeps labels and the fit off the phone tab bar', () => {
+    render(<Shell legend={false} />);
+    flush();
+    expect(frames.at(-1)!.occluders).toEqual([{ left: 0, top: 836, right: 1440, bottom: 900 }]);
+  });
+
+  it('stops observing a HUD panel once it unmounts, and drops its rectangle', async () => {
+    const view = render(<Shell />);
+    flush();
+    const legend = document.querySelector('.hud-legend')!;
+    const panelObserver = RecordingResizeObserver.instances.find(observer => observer.observed.has(legend))!;
+    expect(panelObserver).toBeDefined();
+    expect(frames.at(-1)!.occluders).toHaveLength(2);
+
+    view.rerender(<Shell legend={false} />);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); // MutationObserver delivery
+    flush();
+    expect(panelObserver.unobserved).toContain(legend);
+    expect(panelObserver.observed.has(legend)).toBe(false);
+    expect(frames.at(-1)!.occluders).toEqual([{ left: 0, top: 836, right: 1440, bottom: 900 }]);
+  });
+});
+
+describe('CityCanvas inhabitants replans', () => {
+  const agents: InhabitantAgentInput[] = [{ agent_id: 'a1', name: 'Athena', presence: 'online' }];
+  const roomScene = buildCityScene([{ room_id: 'r1', title: 'Signal Lab' }, { room_id: 'r2', title: 'Forge' }]);
+  const controller = { current: null as CityCameraController | null };
+  const canvas = (activity: InhabitantActivityInput[]) => (
+    <CityCanvas scene={roomScene} selectedId={null} filter="all" label="City" reducedMotion={false} controller={controller} onSelect={vi.fn()} agents={agents} activity={activity} />
+  );
+  const figure = () => frames.at(-1)!.inhabitants!.figures[0] as InhabitantOnlineFigure;
+
+  it('plans on the frame clock and keeps the anchor when the same activity is polled again', () => {
+    const view = render(canvas([{ agentId: 'a1', roomId: 'r1' }]));
+    flush();
+    const first = figure();
+    // Same clock as the rAF frames (performance.now), not the Unix epoch of Date.now().
+    expect(Math.abs(first.phaseAnchor - performance.now())).toBeLessThan(60_000);
+    view.rerender(canvas([{ agentId: 'a1', roomId: 'r1' }]));
+    flush();
+    expect(figure().phaseAnchor).toBe(first.phaseAnchor);
+    expect(figure().transition).toBeUndefined();
+  });
+
+  it('re-paths only a figure whose linked room changed, gliding from where it was', () => {
+    const view = render(canvas([{ agentId: 'a1', roomId: 'r1' }]));
+    flush();
+    const first = figure();
+    view.rerender(canvas([{ agentId: 'a1', roomId: 'r2' }]));
+    flush();
+    const moved = figure();
+    expect(moved.phaseAnchor).toBe(first.phaseAnchor);
+    expect(moved.to).not.toEqual(first.to);
+    expect(moved.transition).toBeDefined();
   });
 });

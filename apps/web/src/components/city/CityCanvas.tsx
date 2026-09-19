@@ -1,11 +1,11 @@
 import { useEffect, useRef, type MutableRefObject } from 'react';
 import { clampZoom, diveCamera, fitZoom, hitTest, shouldRefitZoom, type Camera, type ScreenBox, type Viewport } from './isometricMath';
 import { DIVE_ZOOM, FOCUS_ZOOM, divePointCamera, easeIn, hudSafeFit, lerpCamera, occludersFrom, type DiveCameraMove } from './cameraMath';
-import { createRenderCache, labelAt, renderCity } from './cityRenderer';
+import { clearLabelCache, createRenderCache, labelAt, renderCity } from './cityRenderer';
 import { shouldSkipFrame } from './cityLoop';
 import type { CityScene } from './cityScene';
 import { CITY_MOTION, resolveCityPalette, type CityPalette } from './cityTokens';
-import { DEFAULT_INHABITANT_CAP, planInhabitants, type InhabitantActivityInput, type InhabitantAgentInput, type InhabitantPlan } from './inhabitants';
+import { DEFAULT_INHABITANT_CAP, INHABITANT_TRANSITION_MS, planInhabitants, type InhabitantActivityInput, type InhabitantAgentInput, type InhabitantPlan } from './inhabitants';
 import type { ArchetypeCategory } from './roomArchetypes';
 
 /** Stable empty defaults (City Shell §6): a caller that has no agents/activity yet never retriggers the
@@ -27,8 +27,9 @@ export interface CityCameraController {
   dive: (move: DiveCameraMove) => void;
 }
 
-/** HUD panels over the city whose rectangles the scene fit avoids (PROMPT §2). */
-const HUD_PANEL_SELECTOR = '.hud';
+/** HUD panels over the city whose rectangles the scene fit and the labels avoid (PROMPT §2), including the
+ * phone's bottom tab bar. */
+const HUD_PANEL_SELECTOR = '.hud, .tab-bar';
 
 interface CityCanvasProps {
   scene: CityScene;
@@ -102,12 +103,15 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     s.palette = resolveCityPalette(canvas);
     s.hasContext = true;
     const fit = () => hudSafeFit(s.scene.outerRadius, s.view, s.occluders);
-    // `now` (real wall-clock time) only anchors each online figure's deterministic starting phase — see
-    // planInhabitants; the figure's own id keeps its path stable across replans (agent list refetches,
-    // viewport-driven cap changes, scene rebuilds).
+    // One clock for plan and frames: the rAF timestamp is on the performance.now() timeline, and with reduced
+    // motion the frames use the frozen time, so a new figure starts exactly at its deterministic phase.
+    // Passing the plan on screen keeps every surviving figure's anchor (agent list refetches, activity polls,
+    // viewport-driven cap changes, scene rebuilds): nothing jumps; a re-pathed figure glides (instant with
+    // reduced motion).
     const replanInhabitants = () => {
       const cap = s.view.width > 0 && s.view.width < SMALL_SCREEN_WIDTH ? SMALL_SCREEN_INHABITANT_CAP : DEFAULT_INHABITANT_CAP;
-      s.inhabitants = planInhabitants(s.agents, s.activity, s.scene, Date.now(), cap);
+      const now = s.reducedMotion ? s.frozenTime : performance.now();
+      s.inhabitants = planInhabitants(s.agents, s.activity, s.scene, now, cap, s.inhabitants, s.reducedMotion ? 0 : INHABITANT_TRANSITION_MS);
     };
     s.replanInhabitants = replanInhabitants;
 
@@ -174,13 +178,20 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       stop(); s.requestFrame();
     };
 
-    /* --- HUD-safe margins: the panels over the canvas, measured on resize (canvas or panel) only --- */
+    /* --- HUD-safe margins: the panels over the canvas, measured on resize (canvas or panel) and when panels
+       mount or unmount --- */
     const panelObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => onPanelsChanged()) : null;
     const observed = new Set<Element>();
-    const measureOccluders = () => {
-      const root = canvas.closest('.city-shell, .city-view');
-      const panels = root ? Array.from(root.querySelectorAll<HTMLElement>(HUD_PANEL_SELECTOR)) : [];
+    const hudRoot = canvas.closest('.city-shell, .city-view');
+    const queryPanels = () => (hudRoot ? Array.from(hudRoot.querySelectorAll<HTMLElement>(HUD_PANEL_SELECTOR)) : []);
+    /** Observes new panels and stops observing the ones that left the document (no retained detached nodes). */
+    const syncObserved = (panels: readonly Element[]) => {
+      for (const panel of observed) if (!panel.isConnected || !panels.includes(panel)) { observed.delete(panel); panelObserver?.unobserve(panel); }
       for (const panel of panels) if (!observed.has(panel)) { observed.add(panel); panelObserver?.observe(panel); }
+    };
+    const measureOccluders = () => {
+      const panels = queryPanels();
+      syncObserved(panels);
       s.occluders = occludersFrom(canvas.getBoundingClientRect(), panels.map(panel => panel.getBoundingClientRect()));
     };
     const onPanelsChanged = () => {
@@ -189,6 +200,16 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       if (s.auto && !s.locked && !s.animation) s.camera = fit();
       s.requestFrame();
     };
+    // A panel that mounts or unmounts without resizing anything (the directory panel, the phone tab bar)
+    // changes the free area too. Only a changed panel set costs a layout read; other DOM churn is one query.
+    const panelMutations = hudRoot && typeof MutationObserver !== 'undefined'
+      ? new MutationObserver(() => {
+        const panels = queryPanels();
+        if (panels.length === observed.size && panels.every(panel => observed.has(panel))) return;
+        onPanelsChanged();
+      })
+      : null;
+    if (hudRoot) panelMutations?.observe(hudRoot, { childList: true, subtree: true });
     const initial = canvas.getBoundingClientRect();
     applySize(initial.width, initial.height);
     const resizeObserver = typeof ResizeObserver !== 'undefined'
@@ -208,7 +229,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
 
     // Label widths are measured once per building; re-measure after the display font finishes loading.
     const fonts = typeof document !== 'undefined' ? (document as Document & { fonts?: FontFaceSet }).fonts : undefined;
-    const onFontsLoaded = () => { s.cache.labels.clear(); s.requestFrame(); };
+    const onFontsLoaded = () => { clearLabelCache(s.cache); s.requestFrame(); };
     fonts?.addEventListener?.('loadingdone', onFontsLoaded);
 
     const onVisibility = () => { s.visible = document.visibilityState !== 'hidden'; if (s.visible) s.requestFrame(); else stop(); };
@@ -310,6 +331,8 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       s.dragging = false;
       resizeObserver?.disconnect();
       panelObserver?.disconnect();
+      panelMutations?.disconnect();
+      observed.clear();
       s.hasContext = false;
       dprQuery?.removeEventListener?.('change', onDprChange);
       fonts?.removeEventListener?.('loadingdone', onFontsLoaded);
@@ -332,7 +355,8 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     const sceneChanged = previous !== scene;
     const inhabitantInputsChanged = sceneChanged || s.agents !== agents || s.activity !== activity;
     s.scene = scene; s.filter = filter; s.reducedMotion = reducedMotion; s.agents = agents; s.activity = activity;
-    if (sceneChanged) s.cache.labels.clear();
+    // Measured labels, name tags and cards of the old scene: dropped so removed buildings never pile up.
+    if (sceneChanged) clearLabelCache(s.cache);
     // Polling hands us a new rooms array (and scene) often; only a changed footprint re-fits the camera
     // (the whole HUD-safe fit while the user has not moved it, else just the zoom). Never during a dive.
     if (sceneChanged && !s.locked && s.view.width && shouldRefitZoom(previous, scene)) {

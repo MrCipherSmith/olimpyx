@@ -35,6 +35,8 @@ export interface CityScene {
   drawOrder: CityBuilding[];
   /** Room buildings only, in input order. */
   roomBuildings: CityBuilding[];
+  /** The Pantheon landmark, looked up once per scene (inhabitants start there; the "+N" floats above it). */
+  pantheon: CityBuilding | null;
   /** Four cardinal avenues to the city edge followed by one avenue per room (same order as roomBuildings). */
   avenues: CityAvenue[];
   /** The per-room subset of `avenues`, used by the decorative road pulses. */
@@ -58,7 +60,8 @@ export function sceneFromBuildings(buildings: CityBuilding[], rings: number[], f
   const cardinal: CityAvenue[] = [0, 1, 2, 3].map(index => { const angle = index * Math.PI / 2 + Math.PI / 4; return { cos: Math.cos(angle), sin: Math.sin(angle), length: edge }; });
   const roomAvenues: CityAvenue[] = roomBuildings.filter(building => building.angle !== null)
     .map(building => ({ cos: Math.cos(building.angle!), sin: Math.sin(building.angle!), length: Math.hypot(building.x, building.y) }));
-  return { buildings, drawOrder: painterSort(buildings), roomBuildings, avenues: [...cardinal, ...roomAvenues], roomAvenues, rings, forumRadius, plazaHalf, outerRadius };
+  const pantheon = buildings.find(building => building.kind === 'pantheon') ?? null;
+  return { buildings, drawOrder: painterSort(buildings), roomBuildings, pantheon, avenues: [...cardinal, ...roomAvenues], roomAvenues, rings, forumRadius, plazaHalf, outerRadius };
 }
 
 /**
