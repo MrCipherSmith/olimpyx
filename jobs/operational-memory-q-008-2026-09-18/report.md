@@ -21,7 +21,8 @@
 | Fix client | subagent (Sonnet), TDD | 5 fixes; `09fb050` |
 | Docs note | orchestrator | API behavior changes; `082f418` |
 | Verify post-fix | orchestrator | typecheck pass; server 68/68, client 91/91, web 18/18, 0 skipped |
-| Re-review | review (Opus) | APPROVE_WITH_SUGGESTIONS; all prior findings resolved, 3 nits |
+| Re-review | review (Opus) | APPROVE_WITH_SUGGESTIONS; all prior findings resolved, 3 nits (closed in `cd108eb`) |
+| PRD rev 3 + validation unit test | orchestrator | PRD aligned with the implementation; memory schema unit tests in `validation.test.ts` |
 
 ## Delivered (PRD rev 2)
 - **Server** (`apps/server/src/memory.ts`, `secret-scan.ts`, `types.ts`, `app.ts`, `validation.ts`)
@@ -60,7 +61,7 @@
 ## Final Checks
 - Lint: no lint tooling configured.
 - Type check: PASS (server, web).
-- Tests: server 69/69, client 91/91, web 18/18; 0 skipped (live Postgres).
+- Tests: server 71/71, client 91/91, web 18/18; 0 skipped (live Postgres).
 
 ## Changes
 - 6 commits, 18 files, +1980 / −22 (see `git log main..HEAD`).

@@ -12,7 +12,7 @@
     "A2_search": "PostgreSQL FTS ('simple', generated search_tsv + GIN) with escaped ILIKE fallback when numnode(tsquery)=0; recency order; keyset cursor = memory_id",
     "A3_dedup_supersede": "SHA-256 fingerprint, 24h window, 200 deduplicated:true (skipped when supersedes_id present); supersedes_id verified (same agent, active, same kind) and applied atomically",
     "A4_rollback": "Synchronized by persona_revision: server personality_influence rows carry persona_revision; CLI persona rollback calls POST /memory/rollback with the exact reverted revision set; pending/--sync retry",
-    "A5_quotas_secrets": "Shared SECRET_RULES (client redaction.js source + server mirror + parity test, incl. 43-char base64url token rule) -> 422; 30 writes/hour -> 429; 500 active knowledge -> 409 memory_consolidation_required; 50 active influences -> 409 influence_limit_reached; per-agent advisory lock",
+    "A5_quotas_secrets": "Shared SECRET_RULES (client redaction.js source + server mirror + parity test, incl. 43-char base64url token rule) -> 422; 30 writes/hour and 10 consolidations/hour -> 429; 500 active knowledge -> 409 memory_consolidation_required; 50 active influences -> 409 influence_limit_reached; per-agent advisory lock",
     "A6_consolidation_scope": "Consolidation never archives personality_influence; skill forbids restating influences in summaries",
     "A7_authority": "Read/write/consolidate: owner or own session; rollback, reactivation of rolled-back records, memory events: owner only; agent token rejected (unchanged)",
     "A8_audit_and_get": "Append-only memory_events + inbox memory.rolled_back to owner and agent; GET /memory defaults to status=active (status=active|archived|all)"
@@ -31,8 +31,8 @@
     },
     "prd": {
       "status": "completed",
-      "revision": 2,
-      "completed_at": "2026-09-18T18:00:00.000Z"
+      "revision": 3,
+      "completed_at": "2026-09-19T00:00:00.000Z"
     },
     "plan": {
       "status": "completed",
@@ -202,5 +202,6 @@
   "follow_ups": [
     "ROADMAP Horizon 2 #8 after PR merge"
   ],
-  "nits_closed": true
+  "nits_closed": true,
+  "pr": "https://github.com/MrCipherSmith/olimpyx/pull/17"
 }

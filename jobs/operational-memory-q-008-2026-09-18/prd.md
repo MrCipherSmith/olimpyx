@@ -3,8 +3,8 @@
 | Metadata | Details |
 |---|---|
 | **Document ID** | PRD-2026-09-18-OPERATIONAL-MEMORY |
-| **Revision** | 2 (rewritten after documentation review and brainstorm, 2026-09-18) |
-| **Status** | Ready for implementation (decisions A1–A8 confirmed by owner) |
+| **Revision** | 3 (aligned with the implementation after code review, 2026-09-19); see §8 Revision history |
+| **Status** | Implemented — [PR #17](https://github.com/MrCipherSmith/olimpyx/pull/17) (decisions A1–A8 confirmed by owner) |
 | **Author** | MrCipherSmith / Olimpyx Team |
 | **Target Job Directory** | `jobs/operational-memory-q-008-2026-09-18/` |
 | **Target Packages** | `apps/server/`, `packages/client/`, `skills/olimpyx-participant/`, `docs/` |
@@ -35,12 +35,12 @@ Failure modes today:
 |---|---|
 | A1 | Consolidation: dedicated `memory_summaries` table (append-only revisions); covered memories are archived with `archived_reason='consolidated'`. |
 | A2 | Search: PostgreSQL FTS (`'simple'` config, stored generated `tsvector` + GIN) with escaped `ILIKE` fallback when the parsed query is empty. No ranking; results are ordered by recency for stable keyset pagination. |
-| A3 | Dedup: SHA-256 fingerprint, 24 h window, idempotent `200 OK` with `deduplicated: true`. Superseding via verified `supersedes_id` in one transaction. |
+| A3 | Dedup: SHA-256 fingerprint (scoped by `persona_revision` for influences), 24 h window, idempotent `200 OK` with `deduplicated: true` and no audit row. Superseding via verified `supersedes_id` in one transaction. |
 | A4 | **Influence rollback is synchronized by `persona_revision`.** Server `personality_influence` records carry the local persona revision; the CLI `persona rollback` rolls back locally and then calls the server rollback with the exact set of reverted revisions. |
-| A5 | Guardrails: shared secret-rule set (client `redaction.js` is the source) → `422`; 30 writes/hour → `429`; 500 active knowledge memories → `409`; 50 active influences → `409`. |
+| A5 | Guardrails: shared secret-rule set (client `redaction.js` is the source) → `422`; 30 writes/hour and 10 consolidations/hour → `429`; 500 active knowledge memories → `409`; 50 active influences → `409`. |
 | A6 | **Consolidation excludes `personality_influence`.** Influences are never archived by consolidation and must not be restated inside summaries (skill rule). |
 | A7 | **Authority:** memory writes, reads and consolidation — owner or the agent's session; **influence rollback and reactivation of rolled-back records — owner only** (D-010). |
-| A8 | **Audit:** append-only `memory_events` table + `inbox_events` (`memory.rolled_back`) to the owner and the agent. `GET` defaults to `status=active`. |
+| A8 | **Audit:** append-only `memory_events` table for state changes + `inbox_events` (`memory.rolled_back`) to the owner and the agent when a rollback changes anything. `GET` defaults to `status=active`. |
 
 ## 3. Functional Requirements
 
@@ -50,14 +50,15 @@ Nine categories: `fact`, `decision`, `preference`, `relationship`, `project`, `t
 - `personality_influence` is the only category governed by persona rollback (§3.6). Every other category is "knowledge" and survives rollback.
 
 ### 3.2 Write rules (`POST /v1/agents/:agentId/memory`)
-Processing order inside one transaction guarded by `pg_advisory_xact_lock(hashtext('memory:'||agentId))` (same pattern as `app.ts:659`):
+Processing order inside one transaction guarded by `pg_advisory_xact_lock(hashtext('memory:'||agentId))` (same pattern as `app.ts:659`). The transaction is the idempotency transaction itself: the memory effect and the stored `Idempotency-Key` response commit together, and an error response rolls both back and is never cached. All timestamps and windows below use one `clock_timestamp()` read **after** the lock is taken, so a write that waited behind a consolidation is dated after that consolidation's `covered_until`.
 
 1. **Schema validation** → `400 validation_error`.
-   - `active` becomes optional (default `true`). `active:false` on create stores the record archived with `archived_reason='manual'`.
+   - `active` becomes optional (default `true`). `active:false` on create stores the record archived with `archived_reason='manual'` and skips the capacity check.
+   - `body` becomes optional (default `''`, max 50 000).
    - `personality_influence` requires `persona_revision` (format `^\d{13}-<uuid>$`, same as `state.js:99`); other kinds must not send it.
 2. **Secret refusal** → `422 secret_detected` (`details.kind` names the rule, never echoes the match). Scans `summary`, `body`, `tags`, and `source_ref` (all string fields).
 3. **Superseding check** (only if `supersedes_id`): the target must belong to the same agent → else `404 not_found` (foreign and missing look identical). It must be active → else `409 memory_not_active`. It must have the same `kind` → else `409 kind_mismatch`.
-4. **Deduplication** (skipped when `supersedes_id` is present — explicit intent wins): fingerprint = SHA-256 of `kind + ":" + collapse_whitespace(lower(trim(summary)))`. If an active memory of this agent has the same fingerprint and `created_at > now() - 24h`, return `200` with the existing record and `deduplicated: true`. No row is written; the write does not count towards the rate limit.
+4. **Deduplication** (skipped when `supersedes_id` is present — explicit intent wins): fingerprint = SHA-256 of `scope + ":" + collapse_whitespace(lower(trim(summary)))`, where `scope` is `kind`, or `personality_influence:<persona_revision>` for influences, so the same influence can be recorded again under a new persona revision and is reverted with the right one. If an active memory of this agent has the same fingerprint and `created_at > now - 24h`, return `200` with the existing record and `deduplicated: true`. No memory row and no audit row are written; the write does not count towards the rate limit. On upgrade, the migration recomputes fingerprints of active influences from the last 24 h.
 5. **Rate limit** → `429 quota_exceeded` + `Retry-After` header + `details.retry_after_sec`. Limit: 30 rows created per agent in the trailing hour, regardless of principal. `retry_after_sec` = seconds until the oldest row in the window leaves it.
 6. **Capacity** → `409 memory_consolidation_required` if active knowledge memories ≥ 500; → `409 influence_limit_reached` if active `personality_influence` ≥ 50 (resolved by owner rollback or manual archive). When `supersedes_id` is present the capacity check is skipped (net active count is unchanged).
 7. **Insert**, then (if superseding) `UPDATE` the target: `active=false, superseded_by=<new id>, archived_reason='superseded'`, checking `rowCount=1`. Emit `memory_events` rows.
@@ -65,7 +66,7 @@ Processing order inside one transaction guarded by `pg_advisory_xact_lock(hashte
 All writes stay behind the existing `Idempotency-Key` wrapper (`idem()`).
 
 ### 3.3 Archive state model
-`archived_reason` enum: `superseded` | `consolidated` | `personality_rollback` | `manual`. `active=true` ⇔ `archived_reason IS NULL`.
+`archived_reason` enum: `superseded` | `consolidated` | `personality_rollback` | `manual`. `active=true` ⇔ `archived_reason IS NULL`, enforced by the `chk_memories_archived_reason` CHECK constraint (added once, after backfilling legacy rows).
 
 | From reason | Reactivate via `PATCH active=true`? |
 |---|---|
@@ -88,7 +89,7 @@ All writes stay behind the existing `Idempotency-Key` wrapper (`idem()`).
 `GET /v1/agents/:agentId/memory/:memoryId` returns one record (any status) with full metadata → `404` when missing or foreign.
 
 ### 3.5 Consolidation and selective startup (D-004)
-`POST /v1/agents/:agentId/memory/consolidate` — owner or session; requires `Idempotency-Key`; takes the per-agent advisory lock.
+`POST /v1/agents/:agentId/memory/consolidate` — owner or session; requires `Idempotency-Key`; takes the per-agent advisory lock inside the idempotency transaction; limited to 10 consolidations per agent per hour → `429 quota_exceeded` (same shape as the write limit).
 - Body: `{ summary: string (≤ 20000), covered_until?: ISO datetime }`.
 - `covered_until` defaults to `now()`. It must be ≤ `now()` and ≥ the previous revision's `covered_until`; otherwise `400 bad_request`.
 - `summary` is secret-scanned (§3.2 step 2).
@@ -121,17 +122,18 @@ All writes stay behind the existing `Idempotency-Key` wrapper (`idem()`).
 - Deactivates active `personality_influence` rows of the agent where `persona_revision = ANY(reverted_persona_revisions)`. It also deactivates legacy rows with `persona_revision IS NULL AND created_at > target_created_at`, mirroring the local fallback. Affected rows get `archived_reason='personality_rollback'`.
 - Knowledge categories are never touched.
 - `reason` is secret-scanned.
-- Emits one `memory_events` row (`type='rolled_back'`, affected ids). Emits `inbox_events` of type `memory.rolled_back` to the owner and to the agent, so a running session re-bootstraps.
-- Response `200`: `{ data: { rolled_back_count, memory_ids, to_persona_revision } }`.
+- When at least one row changes: emits one `memory_events` row (`type='rolled_back'`, affected ids) and `inbox_events` of type `memory.rolled_back` to the owner and to the agent; the skill tells a running session to re-run `bootstrap` on that event. A rollback that changes nothing writes no audit row and no inbox events.
+- Response `200`: `{ data: { rolled_back_count, memory_ids, to_persona_revision } }` (`rolled_back_count` may be `0`).
 - Archived influences stay inspectable through `GET ?status=archived&kind=personality_influence` (owner inspection requirement).
 
 **Client synchronization:**
-- `olimpyx persona rollback REVISION` performs the local rollback, then calls the server rollback with the owner credential (`OLIMPYX_OWNER_TOKEN` or the stored owner credential).
-- If no owner credential is available or the call fails, the local rollback still succeeds. A pending entry is stored in local state, and the CLI prints the exact retry command (`olimpyx memory rollback --sync`).
-- Retries reuse the same Idempotency-Key.
+- `olimpyx persona rollback REVISION` first resolves the agent id (`OLIMPYX_AGENT_ID` or the enrolled configuration). Without one it refuses **before** changing local state; `--local-only` rolls back only the local persona, with no server sync.
+- It then performs the local rollback and calls the server rollback with the owner credential (`OLIMPYX_OWNER_TOKEN` or the stored owner credential), using `Idempotency-Key: persona-rollback:<new local revision>`. The key is unique per rollback, so rolling back to the same target twice never collides with a stored key.
+- If no owner credential is available or the call fails, the local rollback still stands. A pending entry (agent id, payload, key) is stored in local state, the output includes `sync_error` when a call failed, and the CLI prints the retry command (`olimpyx memory rollback --sync`).
+- `memory rollback --sync` replays every pending entry with its stored key, continues past failures and reports each entry as `synced`, `dropped` (non-retryable 400/403/404/409/422 — removed from pending) or `pending` (5xx, network, 401, 429). A manual `memory rollback` uses `--idempotency-key` or a random key.
 
 ### 3.7 Audit (`memory_events`)
-Append-only. Columns: `id, agent_id, type (created | deduplicated | superseded | archived | reactivated | consolidated | rolled_back), actor_type, actor_id, memory_ids jsonb, summary_id, reason, created_at`.
+Append-only record of state changes. Columns: `id, agent_id, type (created | superseded | archived | reactivated | consolidated | rolled_back), actor_type, actor_id, memory_ids jsonb, summary_id, reason, created_at`. Deduplicated writes, no-op PATCH requests and rollbacks that change nothing write no row, so replays cannot grow the table.
 - Readable by the owner via `GET /v1/agents/:agentId/memory/events` (keyset by id, same convention).
 - Never contains memory bodies.
 
@@ -190,19 +192,21 @@ IDs use the existing `id(prefix)` format (`<prefix>_<32 hex>`), not ULIDs. `sour
 | 404 | `not_found` | missing/foreign memory or `supersedes_id` |
 | 409 | `memory_not_active`, `kind_mismatch`, `memory_not_reactivatable`, `memory_consolidation_required`, `influence_limit_reached` | see §3.2–§3.3 |
 | 422 | `secret_detected` | secret rule match |
-| 429 | `quota_exceeded` | 30 writes/hour |
+| 429 | `quota_exceeded` | 30 writes/hour or 10 consolidations/hour; `Retry-After` header + `details.retry_after_sec` |
 
 ## 5. Secret Rules (shared)
 - The rule set is `packages/client/src/redaction.js`, exported as `SECRET_RULES`: private keys, `Bearer`/`Basic` headers, `ghp_/sk-/xox*/AKIA` tokens, credential assignments.
 - It is extended in both places with an **Olimpyx-token rule**: a standalone 43-character base64url string containing upper-case, lower-case and digit characters. This matches the `randomBytes(32).toString("base64url")` format at `app.ts:13`. The `olimpyx_` prefix pattern from revision 1 is dropped because it matches nothing.
 - The server keeps a TypeScript mirror (`apps/server/src/secret-scan.ts`). A parity test asserts identical pattern sources, so the two sides cannot drift.
+- The client scans every outgoing request body. Requests that must carry a credential (login, register, enroll) are scanned with only the top-level credential fields removed (`password`, `enrollment_token`, `access_token`, `agent_token`, `session_token`), so the rest of the body — for example the enrollment `profile` — is still checked. No endpoint is exempt by path.
+- The 43-character rule can refuse legitimate base64url digests (SRI or PKCE hashes); the skill tells agents to describe or truncate such values.
 - This remains a basic scanner, not a DLP guarantee.
 
 ## 6. Acceptance Criteria
 
 1. **AC-1 Categories:** the 9 kinds are accepted; an unknown kind → 400. `personality_influence` without `persona_revision` → 400.
 2. **AC-2 Secrets:** `sk-…`, a `Bearer` header, a private key, or a bare 43-character Olimpyx token in summary/body/tags/source_ref/consolidation summary/rollback reason → 422 with no echo of the secret.
-3. **AC-3 Dedup:** an identical write within 24 h → 200 `deduplicated:true`, no new row, not counted toward the rate limit. A write with `supersedes_id` is never deduplicated.
+3. **AC-3 Dedup:** an identical write within 24 h → 200 `deduplicated:true`, no new memory row, no audit row, not counted toward the rate limit. A write with `supersedes_id` is never deduplicated. The same influence under a new `persona_revision` creates a new row.
 4. **AC-4 Supersede:**
    - A valid chain sets `superseded_by` and archives the target atomically.
    - A foreign or missing id → 404, an inactive target → 409, a different kind → 409.
@@ -216,12 +220,14 @@ IDs use the existing `id(prefix)` format (`<prefix>_<32 hex>`), not ULIDs. `sour
    - It creates revision N+1 and archives only knowledge memories with `created_at <= covered_until`; influences stay active.
    - Concurrent calls produce distinct revisions and no 500.
    - A future `covered_until`, or one earlier than the previous revision → 400.
+   - The 11th consolidation within an hour → 429; replaying a consolidation `Idempotency-Key` returns the same revision without a second row.
+   - A write that waited behind a consolidation is dated after its `covered_until` and appears among bootstrap's recent memories.
    - Bootstrap returns the latest summary, recent memories and the `memory` pointers.
    - With no summary, `memory_summary` equals the MVP output.
 7. **AC-7 Rollback:**
    - Owner rollback archives only influences whose `persona_revision` is in the reverted set (plus legacy rows after `target_created_at`), and leaves facts and decisions active.
    - A session caller → 403.
-   - `memory_events` and `inbox_events` (`memory.rolled_back`) are written for owner and agent.
+   - `memory_events` and `inbox_events` (`memory.rolled_back`) are written for owner and agent when rows change; a rollback that changes nothing returns `rolled_back_count: 0` and writes neither.
    - Rolled-back influences disappear from bootstrap and are listed under `status=archived`.
 8. **AC-8 Limits:**
    - The 31st write in an hour → 429 with `Retry-After`.
@@ -235,12 +241,21 @@ IDs use the existing `id(prefix)` format (`<prefix>_<32 hex>`), not ULIDs. `sour
 11. **AC-11 Client/CLI:**
     - The SDK provides `saveMemory`, `listMemories`, `getMemory`, `archiveMemory`, `restoreMemory`, `consolidateMemories`, `rollbackMemories` and `memoryEvents`.
     - The CLI provides `memory save|list|get|archive|restore|consolidate|rollback|events`.
-    - `persona rollback` synchronizes with the server, or leaves a retryable pending entry.
-    - `saveMemory` runs `assertSafeOutbound` before sending.
-12. **AC-12 Compatibility:** existing tests (`mvp.test.ts:79` etc.) pass unchanged. `POST /memory` without `active` succeeds.
+    - `persona rollback` synchronizes with the server, or leaves a retryable pending entry; it refuses without an agent id unless `--local-only`; two rollbacks to the same target use different idempotency keys.
+    - `memory rollback --sync` continues past failures, drops non-retryable entries and keeps retryable ones.
+    - `saveMemory` runs `assertSafeOutbound` before sending; enroll/login bodies are scanned without their credential fields.
+12. **AC-12 Compatibility:** existing tests (`mvp.test.ts:79` etc.) pass unchanged. `POST /memory` without `active` or `body` succeeds. The migration upgrades a pre-Q-008 `memories` table and is safe to re-run without re-validating the CHECK constraint.
 
 ## 7. Out of Scope
 - Semantic (pgvector) memory search — `embeddings.ts` exists, but memory search stays lexical in this iteration; revisit after Q-016 resource limits.
 - Rollback of a consolidation revision (restoring archived memories from a summary) and permanent deletion (`05_MEMORY_MODEL.md` §7 remains open for deletion).
 - Server-side summarization or extraction of any kind.
 - Multi-device persona synchronization (Q-007).
+
+## 8. Revision History
+
+| Revision | Date | Change |
+|---|---|---|
+| 1 | 2026-09-18 | Initial draft. |
+| 2 | 2026-09-18 | Rewritten after documentation review and brainstorm; decisions A1–A8. |
+| 3 | 2026-09-19 | Aligned with the implementation after two code-review rounds (PR #17). Changes: <ul><li>§3.2: optional `body`; one transaction for the memory effect and the idempotency record; lock-time clock.</li><li>A3/§3.2: influence fingerprints scoped by `persona_revision`, no audit row for dedup.</li><li>A5/§3.5: consolidation limit of 10/h.</li><li>§3.3: CHECK constraint.</li><li>A8/§3.6: audit and inbox events only when a rollback changes rows.</li><li>§3.6: client key per rollback revision, agent id required or `--local-only`, `--sync` drop/pending semantics.</li><li>§3.7: event types.</li><li>§5: credential-field stripping instead of path exemptions.</li><li>AC-3, AC-6, AC-7, AC-11, AC-12 updated to match.</li></ul> |

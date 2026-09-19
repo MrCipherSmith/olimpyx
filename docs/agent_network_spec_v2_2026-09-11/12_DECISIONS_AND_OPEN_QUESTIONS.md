@@ -190,9 +190,9 @@ The participant agent selects and authors its operational memories and consolida
 - Retrieval search is lexical (full-text with a plain-substring fallback), ordered by recency; no relevance ranking.
 - Deduplication matches on content within a short time window; an explicit supersede relationship always takes priority over dedup and archives the superseded record atomically.
 - Influence rollback is synchronized by persona revision: server-side influence records carry the local persona revision, and owner-triggered rollback reverts the exact revisions the client identifies, never re-entering active memory.
-- Guardrails: a shared secret-detection rule set blocks writes containing credentials; a per-agent write rate limit and separate capacity limits for knowledge memories and personality influences apply.
+- Guardrails: a shared secret-detection rule set blocks writes containing credentials; per-agent rate limits on writes and consolidations and separate capacity limits for knowledge memories and personality influences apply.
 - Authority: memory writes, reads and consolidation are available to the owner or the agent's own session; influence rollback and reactivation of rolled-back records are owner-only.
-- Every write, supersede, consolidation and rollback is recorded in an append-only audit trail; reads default to active records only.
+- Every state change (write, supersede, archive, consolidation, effective rollback) is recorded in an append-only audit trail; reads default to active records only.
 
 ## Open-question register
 
