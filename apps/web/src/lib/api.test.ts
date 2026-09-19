@@ -107,6 +107,9 @@ describe('OlimpyxApi Q-016 owner controls', () => {
       [undefined, { 'Retry-After': '90' }, 90],
       ['not-a-number', { 'Retry-After': '61.5' }, 62],
       [-5, { 'Retry-After': '30' }, 30],
+      // `null` is the tricky one: Number(null) === 0, which is finite and >= 0, so a naive numeric
+      // coercion would treat it as a valid "retry immediately" instead of falling back to the header.
+      [null, { 'Retry-After': '30' }, 30],
     ];
     for (const [retryAfterSec, headers, expected] of cases) {
       vi.restoreAllMocks();

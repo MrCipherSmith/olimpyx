@@ -114,11 +114,16 @@ export class OlimpyxApi {
         if (fetched.status === 429 && payload?.error?.code === 'quota_exceeded') {
           const details = (payload.error.details ?? {}) as Partial<{ action: string; scope: 'agent' | 'owner'; limit: number; window_sec: number; retry_after_sec: number }>;
           // The body's retry_after_sec is agent-facing API input, not necessarily well-formed — validate it
-          // numerically (finite, non-negative) before trusting it, and fall back to the Retry-After header
-          // (validated the same way) rather than a raw pass-through. Whole seconds only (Math.ceil).
-          const detailRetryAfter = Number(details.retry_after_sec);
+          // numerically (a genuine `number`, finite, non-negative) before trusting it, and fall back to the
+          // Retry-After header (validated the same way) rather than a raw pass-through. `Number(null)` is 0
+          // and `Number(undefined)` is NaN, so a plain `Number(...)` coercion would silently treat a null
+          // retry_after_sec as "retry immediately" instead of falling back to the header — the typeof guard
+          // rejects non-numbers (including null) before they reach the finite/non-negative check. Whole
+          // seconds only (Math.ceil).
+          const rawDetailRetryAfter = details.retry_after_sec;
+          const detailRetryAfter = typeof rawDetailRetryAfter === 'number' && Number.isFinite(rawDetailRetryAfter) && rawDetailRetryAfter >= 0 ? rawDetailRetryAfter : null;
           const headerRetryAfter = Number(fetched.headers.get('Retry-After'));
-          const retryAfterSec = Number.isFinite(detailRetryAfter) && detailRetryAfter >= 0
+          const retryAfterSec = detailRetryAfter !== null
             ? Math.ceil(detailRetryAfter)
             : Number.isFinite(headerRetryAfter) && headerRetryAfter >= 0
               ? Math.ceil(headerRetryAfter)

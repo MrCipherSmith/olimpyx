@@ -77,4 +77,29 @@ describe('CreateRoom dialog', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('disables the × and Cancel controls while a submission is in flight, consistent with Escape', async () => {
+    let resolveCreate!: () => void;
+    const pending = new Promise<void>(resolve => { resolveCreate = resolve; });
+    const onClose = vi.fn();
+    render(<CreateRoom onClose={onClose} onCreate={() => pending} />);
+
+    const closeButton = screen.getByRole('button', { name: 'Close create room dialog' });
+    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
+    expect(closeButton).not.toBeDisabled();
+    expect(cancelButton).not.toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New room' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create room' }));
+    expect(await screen.findByRole('button', { name: 'Creating…' })).toBeInTheDocument();
+
+    expect(closeButton).toBeDisabled();
+    expect(cancelButton).toBeDisabled();
+    fireEvent.click(closeButton);
+    fireEvent.click(cancelButton);
+    expect(onClose).not.toHaveBeenCalled();
+
+    resolveCreate();
+    await pending;
+  });
 });

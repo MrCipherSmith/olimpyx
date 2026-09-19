@@ -29,6 +29,10 @@ export interface RenderFrame {
   dpr?: number;
   /** Per-canvas memo of derived pixels; without it everything is drawn directly. */
   cache?: CityRenderCache;
+  /** True while the camera is diving or being dragged: every frame's camera differs, so rebuilding and
+   * blitting the static layer would cost more than drawing the ground directly. The cache stays untouched
+   * (not even invalidated) and is picked back up on the next idle/decorative frame. */
+  cameraMoving?: boolean;
 }
 
 type Ctx = CanvasRenderingContext2D;
@@ -99,7 +103,9 @@ export function renderCity(ctx: Ctx, frame: RenderFrame): void {
   const painter = makePainter(ctx, frame, camera, view);
   ctx.save();
   ctx.globalAlpha = 1;
-  if (!drawCachedGround(painter)) drawGround(painter);
+  // Short-circuits before drawCachedGround() is even called, so a moving camera never touches (or
+  // invalidates) the offscreen layer at all.
+  if (frame.cameraMoving || !drawCachedGround(painter)) drawGround(painter);
   if (frame.animate && frame.particles > 0) drawPulses(painter);
   const drawOrder = frame.scene.drawOrder;
   for (let index = 0; index < drawOrder.length; index++) {
@@ -134,10 +140,22 @@ function makePainter(ctx: Ctx, frame: RenderFrame, camera: Camera, view: Viewpor
 
 const BOX: ScreenBox = { left: 0, top: 0, right: 0, bottom: 0 };
 
+/** Matches footprintScreenBox's own half-width scale, so a screen-space radius can be turned back
+ * into an equivalent world "reach" that produces that same half-width once footprintScreenBox
+ * re-applies the factor. */
+const ISO_HALFWIDTH_FACTOR = Math.SQRT2 * COS30;
+
 /** World reach (footprint radius incl. decorations) and top height of what a building may paint. */
 function buildingExtent(building: CityBuilding): { reach: number; top: number } {
   if (building.kind === 'library') return LIBRARY_EXTENT;
   if (building.kind === 'pantheon') return PANTHEON_EXTENT;
+  // The active/hovered-building halo (drawBuilding, below) is a screen-space circle of radius up to
+  // max(size*1.6, height*0.8)*zoom — at zoom above ~1.1 that reaches further sideways than the plain
+  // footprint reach (70) scaled by the isometric width factor, so a tall room near the viewport edge
+  // could have its halo clipped by culling that only knew about the footprint. Fold the halo's reach
+  // into the box so it stays fully covered.
+  const haloReach = Math.max(building.size * 1.6, building.height * 0.8) / ISO_HALFWIDTH_FACTOR;
+  ROOM_EXTENT.reach = Math.max(70, haloReach);
   ROOM_EXTENT.top = building.height + 30;
   return ROOM_EXTENT;
 }

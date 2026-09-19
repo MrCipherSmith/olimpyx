@@ -175,14 +175,11 @@ describe('authenticated showcase surfaces', () => {
     expect(screen.queryByText(/Semantic search is temporarily unavailable/)).not.toBeInTheDocument();
   });
 
-  it('feeds the 5s room-poll outcome into the network status, so an outage while a room is open shows', async () => {
-    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
-    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
-    const room = { room_id: 'room-1', slug: 'room-1', title: 'Room', description: '', created_by: { actor_type: 'owner', actor_id: 'owner-1', display_name: 'Owner' }, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z' };
-
-    // Capture the room-poll interval's callback instead of waiting 5 real seconds for it, without
-    // disturbing any other interval (e.g. testing-library's own `waitFor` polling uses setInterval
-    // too) — only a 5000ms delay is ours, everything else passes through to the real timer functions.
+  /** Installs a spy that captures the room-poll interval's 5s callback instead of waiting on it for
+   *  real, without disturbing any other interval (e.g. testing-library's own `waitFor` polling uses
+   *  setInterval too) — only a 5000ms delay is ours, everything else passes through to the real timer
+   *  functions. Returns a getter for the captured callbacks. */
+  function captureRoomPollIntervals() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const realSetInterval = window.setInterval.bind(window) as (...args: any[]) => unknown;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,6 +194,15 @@ describe('authenticated showcase surfaces', () => {
       if (id !== undefined) liveIntervals.delete(id);
       realClearInterval(id);
     }) as typeof window.clearInterval);
+    return liveIntervals;
+  }
+
+  const room = { room_id: 'room-1', slug: 'room-1', title: 'Room', description: '', created_by: { actor_type: 'owner', actor_id: 'owner-1', display_name: 'Owner' }, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z' };
+
+  it('feeds the 5s room-poll outcome into the network status, so a 5xx from a reachable API is shown as degraded, not offline', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
 
     let messageCalls = 0;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
@@ -217,7 +223,88 @@ describe('authenticated showcase surfaces', () => {
 
     const [poll] = liveIntervals.values();
     await poll();
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Degraded'));
+    expect(messageCalls).toBe(2);
+  });
+
+  it('marks the network offline only when the room poll cannot reach the API at all', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+
+    let messageCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) {
+        messageCalls += 1;
+        if (messageCalls === 1) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+        throw new TypeError('Failed to fetch'); // simulates an actual network failure, not an HTTP error
+      }
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+
+    const { container } = render(<App />);
+    const networkBadge = () => container.querySelector('.network-status') as HTMLElement;
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Online'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+
+    const [poll] = liveIntervals.values();
+    await poll();
     await waitFor(() => expect(networkBadge()).toHaveTextContent('Offline'));
     expect(messageCalls).toBe(2);
+  });
+
+  it('a 4xx room-poll error (a reachable API correctly rejecting the request) leaves the network status unchanged', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+
+    let messageCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) {
+        messageCalls += 1;
+        if (messageCalls === 1) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+        return new Response(JSON.stringify({ error: { message: 'Forbidden' } }), { status: 403 });
+      }
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+
+    const { container } = render(<App />);
+    const networkBadge = () => container.querySelector('.network-status') as HTMLElement;
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Online'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+
+    const [poll] = liveIntervals.values();
+    await poll();
+    await waitFor(() => expect(messageCalls).toBe(2));
+    expect(networkBadge()).toHaveTextContent('Online');
+  });
+
+  it('a successful room poll does not upgrade a degraded status (set by the main load) to online', async () => {
+    sessionStorage.setItem('olimpyx.session', JSON.stringify({ token: 'owner-token', user: { id: 'owner-1', email: 'owner@example.test', displayName: 'Owner' } }));
+    window.history.replaceState(null, '', '/?view=rooms&room=room-1');
+    const liveIntervals = captureRoomPollIntervals();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url.startsWith('/v1/rooms/room-1/messages')) return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+      // One of the main load's three endpoints keeps failing, so the initial load settles as Degraded.
+      if (url.startsWith('/v1/agents')) return new Response(JSON.stringify({ error: { message: 'Server error' } }), { status: 500 });
+      if (url.startsWith('/v1/rooms')) return new Response(JSON.stringify({ data: [room], page: { next_cursor: null } }), { status: 200 });
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), { status: 200 });
+    });
+
+    const { container } = render(<App />);
+    const networkBadge = () => container.querySelector('.network-status') as HTMLElement;
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Degraded'));
+    await waitFor(() => expect(liveIntervals.size).toBe(1));
+
+    const [poll] = liveIntervals.values();
+    await poll();
+    await waitFor(() => expect(networkBadge()).toHaveTextContent('Degraded'));
+    expect(networkBadge()).not.toHaveTextContent('Online');
   });
 });

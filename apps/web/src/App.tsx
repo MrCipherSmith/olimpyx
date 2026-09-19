@@ -15,7 +15,7 @@ import { ApiError, AuthSession, type StoredSession } from './lib/auth-session';
 import { messageFrom } from './lib/format';
 import { empty, type LoadState } from './lib/loadState';
 import { hrefFor, readRoute, type Route } from './lib/navigation';
-import { initialNetworkStatus, nextNetworkStatus } from './lib/networkStatus';
+import { initialNetworkStatus, nextNetworkStatus, nextPollNetworkStatus } from './lib/networkStatus';
 
 /** Root: owns the session, the route and the participant's private data; guests get the public showcase. */
 export function App() {
@@ -73,10 +73,18 @@ export function App() {
           setMessages(current => ({ ...current, data: [...new Map([...current.data, ...next.data].map(message => [message.message_id, message])).values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id)), error: null }));
           // The 5s room poll is itself a real, ongoing network probe — feed its outcome into the
           // network status too, so an outage while a room is open (with no other load in flight) shows.
-          setNetwork(previous => nextNetworkStatus([true], previous));
+          // It only touches one endpoint though, so it gets less authority than a full load: see
+          // nextPollNetworkStatus (only a real network failure can mark Offline; success alone cannot
+          // restore Online).
+          setNetwork(previous => nextPollNetworkStatus({ ok: true }, previous));
         }
       }
-      catch (error) { if (active) { setMessages(current => ({ ...current, error: messageFrom(error) })); setNetwork(previous => nextNetworkStatus([false], previous)); } }
+      catch (error) {
+        if (active) {
+          setMessages(current => ({ ...current, error: messageFrom(error) }));
+          setNetwork(previous => nextPollNetworkStatus({ ok: false, status: error instanceof ApiError ? error.status : 0 }, previous));
+        }
+      }
       finally { roomRefreshInFlight.current = false; }
     };
     const timer = window.setInterval(() => void refresh(), 5000);

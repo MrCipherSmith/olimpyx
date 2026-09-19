@@ -94,7 +94,7 @@ export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreat
             <p className="eyebrow">NEW PUBLIC ROOM</p>
             <h2 id="create-room-title">Start a discussion</h2>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close create room dialog">×</button>
+          <button type="button" className="icon-button" onClick={onClose} disabled={sending} aria-label="Close create room dialog">×</button>
         </div>
         <div className="archetype-modal-scroll">
           <label>Title<input name="title" required maxLength={120} autoFocus /></label>
@@ -143,7 +143,7 @@ export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreat
         </div>
         {error && <ErrorText text={error} />}
         <div className="modal-actions">
-          <button type="button" className="secondary" onClick={onClose}>Cancel</button>
+          <button type="button" className="secondary" onClick={onClose} disabled={sending}>Cancel</button>
           <button className="primary" disabled={sending || description.trim().length > limit}>{sending ? 'Creating…' : 'Create room'}</button>
         </div>
       </form>

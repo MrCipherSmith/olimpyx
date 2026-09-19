@@ -67,6 +67,19 @@ describe('building culling', () => {
     const camera = { focalX: 0, focalY: 40 - 500 / 2 - 60, zoom: 1 };
     expect(buildingOnScreen(pantheon, camera, view)).toBe(true);
   });
+
+  it('keeps a tall active-room building on screen while its halo (up to 0.8x height) still reaches the viewport, beyond the plain footprint reach', () => {
+    // Tall room (telemetry_beacon-sized: size 46, height 150) sitting off-centre at zoom 1.3 — the sort
+    // of "zoom > ~1.1" case where the active-building halo (drawBuilding: up to
+    // max(size*1.6, height*0.8)*zoom + 14 screen px) reaches noticeably further sideways than the
+    // isometric footprint box (reach 70) that culling used to key off alone.
+    const tallRoom = { id: 'room:tall', kind: 'room' as const, shape: 'telemetry_beacon' as const, label: 'Beacon', color: 'gold' as const, x: 0, y: 0, size: 46, height: 150, ring: 0, angle: 0 };
+    const zoom = 1.3;
+    // Solved so the plain footprint box (reach 70, +CULL_MARGIN) sits just outside the viewport's right
+    // edge, but a box that also covers the halo's reach still overlaps it.
+    const camera = { focalX: -446.1538, focalY: 0, zoom };
+    expect(buildingOnScreen(tallRoom, camera, view)).toBe(true);
+  });
 });
 
 describe('static layer cache', () => {
@@ -110,6 +123,43 @@ describe('static layer cache', () => {
       expect(layerCalls.clearRect).toBe(2); // camera moved: ground rebuilt
       expect(assigned.has('shadowBlur')).toBe(false);
       expect(calls.drawImage).toBeGreaterThan(3); // ground layer blits + glow sprites
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('bypasses the static-layer cache while the camera is animating or being dragged, drawing the ground directly instead of rebuilding and blitting it every frame', () => {
+    const gradient = { addColorStop: vi.fn() };
+    const makeCtx = (calls: Record<string, number>) => new Proxy({ measureText: () => { calls.measureText = (calls.measureText ?? 0) + 1; return { width: 40 }; }, createRadialGradient: () => gradient, createLinearGradient: () => gradient } as Record<string, unknown>, {
+      get: (target, prop: string) => (prop in target ? target[prop] : () => { calls[prop] = (calls[prop] ?? 0) + 1; }),
+      set: () => true,
+    }) as unknown as CanvasRenderingContext2D;
+    const layerCalls: Record<string, number> = {};
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => makeCtx(layerCalls) as never);
+    try {
+      const calls: Record<string, number> = {};
+      const ctx = makeCtx(calls);
+      const rooms = buildCityScene(Array.from({ length: 4 }, (_, index) => ({ room_id: `rom_${index}`, title: `Room ${index}` })));
+      const cache = createRenderCache();
+      const baseFrame = { scene: rooms, view: { width: 800, height: 500 }, palette: { ground: '#000' } as CityPalette, time: 0, animate: false, hoveredId: null, selectedId: null, filter: 'all' as const, particles: 0, dpr: 1, cache };
+
+      // Two consecutive frames with a moving camera (as during a dive animation or a drag): the offscreen
+      // layer must never be touched — a rebuild-then-blit every frame would cost more than drawing direct.
+      renderCity(ctx, { ...baseFrame, camera: { focalX: 5, focalY: 0, zoom: 1 }, cameraMoving: true });
+      expect(cache.layer).toBeUndefined();
+      expect(calls.fillRect).toBeGreaterThan(0); // ground painted straight onto the main context
+      const directPaints = calls.fillRect;
+
+      renderCity(ctx, { ...baseFrame, camera: { focalX: 10, focalY: 0, zoom: 1 }, cameraMoving: true });
+      expect(cache.layer).toBeUndefined();
+      expect(calls.fillRect).toBeGreaterThan(directPaints);
+      expect(layerCalls.clearRect).toBeUndefined(); // the offscreen layer was never created
+
+      // Once idle again, the cache is (re)built and then reused normally.
+      renderCity(ctx, { ...baseFrame, camera: { focalX: 10, focalY: 0, zoom: 1 } });
+      expect(layerCalls.clearRect).toBe(1);
+      renderCity(ctx, { ...baseFrame, camera: { focalX: 10, focalY: 0, zoom: 1 } });
+      expect(layerCalls.clearRect).toBe(1); // reused, not rebuilt
     } finally {
       spy.mockRestore();
     }

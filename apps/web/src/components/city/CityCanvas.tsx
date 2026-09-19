@@ -87,6 +87,10 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, co
         hoveredId: s.hoveredId, selectedId: s.selectedId, filter: s.filter,
         particles: animated() ? (s.view.width < 600 ? 4 : 12) : 0,
         dpr: s.dpr, cache: s.cache,
+        // A camera dive (s.animation) or an active drag changes the camera every frame; bypass the
+        // static-layer cache for those (see RenderFrame.cameraMoving) instead of rebuilding + blitting
+        // it on every single frame.
+        cameraMoving: s.animation !== null || s.dragging,
       });
       // Continuous loop only while something moves; otherwise wait for the next requestFrame().
       if ((animated() || s.animation) && shouldRun()) s.rafId = requestAnimationFrame(draw);

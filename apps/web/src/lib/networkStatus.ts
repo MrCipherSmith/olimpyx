@@ -27,3 +27,34 @@ export function nextNetworkStatus(outcomes: boolean[], previous: NetworkStatus):
 }
 
 export const initialNetworkStatus: NetworkStatus = { tone: 'checking', label: LABELS.checking, syncedAt: null };
+
+/**
+ * Outcome of a single lightweight probe (e.g. the 5s room-message poll), as opposed to the full load's
+ * one-boolean-per-endpoint outcomes above. `status` is the HTTP status of a response that did arrive —
+ * 0 (or omitted) means the request never reached the API at all (fetch threw / ApiError status 0).
+ */
+export type PollResult = { ok: true } | { ok: false; status?: number };
+
+/**
+ * Derives network status from a single probe without the full load's authority: a probe only ever
+ * touches one endpoint, so it must not claim the sweeping "every endpoint is fine" of Online, nor
+ * "nothing works" of Offline, on weaker evidence than a full load cycle provides (PROMPT §5.1).
+ *
+ * - No response at all (network failure, `status` 0/absent) is the only thing that marks Offline.
+ * - A 5xx proves the API is reachable but currently erroring — Degraded is an accurate, not alarmist,
+ *   read of that.
+ * - A 4xx is the reachable API correctly rejecting this one request (e.g. 403/404); it says nothing
+ *   about overall connectivity, so the current status is left untouched.
+ * - A success confirms reachability but is not the full load — it may not upgrade Degraded (or Offline)
+ *   all the way to Online; only the next full successful load can restore Online.
+ */
+export function nextPollNetworkStatus(result: PollResult, previous: NetworkStatus): NetworkStatus {
+  if (result.ok) {
+    if (previous.tone === 'offline') return { ...previous, tone: 'degraded', label: LABELS.degraded };
+    return previous;
+  }
+  const status = result.status ?? 0;
+  if (status === 0) return { ...previous, tone: 'offline', label: LABELS.offline };
+  if (status >= 500) return { ...previous, tone: 'degraded', label: LABELS.degraded };
+  return previous;
+}
