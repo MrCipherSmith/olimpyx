@@ -4,7 +4,7 @@
 // at an already-running server; this script never starts one itself.
 import assert from 'node:assert/strict';
 import { OlimpyxClient, OlimpyxHttpError } from '../src/client.js';
-import { isOwnTaskRoom } from '../src/budget.js';
+import { isOwnTaskRoom, resolveThreadAuthor } from '../src/budget.js';
 
 const serverUrl = process.env.OLIMPYX_URL;
 if (!serverUrl) {
@@ -149,7 +149,16 @@ try {
   const rootMsgId = rootMsg.data.message_id ?? rootMsg.data.id;
   const fetched = await restarted.client.request('GET', `/v1/messages/${rootMsgId}`);
   assert.equal(fetched.data.sender_id, agent.agentId, `expected sender_id ${agent.agentId}, got ${JSON.stringify(fetched.data)}`);
-  process.stdout.write('OK: GET /v1/messages/:id returns sender_id (budget.js resolveThreadAuthor contract)\n');
+  assert.equal(fetched.data.root_message_id, null, 'a root message has root_message_id: null (resolveThreadAuthor contract: fetch again only when this is set)');
+  process.stdout.write('OK: GET /v1/messages/:id returns sender_id/root_message_id (budget.js resolveThreadAuthor contract)\n');
+
+  const reply = await restarted.client.sendMessage(taskRoom.data.room_id, { body: `Reply ${suffix}`, reply_to_message_id: rootMsgId });
+  const replyId = reply.data.message_id ?? reply.data.id;
+  const fetchedReply = await restarted.client.request('GET', `/v1/messages/${replyId}`);
+  assert.equal(fetchedReply.data.root_message_id, rootMsgId, `expected reply's root_message_id to point at the root ${rootMsgId}, got ${JSON.stringify(fetchedReply.data)}`);
+  const resolvedAuthor = await resolveThreadAuthor(restarted.client, replyId);
+  assert.deepEqual(resolvedAuthor, { id: agent.agentId, type: 'agent' }, `resolveThreadAuthor should resolve through root_message_id to the root's sender, got ${JSON.stringify(resolvedAuthor)}`);
+  process.stdout.write('OK: resolveThreadAuthor() resolves a reply through root_message_id to the root message\'s sender\n');
 
   // --- isOwnTaskRoom() (budget.js) against the real GET /v1/rooms/:roomId/tasks shape,
   // which nests the creator as `creator: { actor_type, actor_id }` (no flat creator_type/
@@ -171,8 +180,17 @@ try {
   // Assigned to `bystander`, not `assignee`: this isolates the creator.actor_type === 'owner'
   // branch (assignee is not the assignee here, so only the creator check can make this true).
   await owner.request('POST', `/v1/rooms/${ownerCreatedTaskRoom.data.room_id}/tasks`, { assigned_agent_id: bystander.agentId, title: 'Owner-created task', description: 'For the live check' }, { headers: { 'idempotency-key': crypto.randomUUID() } });
-  const ownByOwnerCreator = await isOwnTaskRoom(assigneeActive.client, ownerCreatedTaskRoom.data.room_id, { agentId: assignee.agentId });
-  assert.equal(ownByOwnerCreator, true, 'isOwnTaskRoom should be true (via creator.actor_type===owner) even when this agent is not the assignee');
+  // `ownerId` must be *this agent's own* owner id (registration.data.owner.owner_id) --
+  // isOwnTaskRoom compares creator.actor_id against it rather than assuming any
+  // owner-created task is automatically "own" (a room can be shared across owners).
+  const ownerId = registration.data.owner.owner_id;
+  const ownByOwnerCreator = await isOwnTaskRoom(assigneeActive.client, ownerCreatedTaskRoom.data.room_id, { agentId: assignee.agentId, ownerId });
+  assert.equal(ownByOwnerCreator, true, 'isOwnTaskRoom should be true (via creator.actor_type===owner and creator.actor_id===ownerId) even when this agent is not the assignee');
+
+  // Without a known ownerId, an owner-created task must NOT be assumed "own" (fail-safe,
+  // the exact regression this fix closes): a shared room can contain another owner's task.
+  const ownByOwnerCreatorNoOwnerId = await isOwnTaskRoom(assigneeActive.client, ownerCreatedTaskRoom.data.room_id, { agentId: assignee.agentId });
+  assert.equal(ownByOwnerCreatorNoOwnerId, false, 'isOwnTaskRoom should fail safe to false for an owner-created task when this agent\'s own ownerId is not supplied');
 
   const agentCreatedTaskRoom = await restarted.client.request('POST', '/v1/rooms', { title: `Live Q-016 agent-created task ${suffix}`, description: 'Agent-created task room' });
   // `assignee` creates a task assigned to `bystander`: isolates creator.actor_type === 'agent'
@@ -181,6 +199,24 @@ try {
   const ownByAgentCreator = await isOwnTaskRoom(assigneeActive.client, agentCreatedTaskRoom.data.room_id, { agentId: assignee.agentId });
   assert.equal(ownByAgentCreator, true, 'isOwnTaskRoom should be true (via creator.actor_type===agent/actor_id) when this agent created the task itself');
   process.stdout.write('OK: isOwnTaskRoom() correctly reads the real nested creator.actor_type/actor_id shape\n');
+
+  // --- A DIFFERENT owner's task in a shared room must not be "own", even though the
+  // creator is still an owner (this is the exact bug fixed here: creator_type==='owner'
+  // no longer implies "own" regardless of which owner) ---
+  const otherOwnerSuffix = crypto.randomUUID();
+  const otherOwnerPassword = `Live-q016-other-${crypto.randomUUID()}!`;
+  const otherRegistration = await publicClient.request('POST', '/v1/owners/register', { email: `olimpyx-q016-other-${otherOwnerSuffix}@example.test`, password: otherOwnerPassword, display_name: 'Olimpyx Q-016 other owner' });
+  const otherLogin = await publicClient.request('POST', '/v1/owners/login', { email: otherRegistration.data.owner.email, password: otherOwnerPassword });
+  const otherOwner = new OlimpyxClient({ serverUrl, token: otherLogin.data.access_token });
+  const otherAgent = await enroll(otherOwner, 'other-owner-agent');
+  await otherOwner.request('POST', `/v1/rooms/${ownerCreatedTaskRoom.data.room_id}/tasks`, { assigned_agent_id: otherAgent.agentId, title: 'A different owner\'s task', description: 'For the live check' }, { headers: { 'idempotency-key': crypto.randomUUID() } });
+  const ownByDifferentOwnerCreator = await isOwnTaskRoom(assigneeActive.client, ownerCreatedTaskRoom.data.room_id, { agentId: assignee.agentId, ownerId });
+  assert.equal(ownByDifferentOwnerCreator, true, 'the room should still read as own because of the earlier same-owner task, proving the different-owner task alone did not flip it');
+  const bystanderOnlyRoom = await restarted.client.request('POST', '/v1/rooms', { title: `Live Q-016 other-owner-only ${suffix}`, description: 'Only a different owner\'s task here' });
+  await otherOwner.request('POST', `/v1/rooms/${bystanderOnlyRoom.data.room_id}/tasks`, { assigned_agent_id: otherAgent.agentId, title: 'Only a different owner\'s task', description: 'For the live check' }, { headers: { 'idempotency-key': crypto.randomUUID() } });
+  const notOwnByDifferentOwner = await isOwnTaskRoom(assigneeActive.client, bystanderOnlyRoom.data.room_id, { agentId: assignee.agentId, ownerId });
+  assert.equal(notOwnByDifferentOwner, false, 'isOwnTaskRoom should be false when the only task in the room was created by a different owner');
+  process.stdout.write('OK: isOwnTaskRoom() treats a different owner\'s task as not-own even though creator.actor_type===owner\n');
 
   // --- postInboxCursor round-trips ---
   const cursorAck = await assigneeActive.client.postInboxCursor(listenResult.page.next_cursor ?? listenResult.data.at(-1).cursor);

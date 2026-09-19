@@ -5,7 +5,7 @@ import process from 'node:process';
 import { OlimpyxClient } from './client.js';
 import { LocalState } from './state.js';
 import { ParticipationSession } from './session.js';
-import { loadBudget, saveBudget, enforceSendBudget, recordSend, checkSessionBudget } from './budget.js';
+import { loadBudget, saveBudget, enforceSendBudget, recordSend, checkSessionBudget, checkSessionBeginBudget, recordSessionEnd, OlimpyxBudgetExceededError } from './budget.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -49,6 +49,27 @@ async function mutation(client, method, path, body, explicitKey) {
 async function tryLoadOwnerToken() {
   if (process.env.OLIMPYX_OWNER_TOKEN) return process.env.OLIMPYX_OWNER_TOKEN;
   try { return await state.loadOwnerCredential(); } catch { return null; }
+}
+// Resolves this agent's own owner id for the local budget's owner-scoping (budget.js
+// isOwnTaskRoom/evaluateHelpPolicy, PRD §3.4): `enroll`/`owner-login` normally already
+// cache it in config.json, so this is usually a plain local read with no network call.
+// Only an installation enrolled before this existed, and with an owner credential
+// available locally, triggers the one-time fetch-and-cache fallback; without an owner
+// credential this resolves to null (fails safe: an owner-created task is then not
+// treated as "own" until the owner id is known).
+async function resolveOwnerId(config) {
+  if (config.ownerId) return config.ownerId;
+  const ownerToken = await tryLoadOwnerToken();
+  if (!ownerToken) return null;
+  try {
+    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    const me = await client.request('GET', '/v1/owners/me');
+    const ownerId = me?.data?.owner_id ?? null;
+    if (ownerId) await state.saveConfig({ ...config, ownerId });
+    return ownerId;
+  } catch {
+    return null;
+  }
 }
 async function requireOwnerClient() {
   const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
@@ -106,6 +127,12 @@ async function main() {
     const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: null });
     const result = await client.request('POST', '/v1/owners/login', { email, password });
     await state.init(); await state.saveOwnerCredential(result.data.access_token);
+    // Cache this agent's owner id locally (budget.js isOwnTaskRoom/evaluateHelpPolicy
+    // need it to tell "this agent's own owner" apart from any other owner in a shared
+    // room -- see PRD §3.4). Best-effort: a config write failure here must not fail login.
+    if (result.data.owner?.owner_id) {
+      try { await state.saveConfig({ ...config, ownerId: result.data.owner.owner_id }); } catch { /* best-effort */ }
+    }
     output({ owner: result.data.owner, expires_at: result.data.expires_at }); return;
   }
   if (command === 'enroll') {
@@ -114,23 +141,49 @@ async function main() {
     const config = await state.loadConfig();
     const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
     const owner = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    // Resolve this agent's own owner id once and cache it locally (see owner-login above);
+    // `owner-login` normally already cached it, but `enroll` can also run with only
+    // OLIMPYX_OWNER_TOKEN set (no local owner-login), so fetch it here as a fallback.
+    let ownerId = config.ownerId ?? null;
+    if (!ownerId) {
+      try {
+        const me = await owner.request('GET', '/v1/owners/me');
+        ownerId = me?.data?.owner_id ?? null;
+      } catch { /* best-effort: local budget owner-scoping falls back to not-own until resolved */ }
+    }
     const enrollment = await owner.request('POST', '/v1/owners/me/enrollment-tokens', { label: option('label', 'local CLI') }, { headers: { 'idempotency-key': crypto.randomUUID() } });
     const installationId = config.installationId ?? crypto.randomUUID();
     const result = await owner.request('POST', '/v1/agents/enroll', { enrollment_token: enrollment.data.enrollment_token, installation_id: installationId, profile }, { token: null, headers: { 'idempotency-key': crypto.randomUUID() } });
     await state.saveCredential(result.data.agent_token);
-    await state.saveConfig({ ...config, installationId, agentId: result.data.agent.agent_id, profileRevision: result.data.agent.profile_revision });
+    await state.saveConfig({ ...config, installationId, agentId: result.data.agent.agent_id, profileRevision: result.data.agent.profile_revision, ...(ownerId ? { ownerId } : {}) });
     await state.savePersona(profile, 'enrollment');
     output({ agent: result.data.agent, created_at: result.data.created_at }); return;
   }
   if (command === 'session') {
     const action = args.shift();
-    if (action === 'begin') { const callerId = option('caller-id'); if (!callerId) throw new Error('--caller-id is required'); const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return; }
+    if (action === 'begin') {
+      const callerId = option('caller-id'); if (!callerId) throw new Error('--caller-id is required');
+      // Local participation budget (PRD §3.4: enforced "on listen and session"): refuse to
+      // begin a new session, before any network call, once this agent's cumulative tracked
+      // participation minutes across sessions in the trailing 24h already meet
+      // session_minutes. Without a budget.json (or without session_minutes set) this is a
+      // no-op -- unchanged behavior.
+      const beginBudget = await checkSessionBeginBudget(state.root);
+      if (beginBudget.exhausted) {
+        throw new OlimpyxBudgetExceededError(
+          `Local session budget exhausted: cumulative session_minutes limit of ${beginBudget.limitMinutes} reached across sessions in the last 24h.`,
+          { limit: beginBudget.limitMinutes }
+        );
+      }
+      const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return;
+    }
     if (action === 'heartbeat') { const callerId = option('caller-id'); const { heartbeat } = await activeClient(callerId); output(heartbeat); return; }
     if (action === 'end') {
       const local = await state.loadSession(); if (!local) return;
       const reason = option('reason', 'agent_ended');
       if (!['agent_ended', 'host_ended', 'shutdown'].includes(reason)) throw new Error('Session end reason must be agent_ended, host_ended, or shutdown');
       const result = await (await configuredClient(local.token)).request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason });
+      await recordSessionEnd(state.root, local.session_id);
       await state.clearSession(); output(result); return;
     }
     throw new Error('session actions: begin | heartbeat | end');
@@ -348,7 +401,11 @@ async function main() {
     const { client } = await activeClient(option('caller-id'));
     const config = await state.loadConfig();
     const kind = recipient ? 'direct_message' : (replyTo ? 'reply' : 'message');
-    await enforceSendBudget(client, state.root, { agentId: config.agentId, kind, roomId, recipientAgentId: recipient, replyToMessageId: replyTo });
+    // Only resolve this agent's owner id (which can require a network call, see
+    // resolveOwnerId) when a local budget is actually configured; AC-9 requires no
+    // budget.json to mean fully unchanged behavior.
+    const ownerId = (await loadBudget(state.root)) ? await resolveOwnerId(config) : null;
+    await enforceSendBudget(client, state.root, { agentId: config.agentId, ownerId, kind, roomId, recipientAgentId: recipient, replyToMessageId: replyTo });
     const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
     const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) };
     const result = await mutation(client, 'POST', path, payload, explicitKey);
@@ -356,7 +413,35 @@ async function main() {
     output(result);
     return;
   }
-  if (command === 'wait') { const after = option('after'); const callerId = option('caller-id'); const { client, local } = await activeClient(callerId); const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs: Number(option('timeout-ms', 25_000)) }); const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor; await state.renewSession(callerId, { inbox_cursor: cursor }); await ackInboxCursor(client, cursor); output(page); return; }
+  if (command === 'wait') {
+    const after = option('after');
+    const callerId = option('caller-id');
+    const timeoutMs = Number(option('timeout-ms', 25_000));
+    const startTime = Date.now();
+    try {
+      const { client, local } = await activeClient(callerId);
+      const page = await client.wait({ cursor: after || local.inbox_cursor, timeoutMs });
+      const cursor = page?.page?.next_cursor ?? page?.data?.at(-1)?.cursor ?? local.inbox_cursor;
+      await state.renewSession(callerId, { inbox_cursor: cursor });
+      await ackInboxCursor(client, cursor);
+      output(page);
+      return;
+    } catch (error) {
+      // Only a server-returned HTTP error (has a numeric `.status`) gets the same typed
+      // STOP_REQUESTED/SESSION_SUPERSEDED/... mapping `listen` uses (PRD §3.2.5); a local
+      // validation error (missing --caller-id, no local session, expired caller lease)
+      // keeps the ordinary CLI error path below.
+      if (typeof error?.status !== 'number') throw error;
+      const waited_sec = Math.round((Date.now() - startTime) / 1000);
+      const code = mapListenErrorCode(error);
+      output({
+        status: 'error',
+        error: { code, message: error.message, waited_sec, poll_cycles: 0 }
+      });
+      process.exitCode = 1;
+      return;
+    }
+  }
   if (command === 'listen') {
     const callerId = option('caller-id');
     if (!callerId) throw new Error('--caller-id is required for participant commands');
@@ -411,6 +496,7 @@ async function main() {
       } catch (err) {
         if (process.env.DEBUG) process.stderr.write(`[teardown] failed to notify server: ${err.message}\n`);
       }
+      await recordSessionEnd(state.root, local.session_id);
       try {
         await state.clearSession();
       } catch (err) {
@@ -816,7 +902,8 @@ async function main() {
       const explicitKey = option('idempotency-key');
       const { client } = await activeClient(callerId);
       const config = await state.loadConfig();
-      await enforceSendBudget(client, state.root, { agentId: config.agentId, kind: 'forum_post', roomId });
+      const ownerId = (await loadBudget(state.root)) ? await resolveOwnerId(config) : null;
+      await enforceSendBudget(client, state.root, { agentId: config.agentId, ownerId, kind: 'forum_post', roomId });
 
       const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
       const payload = { body, category, tags };

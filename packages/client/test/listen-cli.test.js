@@ -502,3 +502,86 @@ test('listen traps SIGTERM, ends session, clears session state, and exits 143', 
   assert.equal(sessionExists, false, 'session.json should be deleted after SIGTERM');
   await rm(root, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// `wait` (single-cycle poll): must map typed session-failure codes the same way
+// `listen` does (PRD §3.2.5), instead of leaking the raw server error.code/name to
+// stderr via the generic top-level error handler.
+// ---------------------------------------------------------------------------
+
+test('wait receives inbox events and persists cursor like listen', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-wait-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await baseSessionFiles(stateDir);
+
+  const preloadPath = join(root, 'mock.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/inbox/events')) {
+        return new Response(JSON.stringify({ data: [{ event_id: 'evt_1', cursor: 'c_received', type: 'message.created' }], page: { next_cursor: 'c_received' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const res = await run(['wait', '--caller-id', 'call_1', '--timeout-ms', '1000'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  const parsed = JSON.parse(res.stdout);
+  assert.equal(parsed.data[0].event_id, 'evt_1');
+
+  const session = JSON.parse(await readFile(join(stateDir, 'session.json'), 'utf8'));
+  assert.equal(session.inbox_cursor, 'c_received');
+  await rm(root, { recursive: true, force: true });
+});
+
+for (const [heartbeatCode, heartbeatStatus, expectedCliCode] of [
+  ['session_stopped', 401, 'STOP_REQUESTED'],
+  ['session_superseded', 401, 'SESSION_SUPERSEDED'],
+  ['agent_revoked', 401, 'AGENT_REVOKED'],
+  ['restricted', 403, 'RESTRICTED'],
+  ['session_expired', 401, 'SESSION_EXPIRED']
+]) {
+  test(`wait maps ${heartbeatCode} (HTTP ${heartbeatStatus}) to ${expectedCliCode} instead of printing the raw server code`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'olimpyx-wait-cli-'));
+    const stateDir = join(root, '.olimpyx');
+    await mkdir(stateDir, { recursive: true });
+    await baseSessionFiles(stateDir);
+
+    const preloadPath = join(root, 'mock.mjs');
+    await writeFile(preloadPath, `
+      globalThis.fetch = async (url) => {
+        const u = String(url);
+        if (u.includes('/heartbeat')) {
+          return new Response(JSON.stringify({ error: { message: 'blocked', code: '${heartbeatCode}' } }), {
+            status: ${heartbeatStatus},
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+      };
+    `);
+
+    const res = await run(['wait', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
+    assert.equal(res.status, 1);
+    // The bug this guards against: the raw server code/name leaking to stderr via the
+    // generic top-level error handler instead of the typed JSON payload on stdout.
+    assert.equal(res.stdout.includes(heartbeatCode), false, `raw server code ${heartbeatCode} must not leak to stdout`);
+    const parsed = JSON.parse(res.stdout);
+    assert.equal(parsed.status, 'error');
+    assert.equal(parsed.error.code, expectedCliCode);
+    await rm(root, { recursive: true, force: true });
+  });
+}
+
+test('wait keeps ordinary local validation errors (no --caller-id) on the plain stderr path, not the typed JSON payload', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-wait-cli-'));
+  const res = await run(['wait'], { cwd: root });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /--caller-id is required/);
+  await rm(root, { recursive: true, force: true });
+});

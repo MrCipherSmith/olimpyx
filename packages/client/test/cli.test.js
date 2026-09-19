@@ -255,6 +255,61 @@ test('budget set rejects an invalid --help value', async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+test('session begin refuses locally with OLIMPYX_BUDGET_EXCEEDED once cumulative session_minutes across sessions in the last 24h is reached, with no network call', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      return new Response(JSON.stringify({ error: { message: 'network call should not happen: ' + String(url) } }), { status: 500, headers: { 'content-type': 'application/json' } });
+    };
+  `);
+  await run(['configure', '--server', 'https://mock.test'], { cwd: root, preload: preloadPath });
+  await import('../src/state.js').then(async ({ LocalState }) => {
+    await new LocalState(join(root, '.olimpyx')).saveCredential('agent-token');
+  });
+  const now = Date.now();
+  await writeFile(join(root, '.olimpyx', 'budget.json'), JSON.stringify({ help: 'on', contacts: [], session_minutes: 30 }));
+  await writeFile(join(root, '.olimpyx', 'budget-ledger.json'), JSON.stringify({
+    session_history: [{ session_id: 'ses_prev', started_at: now - 60 * 60_000, ended_at: now - 30 * 60_000 }]
+  }));
+
+  const res = await run(['session', 'begin', '--caller-id', 'begin-test', '--host', 'codex'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /OLIMPYX_BUDGET_EXCEEDED/);
+  assert.equal(res.stderr.includes('network call should not happen'), false, 'session begin must refuse before any network call');
+  const sessionExists = await readFile(join(root, '.olimpyx', 'session.json'), 'utf8').then(() => true).catch(() => false);
+  assert.equal(sessionExists, false, 'no local session should be saved when the begin budget is exhausted');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('session begin is unaffected by session_minutes when cumulative history is under the limit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/v1/sessions')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_new', session_token: 'temp-token', expires_at: '2099-01-01T00:00:00Z', inbox_cursor: 'c1', bootstrap: {} } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ error: { message: 'unexpected ' + u } }), { status: 500, headers: { 'content-type': 'application/json' } });
+    };
+  `);
+  await run(['configure', '--server', 'https://mock.test'], { cwd: root, preload: preloadPath });
+  await import('../src/state.js').then(async ({ LocalState }) => {
+    await new LocalState(join(root, '.olimpyx')).saveCredential('agent-token');
+  });
+  const now = Date.now();
+  await writeFile(join(root, '.olimpyx', 'budget.json'), JSON.stringify({ help: 'on', contacts: [], session_minutes: 30 }));
+  await writeFile(join(root, '.olimpyx', 'budget-ledger.json'), JSON.stringify({
+    session_history: [{ session_id: 'ses_prev', started_at: now - 60 * 60_000, ended_at: now - 50 * 60_000 }]
+  }));
+
+  const res = await run(['session', 'begin', '--caller-id', 'begin-test-2', '--host', 'codex'], { cwd: root, preload: preloadPath });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).session_id, 'ses_new');
+  await rm(root, { recursive: true, force: true });
+});
+
 test('task decline sends a PATCH with status cancelled and the reason as result', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-cli-q016-'));
   const preloadPath = join(root, 'preload.mjs');

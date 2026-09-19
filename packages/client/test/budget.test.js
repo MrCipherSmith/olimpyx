@@ -13,6 +13,8 @@ import {
   evaluateHelpPolicy,
   enforceSendBudget,
   checkSessionBudget,
+  recordSessionEnd,
+  checkSessionBeginBudget,
   OlimpyxBudgetExceededError,
   OlimpyxHelpPolicyBlockedError
 } from '../src/budget.js';
@@ -114,9 +116,19 @@ test('isOwnTaskRoom is true when a non-terminal task in the room is assigned to 
   assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me' }), true);
 });
 
-test('isOwnTaskRoom is true when a non-terminal task was created by the owner (real nested creator shape)', async () => {
+test('isOwnTaskRoom is true when a non-terminal task was created by this agent\'s own owner (real nested creator shape)', async () => {
   const client = { request: async () => ({ data: [{ status: 'proposed', assigned_agent_id: 'agt_other', creator: { actor_type: 'owner', actor_id: 'own_1' } }] }) };
-  assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me' }), true);
+  assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me', ownerId: 'own_1' }), true);
+});
+
+test('isOwnTaskRoom is false when a task was created by a different owner, even though the creator is an owner', async () => {
+  const client = { request: async () => ({ data: [{ status: 'proposed', assigned_agent_id: 'agt_other', creator: { actor_type: 'owner', actor_id: 'own_other' } }] }) };
+  assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me', ownerId: 'own_1' }), false);
+});
+
+test('isOwnTaskRoom is false for an owner-created task when this agent\'s own ownerId is unknown (fail-safe)', async () => {
+  const client = { request: async () => ({ data: [{ status: 'proposed', assigned_agent_id: 'agt_other', creator: { actor_type: 'owner', actor_id: 'own_1' } }] }) };
+  assert.equal(await isOwnTaskRoom(client, 'rom_1', { agentId: 'agt_me' }), false);
 });
 
 test('isOwnTaskRoom is true when a non-terminal task was created by this agent itself (real nested creator shape)', async () => {
@@ -139,10 +151,35 @@ test('resolveThreadAuthor reads the root message sender via GET /v1/messages/:id
     request: async (method, path) => {
       assert.equal(method, 'GET');
       assert.equal(path, '/v1/messages/msg_root');
-      return { data: { message_id: 'msg_root', sender_id: 'agt_author' } };
+      return { data: { message_id: 'msg_root', sender_id: 'agt_author', sender_type: 'agent', root_message_id: null } };
     }
   };
-  assert.equal(await resolveThreadAuthor(client, 'msg_root'), 'agt_author');
+  assert.deepEqual(await resolveThreadAuthor(client, 'msg_root'), { id: 'agt_author', type: 'agent' });
+});
+
+test('resolveThreadAuthor resolves through root_message_id when the fetched message is a reply (PRD: thread author = root sender)', async () => {
+  const calls = [];
+  const client = {
+    request: async (method, path) => {
+      calls.push(path);
+      if (path === '/v1/messages/msg_reply') {
+        return { data: { message_id: 'msg_reply', sender_id: 'agt_replier', sender_type: 'agent', root_message_id: 'msg_root' } };
+      }
+      if (path === '/v1/messages/msg_root') {
+        return { data: { message_id: 'msg_root', sender_id: 'agt_root_author', sender_type: 'agent', root_message_id: null } };
+      }
+      throw new Error(`unexpected path ${path}`);
+    }
+  };
+  assert.deepEqual(await resolveThreadAuthor(client, 'msg_reply'), { id: 'agt_root_author', type: 'agent' });
+  assert.deepEqual(calls, ['/v1/messages/msg_reply', '/v1/messages/msg_root']);
+});
+
+test('resolveThreadAuthor reports an owner-authored root so callers can exempt the owner\'s own thread', async () => {
+  const client = {
+    request: async () => ({ data: { message_id: 'msg_root', sender_id: 'own_1', sender_type: 'owner', root_message_id: null } })
+  };
+  assert.deepEqual(await resolveThreadAuthor(client, 'msg_root'), { id: 'own_1', type: 'owner' });
 });
 
 test('resolveThreadAuthor returns null on a network error', async () => {
@@ -192,6 +229,30 @@ test('evaluateHelpPolicy with help:contacts allows a forum post but still gates 
   assert.equal(evaluateHelpPolicy({ help: 'contacts', contacts: ['agt_friend'] }, { kind: 'reply', targetAgentId: 'agt_friend' }).allowed, true);
 });
 
+test('evaluateHelpPolicy allows a reply inside the agent\'s own thread under help:off', () => {
+  const verdict = evaluateHelpPolicy(
+    { help: 'off', contacts: [] },
+    { kind: 'reply', targetAgentId: 'agt_me', targetActorType: 'agent', agentId: 'agt_me', ownerId: 'own_1' }
+  );
+  assert.equal(verdict.allowed, true);
+});
+
+test('evaluateHelpPolicy allows a reply inside a thread started by this agent\'s own owner under help:contacts', () => {
+  const verdict = evaluateHelpPolicy(
+    { help: 'contacts', contacts: [] },
+    { kind: 'reply', targetAgentId: 'own_1', targetActorType: 'owner', agentId: 'agt_me', ownerId: 'own_1' }
+  );
+  assert.equal(verdict.allowed, true);
+});
+
+test('evaluateHelpPolicy still blocks a reply in a thread started by a different owner under help:off', () => {
+  const verdict = evaluateHelpPolicy(
+    { help: 'off', contacts: [] },
+    { kind: 'reply', targetAgentId: 'own_other', targetActorType: 'owner', agentId: 'agt_me', ownerId: 'own_1' }
+  );
+  assert.equal(verdict.allowed, false);
+});
+
 // ---------------------------------------------------------------------------
 // enforceSendBudget (orchestration)
 // ---------------------------------------------------------------------------
@@ -231,6 +292,51 @@ test('enforceSendBudget blocks a reply outside the owner\'s own task room under 
     (err) => err instanceof OlimpyxHelpPolicyBlockedError
   );
   assert.ok(calls.some((p) => p === '/v1/messages/msg_1'), 'should resolve the thread author to check the contact list');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('enforceSendBudget allows a reply inside a thread this agent itself started, even under help:off', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { help: 'off', contacts: [] });
+  const client = {
+    request: async (method, path) => {
+      if (path.endsWith('/tasks')) return { data: [] };
+      if (path.startsWith('/v1/messages/')) return { data: { sender_id: 'agt_me', sender_type: 'agent', root_message_id: null } };
+      throw new Error(`unexpected path ${path}`);
+    }
+  };
+  await assert.doesNotReject(enforceSendBudget(client, root, { agentId: 'agt_me', ownerId: 'own_1', kind: 'reply', roomId: 'rom_1', replyToMessageId: 'msg_1' }));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('enforceSendBudget allows a reply inside a thread started by this agent\'s own owner, even under help:off', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { help: 'off', contacts: [] });
+  const client = {
+    request: async (method, path) => {
+      if (path.endsWith('/tasks')) return { data: [] };
+      if (path.startsWith('/v1/messages/')) return { data: { sender_id: 'own_1', sender_type: 'owner', root_message_id: null } };
+      throw new Error(`unexpected path ${path}`);
+    }
+  };
+  await assert.doesNotReject(enforceSendBudget(client, root, { agentId: 'agt_me', ownerId: 'own_1', kind: 'reply', roomId: 'rom_1', replyToMessageId: 'msg_1' }));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('enforceSendBudget passes ownerId through to isOwnTaskRoom so a different owner\'s task in a shared room is not treated as own', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { help: 'off', contacts: [] });
+  const client = {
+    request: async (method, path) => {
+      if (path.endsWith('/tasks')) return { data: [{ status: 'proposed', assigned_agent_id: 'agt_other', creator: { actor_type: 'owner', actor_id: 'own_other' } }] };
+      if (path.startsWith('/v1/messages/')) return { data: { sender_id: 'agt_stranger', sender_type: 'agent', root_message_id: null } };
+      throw new Error(`unexpected path ${path}`);
+    }
+  };
+  await assert.rejects(
+    enforceSendBudget(client, root, { agentId: 'agt_me', ownerId: 'own_1', kind: 'reply', roomId: 'rom_1', replyToMessageId: 'msg_1' }),
+    (err) => err instanceof OlimpyxHelpPolicyBlockedError
+  );
   await rm(root, { recursive: true, force: true });
 });
 
@@ -275,5 +381,68 @@ test('checkSessionBudget resets the clock when the session id changes', async ()
   assert.equal(afterExpiry.exhausted, true);
   const freshSession = await checkSessionBudget(root, 'ses_2', { now: start + 11 * 60_000 });
   assert.equal(freshSession.exhausted, false);
+  await rm(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// session_minutes enforcement at `session begin` (cumulative across sessions, 24h)
+// ---------------------------------------------------------------------------
+
+test('checkSessionBeginBudget reports not exhausted without a budget.json', async () => {
+  const root = await tempRoot();
+  const result = await checkSessionBeginBudget(root);
+  assert.equal(result.exhausted, false);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('checkSessionBeginBudget reports not exhausted with a budget.json that has no session_minutes', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { help: 'on', contacts: [] });
+  const result = await checkSessionBeginBudget(root);
+  assert.equal(result.exhausted, false);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('recordSessionEnd is a no-op when the ledger never tracked this sessionId', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { session_minutes: 10 });
+  await recordSessionEnd(root, 'ses_never_tracked', { now: Date.now() });
+  const result = await checkSessionBeginBudget(root);
+  assert.equal(result.exhausted, false);
+  assert.equal(result.elapsedMinutes, 0);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('checkSessionBeginBudget sums recordSessionEnd-archived minutes across prior sessions and refuses at the limit', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { session_minutes: 30 });
+  const start = Date.now();
+  // Session 1: tracked (via checkSessionBudget/listen) for 20 minutes, then ended.
+  await checkSessionBudget(root, 'ses_1', { now: start });
+  await recordSessionEnd(root, 'ses_1', { now: start + 20 * 60_000 });
+  const afterFirst = await checkSessionBeginBudget(root, { now: start + 20 * 60_000 });
+  assert.equal(afterFirst.exhausted, false);
+  assert.equal(afterFirst.elapsedMinutes, 20);
+
+  // Session 2: tracked for another 15 minutes -> cumulative 35 >= 30 limit.
+  await checkSessionBudget(root, 'ses_2', { now: start + 21 * 60_000 });
+  await recordSessionEnd(root, 'ses_2', { now: start + 36 * 60_000 });
+  const afterSecond = await checkSessionBeginBudget(root, { now: start + 36 * 60_000 });
+  assert.equal(afterSecond.exhausted, true);
+  assert.equal(afterSecond.elapsedMinutes, 35);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('checkSessionBeginBudget ignores session history older than the trailing 24h window', async () => {
+  const root = await tempRoot();
+  await saveBudget(root, { session_minutes: 10 });
+  const start = Date.now();
+  await checkSessionBudget(root, 'ses_old', { now: start });
+  await recordSessionEnd(root, 'ses_old', { now: start + 20 * 60_000 });
+
+  const muchLater = start + 25 * 60 * 60 * 1000; // > 24h after ses_old ended
+  const result = await checkSessionBeginBudget(root, { now: muchLater });
+  assert.equal(result.exhausted, false);
+  assert.equal(result.elapsedMinutes, 0);
   await rm(root, { recursive: true, force: true });
 });
