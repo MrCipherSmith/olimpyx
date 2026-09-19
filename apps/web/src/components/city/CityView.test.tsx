@@ -121,10 +121,10 @@ describe('CityView accessible building list', () => {
 });
 
 describe('buildCityScene', () => {
-  it('places the Library at y = −80, the Pantheon at y = +80 and rooms on rings', () => {
+  it('places the Library and the Pantheon side by side on the Forum and rooms on rings', () => {
     const scene = buildCityScene(Array.from({ length: 31 }, (_, index) => ({ room_id: `rom_${index}`, title: `Room ${index}` })));
-    expect(scene.buildings.find(building => building.kind === 'library')).toMatchObject({ x: 0, y: -80 });
-    expect(scene.buildings.find(building => building.kind === 'pantheon')).toMatchObject({ x: 0, y: 80 });
+    expect(scene.buildings.find(building => building.kind === 'library')).toMatchObject({ x: -125, y: 125 });
+    expect(scene.buildings.find(building => building.kind === 'pantheon')).toMatchObject({ x: 125, y: -125 });
     expect(scene.buildings.filter(building => building.kind === 'room')).toHaveLength(31);
     expect(scene.rings).toEqual([520, 780, 1040, 1300]);
     expect(buildCityScene([]).rings).toEqual([520]);

@@ -13,6 +13,8 @@ interface CityShellProps {
   screenKey: string | null;
   /** The navigation view of the open screen; its nav item is the focus fallback on close. */
   screenView: View | null;
+  /** The dive overlay (DiveOverlay): above the screen layer, decorative. */
+  transition?: ReactNode;
   onClose: () => void;
 }
 
@@ -31,7 +33,7 @@ function keepsEscape(target: EventTarget | null): boolean {
  * layer on top. While a screen is open the city and HUD are inert, focus moves to the screen heading,
  * Escape closes the screen (unless a dialog is open) and focus returns to what opened it.
  */
-export function CityShell({ hud, city, screen, screenKey, screenView, onClose }: CityShellProps) {
+export function CityShell({ hud, city, screen, screenKey, screenView, transition, onClose }: CityShellProps) {
   const open = screenKey !== null;
   const shellRef = useRef<HTMLDivElement | null>(null);
   /** The last control used in the city or HUD: the opener of the next screen. */
@@ -89,6 +91,7 @@ export function CityShell({ hud, city, screen, screenKey, screenView, onClose }:
         <div className="city-shell-world" {...inertWhile(open)}>{city}</div>
         {screen}
       </main>
+      {transition}
     </div>
   );
 }

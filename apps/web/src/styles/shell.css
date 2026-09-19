@@ -543,3 +543,168 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* =========================================================================
+   DIVE / BACK TRANSITION (PROMPT §4): target lock while the camera focuses,
+   then the full-screen packet-dive overlay over the city and the screen.
+   Both are decorative (aria-hidden); the overlay blocks input only while shown.
+   ========================================================================= */
+
+.dive-overlay {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at center, color-mix(in srgb, var(--color-cyan) 25%, transparent) 0%, color-mix(in srgb, var(--bg-base) 98%, transparent) 75%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dive-overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dive-overlay-label {
+  text-align: center;
+  opacity: 0;
+  transform: scale(0.75);
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+.dive-overlay-label.shown {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.dive-overlay-label p {
+  margin: 0;
+}
+
+.dive-overlay-kicker {
+  margin-bottom: 4px;
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.dive-overlay-name {
+  max-width: min(720px, calc(100vw - 32px));
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: clamp(20px, 2.4vw, 26px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dive-overlay-sub {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Target lock: centred on the canvas, where the focusing camera puts the building. */
+.target-lock {
+  position: absolute;
+  z-index: 15;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: target-lock-in 350ms cubic-bezier(0.15, 0.85, 0.2, 1) both;
+}
+
+.target-lock-frame {
+  position: relative;
+  display: grid;
+  width: 112px;
+  height: 112px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--color-cyan) 45%, transparent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--glow-cyan);
+}
+
+.target-lock-frame i {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-color: var(--color-cyan);
+  border-style: solid;
+  border-width: 0;
+}
+
+.target-lock-frame i:nth-child(1) { top: -6px; left: -6px; border-top-width: 2px; border-left-width: 2px; }
+.target-lock-frame i:nth-child(2) { top: -6px; right: -6px; border-top-width: 2px; border-right-width: 2px; }
+.target-lock-frame i:nth-child(3) { bottom: -6px; left: -6px; border-bottom-width: 2px; border-left-width: 2px; }
+.target-lock-frame i:nth-child(4) { right: -6px; bottom: -6px; border-right-width: 2px; border-bottom-width: 2px; }
+
+.target-lock-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-cyan);
+}
+
+.target-lock-text {
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  padding: 6px 12px;
+  overflow: hidden;
+  border: 1px solid var(--color-cyan);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-solid);
+  color: var(--color-cyan);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+@keyframes target-lock-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(1.6) rotate(-45deg); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0deg); }
+}
+
+/* The city comes back with a short fade whenever a screen closes (instant close under reduced motion). */
+.city-shell:not(.screen-open) .city-shell-world {
+  animation: city-return 160ms ease-out;
+}
+
+@keyframes city-return {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+
+/* Reduced motion: no camera animation, no lock animation; screens still open and close with a short
+   opacity fade (the motion tokens are 0ms there, so it is set explicitly). */
+@media (prefers-reduced-motion: reduce) {
+  .screen-layer {
+    animation-duration: 120ms;
+  }
+
+  .target-lock {
+    animation: none;
+  }
+
+  .dive-overlay, .dive-overlay-label {
+    transition-duration: 120ms;
+  }
+}

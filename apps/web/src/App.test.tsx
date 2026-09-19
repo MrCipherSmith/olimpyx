@@ -157,8 +157,10 @@ describe('authenticated showcase surfaces', () => {
     const owner = screen.getByRole('link', { name: 'Owner controls' });
     owner.focus();
     fireEvent.click(owner);
-    expect(screen.getByRole('heading', { level: 1, name: 'Owner controls' })).toHaveFocus();
-    expect(screen.getByText('Praetorium')).toBeInTheDocument();
+    const ownerHeading = screen.getByRole('heading', { level: 1, name: 'Owner controls' });
+    expect(ownerHeading).toHaveFocus();
+    // Scoped to the screen: the city's legend (under the screen) also has a Praetorium entry now.
+    expect(within(ownerHeading.closest('section')!).getByText('Praetorium')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('link', { name: 'Back to the city' }));
     expect(window.location.search).toBe('');
     expect(screen.getByRole('link', { name: 'Owner controls' })).toHaveFocus();

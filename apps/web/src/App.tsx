@@ -1,6 +1,7 @@
 import { type Dispatch, Fragment, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AgentsPanel } from './components/agents/AgentsPanel';
 import { AuthScreen } from './components/auth/AuthScreen';
+import type { CityCameraController } from './components/city/CityCanvas';
 import { CityView } from './components/city/CityView';
 import { buildCityScene } from './components/city/cityScene';
 import { KnowledgePanel } from './components/knowledge/KnowledgePanel';
@@ -13,14 +14,16 @@ import { Loading } from './components/shared/Loading';
 import { RouteLink } from './components/shared/RouteLink';
 import { agentsBadge, CityHud, countBadge, loadedCount } from './components/shell/CityHud';
 import { CityShell } from './components/shell/CityShell';
+import { DiveOverlay } from './components/shell/DiveOverlay';
 import { RoomBadges, RoomSubline } from './components/shell/RoomHeader';
 import { ScreenLayer } from './components/shell/ScreenLayer';
+import { useCityRoute } from './components/shell/useCityRoute';
 import { PublicShowcase } from './components/showcase/PublicShowcase';
 import { OlimpyxApi, type KnowledgeCard, type Message, type Profile, type Room } from './lib/api';
 import { ApiError, AuthSession, type StoredSession } from './lib/auth-session';
 import { messageFrom } from './lib/format';
 import { empty, type LoadState } from './lib/loadState';
-import { hrefFor, readRoute, screenFor, type Route } from './lib/navigation';
+import { screenFor } from './lib/navigation';
 import { initialNetworkStatus, nextNetworkStatus, nextPollNetworkStatus } from './lib/networkStatus';
 
 /** Root: owns the session, the route and the participant's private data; guests get the public showcase. */
@@ -28,8 +31,11 @@ export function App() {
   const sessionStore = useMemo(() => new AuthSession(), []);
   const api = useMemo(() => new OlimpyxApi(sessionStore), [sessionStore]);
   const [session, setSession] = useState<StoredSession | null>(() => sessionStore.current);
-  const [route, setRoute] = useState<Route>(() => readRoute(window.location.search));
   const [rooms, setRooms] = useState(empty<Room[]>([]));
+  // The participant's city (with the owner-only Praetorium): drawn by CityView and the dive targets.
+  const scene = useMemo(() => buildCityScene(rooms.data, { includePraetorium: true }), [rooms.data]);
+  const camera = useRef<CityCameraController | null>(null);
+  const { route, navigate, close: closeScreen, reset: resetRoute, dive } = useCityRoute({ buildings: scene.buildings, camera });
   const [agents, setAgents] = useState(empty<Profile[]>([]));
   const [cards, setCards] = useState(empty<KnowledgeCard[]>([]));
   // Size of the full knowledge record from the last load; `cards` itself holds search results.
@@ -64,8 +70,6 @@ export function App() {
     if (!sessionStore.current) { setSession(null); resetPrivateState(); }
   }, [api, session]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { const restore = () => setRoute(readRoute(window.location.search)); window.addEventListener('popstate', restore); return () => window.removeEventListener('popstate', restore); }, []);
-  const navigate = (next: Route) => { window.history.pushState(null, '', hrefFor(next)); setRoute(next); };
   const capturePrivateOperation = () => { const generation = privateLoadGeneration.current; const token = sessionStore.current?.token; return () => generation === privateLoadGeneration.current && Boolean(token) && sessionStore.current?.token === token; };
   useEffect(() => { const room = route.roomId && rooms.data.find(item => item.room_id === route.roomId); if (room && selectedRoom?.room_id !== room.room_id) void openRoom(room, false); }, [route.roomId, rooms.data]);
   useEffect(() => {
@@ -106,8 +110,8 @@ export function App() {
     catch (error) { if (requestId === roomRequestId.current) setMessages(current => ({ ...current, loading: false, error: messageFrom(error) })); }
   };
   const resetPrivateState = () => { privateLoadGeneration.current++; roomRequestId.current++; setRooms(empty([])); setAgents(empty([])); setCards(empty([])); setCardTotal(null); setSelectedRoom(null); setMessages(empty([])); setMessageCursor(null); setCreateRoomOpen(false); setNetwork(initialNetworkStatus); setKnowledgeSearchNotice(null); };
-  const authenticate = (newSession: StoredSession) => { resetPrivateState(); sessionStore.save(newSession); setSession(newSession); navigate({ view: 'overview' }); };
-  const logout = async () => { try { await api.logout(); } finally { sessionStore.clear(); resetPrivateState(); setSession(null); navigate({ view: 'overview' }); } };
+  const authenticate = (newSession: StoredSession) => { resetPrivateState(); sessionStore.save(newSession); setSession(newSession); resetRoute({ view: 'overview' }); };
+  const logout = async () => { try { await api.logout(); } finally { sessionStore.clear(); resetPrivateState(); setSession(null); resetRoute({ view: 'overview' }); } };
   const loadEarlierMessages = async () => { if (!selectedRoom || !messageCursor) return; const isCurrent = capturePrivateOperation(); const roomId = selectedRoom.room_id; const page = await api.messagePage(roomId, messageCursor); if (!isCurrent() || selectedRoom?.room_id !== roomId) return; setMessageCursor(page.nextCursor); setMessages(current => ({ ...current, data: [...page.data.reverse(), ...current.data] })); };
   const sendMessage = async (body: string) => { if (!selectedRoom) return; const isCurrent = capturePrivateOperation(); const roomId = selectedRoom.room_id; const created = await api.sendMessage(roomId, body); if (!isCurrent() || selectedRoom?.room_id !== roomId) return; setMessages(current => ({ ...current, data: [...current.data, created] })); };
   const searchCards = async (q: string, mode: 'lexical' | 'semantic' | 'hybrid') => {
@@ -123,12 +127,11 @@ export function App() {
     }
   };
   const createRoom = async (input: { title: string; description?: string }) => { const isCurrent = capturePrivateOperation(); const room = await api.createRoom(input); if (!isCurrent()) return; setRooms(current => ({ ...current, data: [room, ...current.data] })); setCreateRoomOpen(false); void openRoom(room); };
-  const avenues = useMemo(() => buildCityScene(rooms.data).avenues.length, [rooms.data]);
+  const avenues = scene.avenues.length;
 
   if (!session) return authWanted ? <AuthScreen api={api} onAuthenticated={authenticate} onBack={() => setAuthWanted(false)} /> : <PublicShowcase api={api} onSignIn={() => setAuthWanted(true)} />;
 
   const screen = screenFor(route);
-  const closeScreen = () => navigate({ view: 'overview' });
   const roomCount = loadedCount(rooms);
   const knownAgents = loadedCount(agents) === null ? null : agents.data;
   const refresh = <button className="secondary compact" onClick={() => void load()}>↻ Refresh</button>;
@@ -184,10 +187,11 @@ export function App() {
   return <>
     <CityShell
       hud={hud}
-      city={<CityView rooms={rooms.data} mode="participant" loading={rooms.loading} paused={Boolean(screen)} onNavigate={navigate} />}
+      city={<CityView rooms={rooms.data} scene={scene} camera={camera} dive={dive} mode="participant" loading={rooms.loading} paused={Boolean(screen)} onNavigate={navigate} />}
       screen={layer && <Fragment key={screen!.key}>{layer}</Fragment>}
       screenKey={screen?.key ?? null}
       screenView={screen ? route.view : null}
+      transition={<DiveOverlay dive={dive} />}
       onClose={closeScreen}
     />
     {createRoomOpen && <CreateRoom onClose={() => setCreateRoomOpen(false)} onCreate={createRoom} />}

@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type MutableRefObject, useMemo, useRef, useState } from 'react';
 import type { Route } from '../../lib/navigation';
+import type { DiveState } from '../shell/diveMachine';
+import { TargetLock } from '../shell/DiveOverlay';
+import { usePrefersReducedMotion } from '../shell/useMediaQuery';
 import { CityBuildingList } from './CityBuildingList';
 import { CityCanvas, type CityCameraController } from './CityCanvas';
 import { CityCameraControls, CityFilters, CityLegend, type CityFilter } from './CityHUD';
-import { buildCityScene, matchesFilter, type CityBuilding, type CityRoomInput } from './cityScene';
+import { buildCityScene, matchesFilter, type CityBuilding, type CityRoomInput, type CityScene } from './cityScene';
 import { ROOM_CATEGORIES } from './roomArchetypes';
 
 export type { CityRoomInput } from './cityScene';
@@ -15,39 +18,42 @@ interface CityViewProps {
   loading?: boolean;
   /** A screen layer covers the city: the render loop stops until it is visible again. */
   paused?: boolean;
+  /** The scene the shell already built (shared with the dive targets); built here from `rooms` when absent. */
+  scene?: CityScene;
+  /** The shell's handle on the camera (the dive drives it); CityView keeps its own when absent. */
+  camera?: MutableRefObject<CityCameraController | null>;
+  /** The dive in progress: the target lock frame and the highlighted building. */
+  dive?: DiveState;
   onNavigate: (route: Route) => void;
 }
 
-function usePrefersReducedMotion(): boolean {
-  // One MediaQueryList per mount instead of a new matchMedia() on every render.
-  const query = useMemo(() => (typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null), []);
-  const [reduced, setReduced] = useState(() => query?.matches ?? false);
-  useEffect(() => {
-    if (!query) return;
-    const update = () => setReduced(query.matches);
-    update();
-    query.addEventListener?.('change', update);
-    return () => query.removeEventListener?.('change', update);
-  }, [query]);
-  return reduced;
-}
-
-/** The screen a building opens: its room, the Library (knowledge) or the Pantheon (agents). */
-export function routeForBuilding(building: CityBuilding): Route {
-  if (building.kind === 'library') return { view: 'knowledge' };
-  if (building.kind === 'pantheon') return { view: 'agents' };
-  return { view: 'rooms', roomId: building.room!.roomId };
+/**
+ * The screen a building opens: its room, the Library (knowledge), the Pantheon (agents), the Praetorium
+ * (owner controls) or a Forum building (the room directory). Unknown kinds open nothing.
+ */
+export function routeForBuilding(building: Pick<CityBuilding, 'room'> & { kind: string }): Route | null {
+  switch (building.kind) {
+    case 'library': return { view: 'knowledge' };
+    case 'pantheon': return { view: 'agents' };
+    case 'praetorium': return { view: 'owner' };
+    case 'forum': return { view: 'rooms' };
+    case 'room': return building.room ? { view: 'rooms', roomId: building.room.roomId } : null;
+    default: return null;
+  }
 }
 
 /**
  * The persistent city behind every screen: the full-bleed canvas plus its floating HUD parts (legend,
  * building directory, camera). Clicking a building, a legend entry or a directory entry opens its screen.
  */
-export function CityView({ rooms, mode, loading = false, paused = false, onNavigate }: CityViewProps) {
-  const scene = useMemo(() => buildCityScene(rooms), [rooms]);
+export function CityView({ rooms, mode, loading = false, paused = false, scene: sharedScene, camera, dive, onNavigate }: CityViewProps) {
+  const ownScene = useMemo(() => (sharedScene ? null : buildCityScene(rooms)), [sharedScene, rooms]);
+  const scene = sharedScene ?? ownScene!;
   const [filter, setFilter] = useState<CityFilter>('all');
   const [directoryOpen, setDirectoryOpen] = useState(true);
-  const controller = useRef<CityCameraController | null>(null);
+  const ownController = useRef<CityCameraController | null>(null);
+  const controller = camera ?? ownController;
+  const diving = dive && (dive.phase === 'focusing' || dive.phase === 'diving') ? dive.target : null;
   const reducedMotion = usePrefersReducedMotion();
 
   const roomBuildings = scene.roomBuildings;
@@ -65,16 +71,18 @@ export function CityView({ rooms, mode, loading = false, paused = false, onNavig
 
   const open = (id: string) => {
     const building = scene.buildings.find(item => item.id === id);
-    if (building) onNavigate(routeForBuilding(building));
+    const route = building && routeForBuilding(building);
+    if (route) onNavigate(route);
   };
 
   return (
     <section className="city-view" aria-label="City Map">
       <h1 className="visually-hidden">Olimpyx city</h1>
       <div className="city-stage">
-        <CityCanvas scene={scene} selectedId={null} filter={filter} label={label} reducedMotion={reducedMotion} paused={paused} controller={controller} onSelect={open} />
+        <CityCanvas scene={scene} selectedId={diving?.key ?? null} filter={filter} label={label} reducedMotion={reducedMotion} paused={paused} controller={controller} onSelect={open} />
+        <TargetLock target={dive?.phase === 'focusing' ? diving : null} />
       </div>
-      <CityLegend onOpen={open} />
+      <CityLegend onOpen={open} praetorium={scene.buildings.some(building => building.kind === 'praetorium')} />
       <aside className="hud hud-directory" aria-label="Building directory">
         <button type="button" className="hud-directory-toggle" aria-expanded={directoryOpen} aria-controls="city-directory-panel" onClick={() => setDirectoryOpen(value => !value)}>
           <span>Buildings</span><span className="hud-badge" aria-hidden="true">{scene.buildings.length}</span><span aria-hidden="true">{directoryOpen ? '▴' : '▾'}</span>

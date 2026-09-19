@@ -1,5 +1,6 @@
 import { useEffect, useRef, type MutableRefObject } from 'react';
-import { clampZoom, diveCamera, fitZoom, hitTest, isoProject, shouldRefitZoom, type Camera, type Viewport } from './isometricMath';
+import { clampZoom, diveCamera, fitZoom, hitTest, shouldRefitZoom, type Camera, type ScreenBox, type Viewport } from './isometricMath';
+import { DIVE_ZOOM, FOCUS_ZOOM, divePointCamera, easeIn, hudSafeFit, lerpCamera, occludersFrom, type DiveCameraMove } from './cameraMath';
 import { createRenderCache, renderCity } from './cityRenderer';
 import { shouldSkipFrame } from './cityLoop';
 import type { CityScene } from './cityScene';
@@ -11,10 +12,18 @@ export interface CityCameraController {
   zoomBy: (factor: number) => void;
   panBy: (dx: number, dy: number) => void;
   reset: () => void;
+  /** Whether a camera move would be seen: a 2D context, a laid-out canvas, a visible document. */
+  canAnimate: () => boolean;
+  /** Camera moves of the dive / back transition (components/shell/diveMachine.ts). */
+  dive: (move: DiveCameraMove) => void;
 }
+
+/** HUD panels over the city whose rectangles the scene fit avoids (PROMPT §2). */
+const HUD_PANEL_SELECTOR = '.hud';
 
 interface CityCanvasProps {
   scene: CityScene;
+  /** Highlighted building (the dive target); the camera itself is driven by `controller.dive`. */
   selectedId: string | null;
   filter: ArchetypeCategory | 'all';
   label: string;
@@ -28,7 +37,7 @@ interface CityCanvasProps {
 const MAX_DPR = 2;
 const DRAG_THRESHOLD = 5;
 
-interface Animation { from: Camera; to: Camera; start: number; duration: number; }
+interface Animation { from: Camera; to: Camera; start: number; duration: number; path: (from: Camera, to: Camera, t: number) => Camera; }
 
 /**
  * Owns the single requestAnimationFrame loop of the city. The loop runs only while motion is allowed, the
@@ -41,6 +50,15 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     scene, selectedId, filter, reducedMotion, onSelect,
     hoveredId: null as string | null,
     camera: { focalX: 0, focalY: 0, zoom: 0.5 } as Camera,
+    /** The camera is at the HUD-safe whole-city fit (not moved by the user): refit it on resize/HUD changes. */
+    auto: true,
+    /** The view to go back to after a dive; `auto` re-fits instead of restoring a stale camera. */
+    saved: null as { camera: Camera; auto: boolean } | null,
+    /** A dive owns the camera: user pan/zoom/hover are ignored until it returns. */
+    locked: false,
+    /** HUD panel rectangles in canvas CSS pixels (see cameraMath.occludersFrom). */
+    occluders: [] as ScreenBox[],
+    hasContext: false,
     view: { width: 0, height: 0 } as Viewport,
     dpr: 1,
     fitted: false,
@@ -67,6 +85,8 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     if (!canvas || !ctx) return;
     const s = state.current;
     s.palette = resolveCityPalette(canvas);
+    s.hasContext = true;
+    const fit = () => hudSafeFit(s.scene.outerRadius, s.view, s.occluders);
 
     const animated = () => !s.reducedMotion;
     const shouldRun = () => s.visible && s.onScreen && !s.paused && s.view.width > 0;
@@ -81,12 +101,15 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       s.lastDraw = now;
       if (s.animation) {
         const progress = Math.min(1, (now - s.animation.start) / s.animation.duration);
-        s.camera = diveCamera(s.animation.from, s.animation.to, progress);
+        // Land exactly on the target (no float drift from the eased/log-space path).
+        s.camera = progress >= 1 ? s.animation.to : s.animation.path(s.animation.from, s.animation.to, progress);
         if (progress >= 1) s.animation = null;
       }
       if (animated()) s.frozenTime = now;
       ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
-      renderCity(ctx, {
+      // `occluders`: HUD panel rectangles in canvas CSS pixels, measured on resize only; the renderer moves
+      // labels off them.
+      const frame = {
         scene: s.scene, camera: s.camera, view: s.view, palette: s.palette!, time: s.frozenTime, animate: animated(),
         hoveredId: s.hoveredId, selectedId: s.selectedId, filter: s.filter,
         particles: animated() ? (s.view.width < 600 ? 4 : 12) : 0,
@@ -95,7 +118,9 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
         // static-layer cache for those (see RenderFrame.cameraMoving) instead of rebuilding + blitting
         // it on every single frame.
         cameraMoving: s.animation !== null || s.dragging,
-      });
+        occluders: s.occluders,
+      };
+      renderCity(ctx, frame);
       // Continuous loop only while something moves; otherwise wait for the next requestFrame().
       if ((animated() || s.animation) && shouldRun()) s.rafId = requestAnimationFrame(draw);
     };
@@ -116,8 +141,26 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       const backingHeight = Math.round(height * dpr);
       if (canvas.width !== backingWidth) canvas.width = backingWidth;
       if (canvas.height !== backingHeight) canvas.height = backingHeight;
-      if (!s.fitted) { s.camera = { focalX: 0, focalY: -20, zoom: fitZoom(s.scene.outerRadius, s.view) }; s.fitted = true; }
+      measureOccluders();
+      if (!s.fitted) { s.camera = fit(); s.auto = true; s.fitted = true; }
+      else if (s.auto && !s.locked) { s.animation = null; s.camera = fit(); }
       stop(); s.requestFrame();
+    };
+
+    /* --- HUD-safe margins: the panels over the canvas, measured on resize (canvas or panel) only --- */
+    const panelObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => onPanelsChanged()) : null;
+    const observed = new Set<Element>();
+    const measureOccluders = () => {
+      const root = canvas.closest('.city-shell, .city-view');
+      const panels = root ? Array.from(root.querySelectorAll<HTMLElement>(HUD_PANEL_SELECTOR)) : [];
+      for (const panel of panels) if (!observed.has(panel)) { observed.add(panel); panelObserver?.observe(panel); }
+      s.occluders = occludersFrom(canvas.getBoundingClientRect(), panels.map(panel => panel.getBoundingClientRect()));
+    };
+    const onPanelsChanged = () => {
+      if (!s.view.width) return;
+      measureOccluders();
+      if (s.auto && !s.locked && !s.animation) s.camera = fit();
+      s.requestFrame();
     };
     const initial = canvas.getBoundingClientRect();
     applySize(initial.width, initial.height);
@@ -152,7 +195,7 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     let drag: { id: number; x: number; y: number; moved: boolean } | null = null;
     // offsetX/Y are relative to the canvas padding edge: no layout read (getBoundingClientRect) per move.
     const pick = (event: PointerEvent) => hitTest(s.scene.drawOrder, event.offsetX, event.offsetY, s.camera, s.view);
-    const onPointerDown = (event: PointerEvent) => { drag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }; canvas.setPointerCapture?.(event.pointerId); };
+    const onPointerDown = (event: PointerEvent) => { if (s.locked) return; drag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }; canvas.setPointerCapture?.(event.pointerId); };
     const onPointerMove = (event: PointerEvent) => {
       if (drag && drag.id === event.pointerId) {
         const dx = event.clientX - drag.x;
@@ -161,12 +204,13 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
           drag.moved = true; drag.x = event.clientX; drag.y = event.clientY;
           s.dragging = true;
           s.animation = null;
+          s.auto = false;
           s.camera = { ...s.camera, focalX: s.camera.focalX - dx / s.camera.zoom, focalY: s.camera.focalY - dy / s.camera.zoom };
           s.requestFrame();
         }
         return;
       }
-      const hovered = pick(event)?.id ?? null;
+      const hovered = s.locked ? null : pick(event)?.id ?? null;
       if (hovered !== s.hoveredId) { s.hoveredId = hovered; canvas.style.cursor = hovered ? 'pointer' : 'grab'; s.requestFrame(); }
     };
     const onPointerUp = (event: PointerEvent) => {
@@ -175,14 +219,16 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       drag = null;
       s.dragging = false;
       canvas.releasePointerCapture?.(event.pointerId);
-      if (wasDrag) return;
+      if (wasDrag || s.locked) return;
       const hit = pick(event);
       if (hit) s.onSelect(hit.id);
     };
     const onPointerLeave = () => { if (s.hoveredId) { s.hoveredId = null; s.requestFrame(); } };
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+      if (s.locked) return;
       s.animation = null;
+      s.auto = false;
       s.camera = { ...s.camera, zoom: clampZoom(s.camera.zoom * Math.exp(-event.deltaY * 0.0015)) };
       s.requestFrame();
     };
@@ -193,15 +239,40 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     canvas.addEventListener('pointerleave', onPointerLeave);
     canvas.addEventListener('wheel', onWheel, { passive: false });
 
-    const moveTo = (target: Camera) => {
-      if (s.reducedMotion) { s.animation = null; s.camera = target; }
-      else s.animation = { from: s.camera, to: target, start: performance.now(), duration: CITY_MOTION.diveMs };
+    const animateTo = (target: Camera, duration: number, path: Animation['path']) => {
+      if (s.reducedMotion || duration <= 0) { s.animation = null; s.camera = target; }
+      else s.animation = { from: s.camera, to: target, start: performance.now(), duration, path };
+      s.requestFrame();
+    };
+    const moveTo = (target: Camera, auto = false) => {
+      if (s.locked) return;
+      s.auto = auto;
+      animateTo(target, CITY_MOTION.diveMs, diveCamera);
+    };
+    const saveReturn = () => { if (!s.saved) s.saved = { camera: s.animation?.to ?? s.camera, auto: s.auto }; };
+    const dive = (move: DiveCameraMove) => {
+      switch (move.kind) {
+        case 'focus': saveReturn(); s.locked = true; animateTo(divePointCamera(move.point, FOCUS_ZOOM), move.ms, lerpCamera); break;
+        case 'dive': s.locked = true; animateTo(divePointCamera(move.point, DIVE_ZOOM), move.ms, (from, to, t) => lerpCamera(from, to, t, easeIn)); break;
+        case 'hold': saveReturn(); s.locked = true; s.animation = null; break;
+        case 'cover': saveReturn(); s.locked = true; s.animation = null; if (move.point && !s.reducedMotion) s.camera = divePointCamera(move.point, DIVE_ZOOM); break;
+        case 'return': {
+          const saved = s.saved;
+          s.saved = null;
+          s.locked = false;
+          s.auto = saved?.auto ?? true;
+          animateTo(!saved || saved.auto ? fit() : saved.camera, move.ms, lerpCamera);
+          break;
+        }
+      }
       s.requestFrame();
     };
     controller.current = {
       zoomBy: factor => moveTo({ ...(s.animation?.to ?? s.camera), zoom: clampZoom((s.animation?.to ?? s.camera).zoom * factor) }),
       panBy: (dx, dy) => { const base = s.animation?.to ?? s.camera; moveTo({ ...base, focalX: base.focalX + dx / base.zoom, focalY: base.focalY + dy / base.zoom }); },
-      reset: () => moveTo({ focalX: 0, focalY: -20, zoom: fitZoom(s.scene.outerRadius, s.view) }),
+      reset: () => moveTo(fit(), true),
+      canAnimate: () => s.hasContext && s.view.width > 0 && s.view.height > 0 && s.visible && s.onScreen,
+      dive,
     };
 
     return () => {
@@ -210,6 +281,8 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
       s.stop = () => {};
       s.dragging = false;
       resizeObserver?.disconnect();
+      panelObserver?.disconnect();
+      s.hasContext = false;
       dprQuery?.removeEventListener?.('change', onDprChange);
       fonts?.removeEventListener?.('loadingdone', onFontsLoaded);
       intersection?.disconnect();
@@ -231,8 +304,12 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     const sceneChanged = previous !== scene;
     s.scene = scene; s.filter = filter; s.reducedMotion = reducedMotion;
     if (sceneChanged) s.cache.labels.clear();
-    // Polling hands us a new rooms array (and scene) often; only a changed footprint re-fits the zoom.
-    if (sceneChanged && !s.selectedId && s.view.width && shouldRefitZoom(previous, scene)) s.camera = { ...s.camera, zoom: fitZoom(scene.outerRadius, s.view) };
+    // Polling hands us a new rooms array (and scene) often; only a changed footprint re-fits the camera
+    // (the whole HUD-safe fit while the user has not moved it, else just the zoom). Never during a dive.
+    if (sceneChanged && !s.locked && s.view.width && shouldRefitZoom(previous, scene)) {
+      s.animation = null;
+      s.camera = s.auto ? hudSafeFit(scene.outerRadius, s.view, s.occluders) : { ...s.camera, zoom: fitZoom(scene.outerRadius, s.view) };
+    }
     if (reducedMotion && s.animation) { s.camera = s.animation.to; s.animation = null; }
     s.requestFrame();
   }, [scene, filter, reducedMotion]);
@@ -243,17 +320,10 @@ export function CityCanvas({ scene, selectedId, filter, label, reducedMotion, pa
     if (paused) s.stop(); else s.requestFrame();
   }, [paused]);
 
-  // Selection: two-phase dive (glide, then zoom) to the building; instant under reduced motion.
+  // Selection only highlights; the dive moves the camera through controller.dive.
   useEffect(() => {
     const s = state.current;
     s.selectedId = selectedId;
-    const building = selectedId ? s.scene.buildings.find(item => item.id === selectedId) : null;
-    if (building) {
-      const iso = isoProject(building.x, building.y, building.height / 2);
-      const target: Camera = { focalX: iso.x, focalY: iso.y, zoom: clampZoom(Math.max(s.camera.zoom, 1.15)) };
-      if (s.reducedMotion) { s.animation = null; s.camera = target; }
-      else s.animation = { from: s.camera, to: target, start: performance.now(), duration: CITY_MOTION.diveMs };
-    }
     s.requestFrame();
   }, [selectedId]);
 
