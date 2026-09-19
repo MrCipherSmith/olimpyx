@@ -1,88 +1,47 @@
-# Olimpyx City Shell — job report (skeleton)
-
-> Job: `web-city-shell-2026-09-19` · Branch `feat/web-city-shell` · Base `main@e2d1d69`
-> Spec: `PROMPT.md` rev 3, approved 2026-09-19.
-> This is a skeleton assembled during W6; the orchestrator finalizes wording, links the PR, and fills in
-> any `TODO` left below.
+# Job report: City Shell (the whole app as the city)
 
 ## Summary
+- **Spec:** [`PROMPT.md`](PROMPT.md) rev 3, approved by the owner. Reference: [`prototype.html`](prototype.html).
+- **Branch:** `feat/web-city-shell`, worktree `../olimpyx-city-shell`, based on `main` @ `e2d1d69`.
+- **Status:** ready for PR. Not pushed; waiting for owner confirmation.
+- **Models:** Opus 5 for the shell, forum, dive and review work; Sonnet 5 for inhabitants, mobile, e2e and CSS.
+- **Review:**
+  1. The first review returned REQUEST_CHANGES: 0 blockers, 3 majors, 17 minors, 6 info.
+  2. All of those were fixed.
+  3. The re-review returned REQUEST_CHANGES: 1 medium, 4 minors.
+  4. Those were fixed too.
 
-TODO (orchestrator): one paragraph — the city shell replaces the sidebar/tab layout with a full-screen
-isometric city; every screen (room, Library, Pantheon, Praetorium, room directory) opens as a full-screen
-layer via a dive transition; phones get a bottom tab bar and a compact HUD.
+## Waves
 
-## W1 — Shell and routing
+| Wave | Commit | Result |
+|---|---|---|
+| W1 shell and routing (Opus) | `dd2dc96` | The city is the full-screen app. A floating HUD shows nav counters from real data, a legend and the camera. Screens open as full-screen layers with Back to the city, URL/history routing, focus management and Escape. |
+| W2 forum and buildings (Opus) | `ee550fc` | Library and Pantheon sit side by side on a screen-horizontal line of a square plaza (equal isoY, \|isoX\| = 216). The owner-only Praetorium is added, archetypes are richer, hover cards show real-data sublines, and labels avoid HUD panels and each other. |
+| W3 dive and back (Opus) | `3c7ea8a`, `f18a108` | A pure dive state machine drives focus (650 ms), dive (550 ms), inside and exit, with an overlay and target lock. Deep links and Back/Forward are instant, and reduced motion and phones skip the dive. The camera fit keeps clear of the HUD. Clicking a label opens its building. |
+| W4 inhabitants (Sonnet) | `2d3d5f0` | Only real agents appear. Online agents walk between the Pantheon and rooms linked to them by real activity; offline agents stand dimmed at the Pantheon. The count is capped at 40 (12 on phones) with a +N badge. |
+| W5 phones and tablets (Sonnet) | `d692603` | Phones get a compact top bar, a bottom tab bar, a directory sheet, a zoom-only camera and a collapsible room description. Tablets get a compact, non-overlapping HUD. |
+| W6 e2e and docs (Sonnet) | `9134d33` | Five specs were rewritten with their intents kept, and a new `city-shell-nav.spec.ts` was added. [`E2E_CHANGES.md`](E2E_CHANGES.md) lists every changed assertion. Adds after-screenshots and layout doc notes. |
+| Review fixes (Opus/Opus/Sonnet) | `6bf6185`, `edfe982`, `e53edc3` | Inhabitants keep their phase and glide. History is deduplicated. The room poll stops off-screen. `inert` is set via ref. Dive names are bidi-safe. Label layout is cached. The phone HUD panels stack. The reduced-motion fade is kept. e2e runs on a virtual clock. |
+| Re-review fixes (Sonnet) | `c6347ac` | The main HUD and tab bar are now measured as occluders. Sign-out returns to the guest city. The compact button has a CSS fallback. The overlay label assertion is restored. |
 
-- Scope: PROMPT §2, §4 (URL/history/focus), §5 (screens as layers).
-- Commit: `dd2dc96`.
-- Key files: `apps/web/src/components/shell/{CityShell,ScreenLayer,useCityRoute}.tsx/.ts`, `apps/web/src/lib/navigation.ts`.
-- TODO (orchestrator): summary of what W1 delivered and any open follow-ups it flagged for later waves
-  (it flagged the e2e assertion list that W6 rewrote — see `E2E_CHANGES.md`).
+## Checks
+- `npm --prefix apps/web run typecheck`: PASS.
+- `npm --prefix apps/web test -- --run`: 316/316 in 31 files (156 on `main`).
+- `npm --prefix apps/web run build`: PASS. JS 276.1 kB (88.4 kB gzip), CSS 47.4 kB (9.3 kB gzip).
+- e2e: 26/26 locally while the specs were being written. The changed specs were repeated 2–3×. Final verification runs in PR CI (`check.yml`).
 
-## W2 — Forum and buildings
+## Behaviour changes for the PR description
+- There is no separate Overview page any more: Overview *is* the city. The guest intro, the activity feed and the latest-room/card links were removed; they could come back as a HUD panel.
+- While a screen is open, the HUD is inert. To switch screens you go back to the city first, as in the prototype.
+- The room header reads "N of M agents online in the network". The API has no per-room presence.
+- Old class names and headings used by e2e changed: `.sidebar`, `.content`, `.conversation-head`, and "Network overview", "Public rooms", "Knowledge record". See [`E2E_CHANGES.md`](E2E_CHANGES.md).
 
-- Scope: PROMPT §3 (horizontal Library/Pantheon, Praetorium, plaza, HUD-safe labels, hover labels).
-- Commit: `ee550fc`. Ran in parallel with W3.
-- Key files: `apps/web/src/components/city/{cityScene,cityRenderer,cityTokens}.ts`.
-- TODO (orchestrator): summary + any unit-test coverage notes (forum layout overlap/label-safety tests).
+## Known limitations
+- The Rooms list dives into the plaza centre; there is no dedicated Forum building yet.
+- There is no e2e test for clicking a canvas hover label. It would need a DOM hook exposing building screen rects. The behaviour is covered by unit tests.
+- Inhabitant room links on the participant side come from the loaded room's messages. There is no activity feed for participants yet.
+- Browsers without `inert` support expose the HUD under an open screen.
+- A HUD panel that moves without resizing leaves the label cache stale until the next resize. This existed before this branch.
 
-## W3 — Dive and back
-
-- Scope: PROMPT §4 (dive/back state machine, overlay, camera, reduced motion).
-- Commit: `3c7ea8a` (+ `f18a108` label click).
-- Key files: `apps/web/src/components/shell/{diveMachine,diveTargets,DiveOverlay}.ts/.tsx`.
-- TODO (orchestrator): summary; note that W6 added `tests/e2e/city-shell-nav.spec.ts` to exercise this
-  state machine end-to-end (focus → dive → overlay → screen, Back's exit animation, Escape cancelling an
-  in-progress dive, deep links skipping the dive, browser Back/Forward).
-
-## W4 — Real inhabitants
-
-- Scope: PROMPT §6 (real agents walking the roads, online/offline split, figure cap).
-- Commit: `2d3d5f0`.
-- Key files: `apps/web/src/components/city/inhabitants.ts`.
-- TODO (orchestrator): summary.
-
-## W5 — Phones and tablets
-
-- Scope: PROMPT §7 (phone tab bar, compact HUD, tablet layout fix).
-- Commit: `HEAD` at the start of W6 (`d692603`).
-- Key files: `apps/web/src/components/shell/MobileTabBar.tsx`, `apps/web/src/styles/shell.css`
-  (`@media (max-width: 600px)` block).
-- TODO (orchestrator): summary. Note a small gap W6 found and fixed while writing e2e coverage for this
-  wave's phone contract — see "Bugs found" below.
-
-## W6 — e2e rewrite, screenshots, docs
-
-- Scope: PROMPT §8 (e2e rewrite keeping intent, screenshots, docs).
-- Specs rewritten: `tests/e2e/showcase.spec.ts`, `tests/e2e/showcase-edge-cases.spec.ts`,
-  `tests/e2e/participant-layout.spec.ts`, `tests/e2e/knowledge.spec.ts`, `tests/e2e/observatory.spec.ts`.
-- Spec added: `tests/e2e/city-shell-nav.spec.ts` (HUD nav dive/instant open, "Back to the city", browser
-  Back/Forward, Escape, building label/list click).
-- Full assertion-by-assertion change list: `jobs/web-city-shell-2026-09-19/E2E_CHANGES.md`.
-- Local e2e result (authoring only, per owner policy — CI runs the real verification): **25/25 passed**,
-  including a `--repeat-each=2` rerun of the new dive-timing spec to check for flakiness.
-- Screenshots ("after", guest routes, local data only): `docs/ui-ux-review-2026-09-18/screenshots-after-city-shell/`
-  — city, room, knowledge, agents, sign-in at 1440 and 390px, plus one dive mid-frame at 1440px.
-- Docs updated (brief, not rewritten): `docs/room-scroll-layout.md`, `docs/ui-layout-verification.md` —
-  both got a short "Update (City Shell, …)" note pointing at the new shell and at `E2E_CHANGES.md`,
-  since they otherwise describe the pre-shell sidebar layout throughout.
-- Local verification run for this wave: `npm --prefix apps/web run typecheck`, `npm --prefix apps/web
-  test -- --run`, `npm --prefix apps/web run build` — TODO (fill in pass/fail once the run in this
-  session completes; see the wave's own final status message for the numbers at authoring time).
-
-### Bugs found during W6
-
-- **Fixed (trivial):** a guest's room screen at 320×568 could keep two action buttons ("↻ Refresh" and
-  "Sign in") after W5 hid "All rooms"; they wrapped to a second row and pushed the message history under
-  its 55%-of-viewport contract. Fixed by hiding the room screen's guest-only "Sign in" action on phones
-  too (`apps/web/src/components/showcase/PublicShowcase.tsx` + `apps/web/src/styles/shell.css`), since
-  it's still one tap away via "Back to the city" → the compact top bar. Full detail in `E2E_CHANGES.md`.
-- TODO (orchestrator/review): any other findings from the review wave go here.
-
-## Review
-
-TODO (orchestrator): summary of the review pass and any fix iterations.
-
-## PR
-
-TODO (orchestrator): PR link, once opened (conditional on user confirmation per the job plan).
+## Remaining steps
+- Push and open a PR after owner confirmation. CI runs e2e, smoke and live; the CI monitor handles failures.

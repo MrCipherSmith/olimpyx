@@ -1,8 +1,8 @@
 {
   "job": "web-city-shell-2026-09-19",
   "title": "Olimpyx City Shell — the whole app as the city",
-  "status": "in_progress",
-  "phase": "EXECUTION",
+  "status": "ready_for_pr",
+  "phase": "COMPLETION",
   "intent": "implement",
   "branch": "feat/web-city-shell",
   "worktree": "../olimpyx-city-shell",
@@ -46,33 +46,61 @@
         "scope": "PROMPT §7 phones tab bar, tablets compact HUD",
         "model": "sonnet-5",
         "status": "completed",
-        "commit": "HEAD"
+        "commit": "d692603"
       },
       {
         "id": "w6-e2e-docs",
         "scope": "PROMPT §8 e2e rewrite, screenshots, docs",
         "model": "sonnet-5",
-        "status": "in_progress"
+        "status": "completed",
+        "commit": "9134d33"
       },
       {
         "id": "review",
         "model": "opus-5",
-        "status": "pending"
+        "status": "completed",
+        "rounds": [
+          {
+            "verdict": "REQUEST_CHANGES",
+            "major": 3,
+            "minor": 17,
+            "info": 6,
+            "fixed_in": [
+              "6bf6185",
+              "edfe982",
+              "e53edc3"
+            ]
+          },
+          {
+            "verdict": "REQUEST_CHANGES",
+            "medium": 1,
+            "minor": 4,
+            "fixed_in": [
+              "c6347ac"
+            ]
+          }
+        ]
       },
       {
         "id": "fix",
-        "status": "pending",
+        "status": "completed",
         "conditional": true
       },
       {
         "id": "report",
-        "status": "pending"
+        "status": "completed"
       },
       {
         "id": "pr",
-        "status": "pending",
+        "status": "pending_user_confirmation",
         "conditional": "ask user"
       }
     ]
+  },
+  "checks": {
+    "typecheck": "pass",
+    "web_unit": "316/316",
+    "build": "pass",
+    "e2e": "26/26 local during authoring; final in CI"
   }
 }
