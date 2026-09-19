@@ -114,6 +114,7 @@ function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => vo
   const [roomDetail, setRoomDetail] = useState<LoadState<PublicRoom | null>>(empty(null));
   const [cardDetail, setCardDetail] = useState<LoadState<PublicKnowledgeCard | null>>(empty(null));
   const [agentDetail, setAgentDetail] = useState<LoadState<PublicAgent | null>>(empty(null));
+  const [historyRevision, setHistoryRevision] = useState(0);
 
   const load = useCallback(async () => {
     setSnapshot(current => ({ ...current, loading: true, error: null }));
@@ -131,7 +132,9 @@ function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => vo
     setRoomMessages(current => ({ ...current, loading: true, error: null }));
     void api.showcaseMessages(route.roomId).then(page => { if (active) setRoomMessages(empty(page.data.slice().reverse())); }).catch(error => { if (active) setRoomMessages({ data: [], loading: false, error: messageFrom(error) }); });
     return () => { active = false; };
-  }, [api, route.roomId, snapshot.data]);
+    // Refetch on the room change or an explicit Refresh only. Refetching when the first snapshot arrives
+    // swapped the history for a spinner right after a #message-… anchor had been applied, losing it.
+  }, [api, route.roomId, historyRevision]);
 
   const navigate = (next: Route) => { window.history.pushState(null, '', hrefFor(next)); setRoute(next); };
   const data = snapshot.data;
@@ -148,7 +151,7 @@ function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => vo
       <div className="side-footer public-side-footer"><div><strong>Guest view</strong><small>Published material only</small></div><button className="secondary compact" onClick={onSignIn}>Sign in</button></div>
     </aside>
     <section className="content">
-      <header className="topbar public-topbar">{route.view === 'rooms' && route.roomId && <RoomBack onNavigate={navigate} />}<div><p className="eyebrow">PUBLISHED NETWORK</p><h1>{titleFor(route.view)}</h1></div><div className="topbar-actions"><small>{data ? `Updated ${ago(data.generated_at)}` : 'Status unavailable'}</small><button className="secondary" onClick={() => void load()}>↻ Refresh</button>{route.view === 'rooms' && route.roomId && <button className="secondary compact mobile-room-signin" onClick={onSignIn}>Sign in</button>}</div></header>
+      <header className="topbar public-topbar">{route.view === 'rooms' && route.roomId && <RoomBack onNavigate={navigate} />}<div><p className="eyebrow">PUBLISHED NETWORK</p><h1>{titleFor(route.view)}</h1></div><div className="topbar-actions"><small>{data ? `Updated ${ago(data.generated_at)}` : 'Status unavailable'}</small><button className="secondary" onClick={() => { setHistoryRevision(revision => revision + 1); void load(); }}>↻ Refresh</button>{route.view === 'rooms' && route.roomId && <button className="secondary compact mobile-room-signin" onClick={onSignIn}>Sign in</button>}</div></header>
       {snapshot.loading && !data && <Loading />}
       {snapshot.error && !data && <ErrorText text={snapshot.error} />}
       {data && route.view === 'overview' && <PublicOverview data={data} onNavigate={navigate} />}
@@ -173,10 +176,10 @@ function RoomDescription({ description }: { description: string }) {
   const { archetype, cleanDescription } = parseRoomMetadata(description);
   return (
     <>
-      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', padding: '3px 8px', borderRadius: '6px', background: `${archetype.color}15`, border: `1px solid ${archetype.color}40`, color: archetype.color, marginTop: '4px', marginBottom: '6px' }}>
-        <span>{archetype.icon}</span>
-        <strong style={{ fontWeight: 600 }}>{archetype.name}</strong>
-        <span style={{ opacity: 0.75 }}>({archetype.badge})</span>
+      <div className="archetype-chip" style={accentStyle(archetype.color)}>
+        <span aria-hidden="true">{archetype.icon}</span>
+        <strong>{archetype.name}</strong>
+        <small>{archetype.badge}</small>
       </div>
       {cleanDescription && <p className="room-description">{cleanDescription}</p>}
       {cleanDescription && (
@@ -218,7 +221,7 @@ function PublicRooms({ data, selected, messages, onNavigate }: { data: ShowcaseS
           const { archetype, cleanDescription } = parseRoomMetadata(room.description);
           return (
             <RouteLink className="room-row" current={selected?.room_id === room.room_id} key={room.room_id} route={{ view: 'rooms', roomId: room.room_id }} onNavigate={onNavigate}>
-              <span className="room-avatar" style={{ color: archetype.color }}>{archetype.icon}</span>
+              <span className="room-avatar" style={accentStyle(archetype.color)} aria-hidden="true">{archetype.icon}</span>
               <span>
                 <strong>{room.title}</strong>
                 <small>{archetype.badge} · {cleanDescription || archetype.defaultTopic} · {room.message_count} messages</small>
@@ -330,7 +333,7 @@ function RoomsPanel({ api, state, agents, cards, selected, messages, onOpen, onC
             const { archetype, cleanDescription } = parseRoomMetadata(room.description);
             return (
               <button className={selected?.room_id === room.room_id ? 'room-row selected' : 'room-row'} key={room.room_id} onClick={() => void onOpen(room)}>
-                <span className="room-avatar" style={{ color: archetype.color }}>{archetype.icon}</span>
+                <span className="room-avatar" style={accentStyle(archetype.color)} aria-hidden="true">{archetype.icon}</span>
                 <span>
                   <strong>{room.title}</strong>
                   <small>{archetype.badge} · {cleanDescription || archetype.defaultTopic}</small>
@@ -434,24 +437,15 @@ function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreate: (inp
         <div className="archetype-modal-scroll">
           <label>Title<input name="title" required maxLength={120} autoFocus /></label>
 
-          <div style={{ marginTop: '12px', marginBottom: '8px' }}>
-            <span className="eyebrow" style={{ display: 'block', marginBottom: '6px' }}>АРХИТЕКТУРНЫЙ МАКЕТ ДЛЯ ГОРОДА ({ROOM_ARCHETYPES.length} ТИПОВ)</span>
-            <div className="category-tabs" role="tablist">
-              <button
-                type="button"
-                className={`category-tab ${selectedCategory === 'all' ? 'active' : ''}`}
-                onClick={() => setSelectedCategory('all')}
-              >
+          <div className="archetype-picker" role="group" aria-labelledby="archetype-picker-label">
+            <span className="eyebrow" id="archetype-picker-label">АРХИТЕКТУРНЫЙ МАКЕТ ДЛЯ ГОРОДА ({ROOM_ARCHETYPES.length} ТИПОВ)</span>
+            <div className="category-tabs">
+              <button type="button" className={`category-tab${selectedCategory === 'all' ? ' active' : ''}`} aria-pressed={selectedCategory === 'all'} onClick={() => setSelectedCategory('all')}>
                 ✦ Все ({ROOM_ARCHETYPES.length})
               </button>
               {ROOM_CATEGORIES.map(cat => (
-                <button
-                  key={cat.id}
-                  type="button"
-                  className={`category-tab ${selectedCategory === cat.id ? 'active' : ''}`}
-                  onClick={() => setSelectedCategory(cat.id)}
-                >
-                  <span>{cat.icon}</span> {cat.label}
+                <button key={cat.id} type="button" className={`category-tab${selectedCategory === cat.id ? ' active' : ''}`} aria-pressed={selectedCategory === cat.id} onClick={() => setSelectedCategory(cat.id)}>
+                  <span aria-hidden="true">{cat.icon}</span> {cat.label}
                 </button>
               ))}
             </div>
@@ -461,48 +455,24 @@ function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreate: (inp
             {filteredArchetypes.map(arch => {
               const isSelected = arch.id === selectedArchetypeId;
               return (
-                <div
-                  key={arch.id}
-                  className={`archetype-card ${isSelected ? 'selected' : ''}`}
-                  onClick={() => setSelectedArchetypeId(arch.id)}
-                  style={{
-                    '--card-color': arch.color,
-                    '--card-glow': arch.glowColor,
-                    borderColor: isSelected ? arch.color : undefined,
-                    background: isSelected ? `${arch.color}15` : undefined
-                  } as React.CSSProperties}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span style={{ fontSize: '20px' }}>{arch.icon}</span>
-                    <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: `${arch.color}25`, color: arch.color, fontWeight: 700 }}>
-                      {arch.badge}
-                    </span>
-                  </div>
-                  <div style={{ fontWeight: 700, fontSize: '13px', color: '#f1f5f9' }}>
-                    {arch.name}
-                  </div>
-                  <div style={{ fontSize: '11px', color: '#94a3b8', lineHeight: 1.3 }}>
-                    {arch.description}
-                  </div>
-                  {isSelected && (
-                    <div style={{ marginTop: 'auto', fontSize: '10px', color: arch.color, fontWeight: 700 }}>
-                      ✓ ВЫБРАН МАКЕТ
-                    </div>
-                  )}
-                </div>
+                <button type="button" key={arch.id} className={`archetype-card${isSelected ? ' selected' : ''}`} aria-pressed={isSelected} onClick={() => setSelectedArchetypeId(arch.id)} style={accentStyle(arch.color)}>
+                  <span className="archetype-card-head">
+                    <span className="archetype-card-icon" aria-hidden="true">{arch.icon}</span>
+                    <span className="archetype-card-badge">{arch.badge}</span>
+                  </span>
+                  <strong>{arch.name}</strong>
+                  <span>{arch.description}</span>
+                  {isSelected && <span className="archetype-card-selected">✓ ВЫБРАН МАКЕТ</span>}
+                </button>
               );
             })}
           </div>
 
-          <div style={{ padding: '10px 14px', borderRadius: '8px', background: `${selectedArch.color}12`, border: `1px solid ${selectedArch.color}35`, marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '24px' }}>{selectedArch.icon}</span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: selectedArch.color }}>
-                {selectedArch.name} ({selectedArch.badge})
-              </div>
-              <div style={{ fontSize: '11px', color: '#cbd5e1' }}>
-                {selectedArch.description}
-              </div>
+          <div className="archetype-preview" style={accentStyle(selectedArch.color)}>
+            <span aria-hidden="true">{selectedArch.icon}</span>
+            <div>
+              <strong>{selectedArch.name} ({selectedArch.badge})</strong>
+              <small>{selectedArch.description}</small>
             </div>
           </div>
 
@@ -522,3 +492,5 @@ function Composer({ onSend }: { onSend: (body: string) => Promise<void> }) { con
 function Metric({ label, value, onClick }: { label: string; value: number; onClick?: () => void }) { return onClick ? <button className="metric" onClick={onClick}><strong>{value}</strong><span>{label}</span></button> : <div className="metric"><strong>{value}</strong><span>{label}</span></div> }
 function StateList<T>({ state, emptyTitle, emptyText, children }: { state: LoadState<T[]>; emptyTitle: string; emptyText: string; children: React.ReactNode }) { if (state.loading) return <Loading />; if (state.error) return <ErrorText text={state.error} />; return state.data.length ? <>{children}</> : <Empty title={emptyTitle} text={emptyText} />; }
 function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><span>◇</span><h3>{title}</h3><p>{text}</p></div> }; function Loading() { return <div className="loading">Loading from the network…</div> }; function ErrorText({ text }: { text: string }) { return <p className="form-error" role="alert">{text}</p> }; function ActorBadge({ type }: { type: Actor['actor_type'] }) { return <span className={`actor-badge ${type}`}>{type === 'agent' ? 'Agent' : 'Human'}</span> }; function Avatar({ actor }: { actor: Actor }) { return <span className={`message-avatar ${actor.actor_type}`}>{actor.actor_type === 'agent' ? 'A' : 'H'}</span> }; function StatusBadge({ status }: { status: 'unconfirmed' | 'confirmed' | 'contested' }) { return <span className={`status ${status}`}>{status}</span> }; function navIcon(view: View) { return ({ overview: '◫', city: '🏙', rooms: '#', agents: '◎', knowledge: '◇', owner: '⚿' })[view]; }; function titleFor(view: View) { return ({ overview: 'Network overview', city: 'Cyber-Polis Map', rooms: 'Public rooms', agents: 'Agent directory', knowledge: 'Knowledge record', owner: 'Owner controls' })[view]; }; function messageFrom(error: unknown) { return error instanceof Error ? error.message : 'Something unexpected happened.'; }
+/** Archetype colour comes from the room catalogue (data), so it is passed to CSS as a custom property instead of inline colour rules. */
+function accentStyle(color: string) { return { '--accent': color } as React.CSSProperties; }

@@ -28,7 +28,7 @@ test('owner inspects agent knowledge, history and enrollment controls in the bro
   await page.getByRole('link').filter({hasText:`Finding ${id}`}).click();
   await expect(page.getByText('Original evidence remains readable',{exact:true})).toBeVisible();
   await expect(page.getByText('Revised evidence remains readable',{exact:true}).first()).toBeVisible();
-  await page.getByRole('link',{name:'Agent directory',exact:true}).click();
+  await page.getByRole('link',{name:'Agents',exact:true}).click();
   await expect(page.getByRole('heading',{name:`Researcher ${id}`})).toBeVisible();
   await page.getByRole('link',{name:'Owner controls',exact:true}).click();
   await page.getByRole('button',{name:'Generate enrollment token'}).click();

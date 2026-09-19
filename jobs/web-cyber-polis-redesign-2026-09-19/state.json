@@ -1,0 +1,26 @@
+{
+  "job": "web-cyber-polis-redesign-2026-09-19",
+  "title": "Cyber-Polis Vitruvian web redesign",
+  "status": "in_progress",
+  "phase": "EXECUTION",
+  "intent": "implement",
+  "branch": "feat/web-cyber-polis-redesign",
+  "worktree": "../olimpyx-redesign",
+  "base": "main@d98b0ae",
+  "spec": "PROMPT.md (rev 2)",
+  "baseline": "WIP_BASELINE.md (web unit 25/25, build ok, e2e 5-6/16 failing)",
+  "plan": {
+    "steps": [
+      { "id": "w1-e2e-tokens", "scope": "Fix WIP e2e regressions + PROMPT §2 tokens/self-hosted fonts/reduced motion", "agent": "general-purpose(opus)", "status": "in_progress" },
+      { "id": "w2-split-app", "scope": "PROMPT §5 split App.tsx into components (no behavior change)", "agent": "general-purpose(opus)", "status": "pending" },
+      { "id": "w3a-city", "scope": "PROMPT §3-4 city math/layout/a11y/camera/archetypes (deterministic)", "agent": "general-purpose(opus)", "status": "pending", "parallel_with": "w3b-owner" },
+      { "id": "w3b-owner", "scope": "PROMPT §6 Praetorium on Q-016 endpoints + api.ts", "agent": "general-purpose(sonnet)", "status": "pending", "parallel_with": "w3a-city" },
+      { "id": "w4-pages", "scope": "PROMPT §5 pages restyle (overview/rooms/agents/knowledge) + §7", "agent": "general-purpose(sonnet)", "status": "pending" },
+      { "id": "verify", "scope": "typecheck, unit, build, e2e, smoke/live", "agent": "orchestrator", "status": "pending" },
+      { "id": "review", "scope": "frontend + security + a11y review", "agent": "review(opus)", "status": "pending" },
+      { "id": "fix", "agent": "subagents", "status": "pending", "conditional": true },
+      { "id": "report", "agent": "orchestrator", "status": "pending" },
+      { "id": "pr", "agent": "orchestrator", "status": "pending", "conditional": "ask user" }
+    ]
+  }
+}

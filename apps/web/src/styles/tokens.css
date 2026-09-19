@@ -1,0 +1,140 @@
+/* =========================================================================
+   OLIMPYX CYBER-POLIS DESIGN TOKENS (PROMPT §2)
+   Every colour, radius, shadow, spacing step and font family used by the UI.
+   Text colours are checked against --bg-base / --bg-panel-solid / --bg-raised
+   for WCAG AA (4.5:1 normal text, 3:1 large text and UI parts):
+     text-primary 15.3+, text-secondary 10.8+, text-muted 6.2+, text-subtle 4.7+,
+     cyan 11.3+, gold 11.3+, indigo 5.3+, emerald 6.3+, amber 9.6+,
+     crimson-text 5.9+, orange 7.0+, purple 6.0+, slate 6.2+, rose 5.9+, teal 8.6+.
+   Saturated --color-crimson (#ff2a5f) is 4.4:1 on raised panels, so it is used for
+   borders, glows and large text only; body-size crimson text uses --color-crimson-text.
+   ========================================================================= */
+
+:root {
+  /* Surfaces */
+  --bg-base: #040914;
+  --bg-surface: #060d1b;
+  --bg-panel: rgba(11, 21, 40, 0.75);
+  --bg-panel-solid: #0b1528;
+  --bg-raised: #12213d;
+  --bg-input: rgba(4, 9, 20, 0.95);
+  --bg-overlay: rgba(2, 6, 14, 0.85);
+  --bg-sidebar: rgba(4, 9, 20, 0.94);
+  --bg-card: rgba(8, 18, 36, 0.85);
+  --bg-card-hover: rgba(12, 28, 56, 0.92);
+  --bg-hero-from: rgba(14, 32, 64, 0.85);
+  --bg-hero-to: rgba(6, 16, 36, 0.95);
+
+  /* Accents (§2.1) */
+  --color-cyan: #00f0ff;       /* agents, roads, [A] */
+  --color-gold: #ffd600;       /* humans, Pantheon, domes, [H] */
+  --color-indigo: #818cf8;     /* Central Library, knowledge archive */
+  --color-emerald: #10b981;    /* online, confirmed */
+  --color-amber: #fbbf24;      /* contested, warnings */
+  --color-crimson: #ff2a5f;    /* escalations, moderation, errors */
+  --color-crimson-text: #ff6b8b;
+  /* Archetype accents (§4) */
+  --color-orange: #fb923c;
+  --color-purple: #c084fc;
+  --color-slate: #94a3b8;
+  --color-rose: #fb7185;
+  --color-teal: #2dd4bf;
+  --color-sky: #38bdf8;        /* links */
+
+  /* Deep shades for solid fills behind dark text */
+  --color-cyan-deep: #0284c7;
+  --color-gold-deep: #b45309;
+  --color-on-accent: #030712;
+
+  /* Text */
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-subtle: #7d8da6;
+  --text-link: var(--color-sky);
+  --text-link-hover: var(--color-cyan);
+  --text-error: #ff9fb4;
+
+  /* Borders */
+  --border-dim: rgba(0, 240, 255, 0.10);
+  --border-glass: rgba(0, 240, 255, 0.18);
+  --border-strong: rgba(0, 240, 255, 0.30);
+  --border-glow: rgba(0, 240, 255, 0.45);
+  --border-gold: rgba(255, 214, 0, 0.35);
+  --border-indigo: rgba(129, 140, 248, 0.40);
+  --border-crimson: rgba(255, 42, 95, 0.40);
+  --border-emerald: rgba(16, 185, 129, 0.40);
+  --border-amber: rgba(251, 191, 36, 0.40);
+
+  /* Tints */
+  --tint-cyan: rgba(0, 240, 255, 0.10);
+  --tint-cyan-strong: rgba(0, 240, 255, 0.16);
+  --tint-gold: rgba(255, 214, 0, 0.14);
+  --tint-indigo: rgba(129, 140, 248, 0.16);
+  --tint-emerald: rgba(16, 185, 129, 0.15);
+  --tint-amber: rgba(251, 191, 36, 0.14);
+  --tint-crimson: rgba(255, 42, 95, 0.15);
+
+  /* Glow and elevation */
+  --glow-cyan-sm: 0 0 10px rgba(0, 240, 255, 0.25);
+  --glow-cyan: 0 0 16px rgba(0, 240, 255, 0.22);
+  --glow-cyan-lg: 0 0 32px rgba(0, 240, 255, 0.14);
+  --glow-gold-sm: 0 0 10px rgba(255, 214, 0, 0.22);
+  --glow-indigo: 0 0 20px rgba(129, 140, 248, 0.25);
+  --shadow-panel: 0 12px 36px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 20px 50px rgba(0, 0, 0, 0.7), 0 0 30px rgba(0, 240, 255, 0.15);
+  --text-glow-cyan: 0 0 14px rgba(0, 240, 255, 0.55);
+
+  /* Glass (§2.2) */
+  --glass-blur: blur(16px);
+
+  /* Radii */
+  --radius-xs: 5px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+
+  /* Typography */
+  --font-body: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: 'Space Grotesk', var(--font-body);
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Scrollbars (§2.2) */
+  --scrollbar-size: 5px;
+  --scrollbar-thumb: rgba(0, 240, 255, 0.30);
+  --scrollbar-thumb-hover: rgba(0, 240, 255, 0.60);
+  --scrollbar-track: transparent;
+
+  /* Motion (§2.4): overridden to 0ms under prefers-reduced-motion */
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Page background */
+  --bg-app:
+    radial-gradient(circle at 85% 5%, rgba(0, 240, 255, 0.08) 0, transparent 38rem),
+    radial-gradient(circle at 15% 95%, rgba(129, 140, 248, 0.06) 0, transparent 42rem),
+    var(--bg-surface);
+  --bg-auth:
+    radial-gradient(circle at 20% 0, rgba(0, 240, 255, 0.15) 0, transparent 40rem),
+    radial-gradient(circle at 80% 80%, rgba(129, 140, 248, 0.10) 0, transparent 45rem),
+    var(--bg-base);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+}
