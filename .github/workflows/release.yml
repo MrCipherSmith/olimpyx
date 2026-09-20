@@ -1,0 +1,177 @@
+name: Release
+
+# Тег — единственный триггер. Пуш `v0.1.1` публикует `0.1.1`; больше ничто не
+# публикует. `workflow_dispatch` отсутствует намеренно: релиз, который можно
+# запустить руками с произвольного ref, — это релиз, происхождение которого
+# потом не прочитать по тегу.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # создать GitHub Release
+  id-token: write # npm provenance + trusted publishing (OIDC)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Те же ворота, что проходит pull request. Тег не должен уметь отгрузить то,
+  # что не прошло бы через PR.
+  check:
+    uses: ./.github/workflows/check.yml
+
+  release:
+    name: verify, publish, announce
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # извлечение changelog читает историю
+
+      # Trusted publishing требует npm >= 11.5.1. Линия Node 22 приносит npm
+      # 10.x, поэтому CLI обновляется явно — без этого publish сваливается на
+      # поиск токена и умирает на 2FA-промпте, который раннер ответить не может.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      # `npm@11`, не `npm@latest`: у keryx `latest` уехал на 12.x и убил
+      # публикацию на `CA_CREATE_SIGNING_CERTIFICATE_ERROR - (403) Forbidden`
+      # после того, как все тесты уже прошли. Мажор закреплён, но нижняя
+      # граница всё равно проверяется — дрейф пина под неё обязан падать
+      # громко, а не проваливаться в токенную ветку молча.
+      - name: Upgrade npm to a trusted-publishing capable version
+        run: |
+          set -euo pipefail
+          npm install -g npm@11
+          INSTALLED="$(npm --version)"
+          echo "npm ${INSTALLED}"
+          MAJOR="${INSTALLED%%.*}"
+          if [ "$MAJOR" -lt 11 ]; then
+            echo "::error::npm ${INSTALLED} is below the 11.5.1 trusted-publishing floor"
+            exit 1
+          fi
+
+      # Тег и манифесты — независимые утверждения об одном факте. Когда они
+      # расходятся, опубликованный артефакт несёт версию, которую никто не
+      # заказывал. Поэтому расхождение — жёсткий стоп, до всякой сборки.
+      # Корневой манифест приватный, но держится в одной версии с клиентом,
+      # чтобы «версия релиза» оставалась одним фактом на весь репозиторий.
+      - name: Refuse a tag that disagrees with the manifests
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./packages/client/package.json').version")"
+          ROOT_VERSION="$(node -p "require('./package.json').version")"
+          echo "tag:      $TAG_VERSION"
+          echo "client:   $PKG_VERSION"
+          echo "root:     $ROOT_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match packages/client/package.json version ${PKG_VERSION}."
+            exit 1
+          fi
+          if [ "$ROOT_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Root package.json (${ROOT_VERSION}) and packages/client/package.json (${PKG_VERSION}) disagree."
+            exit 1
+          fi
+
+      # Рано, а не перед самой публикацией: релиз с пустыми заметками хуже, чем
+      # отсутствие релиза, потому что выглядит намеренным. Пусть падает до того,
+      # как потрачены минуты на сборку и упаковку.
+      - name: Extract the changelog section for this version
+        run: |
+          set -euo pipefail
+          mkdir -p ./.release
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { capture = 1; print; next }
+            capture && /^## \[/    { exit }
+            capture                { print }
+          ' CHANGELOG.md > ./.release/notes.md
+          if [ ! -s ./.release/notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for [${VERSION}]."
+            exit 1
+          fi
+          cat ./.release/notes.md
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Доказать, что артефакт работает, до публикации, а не после.
+      - name: Pack and smoke-test the artifact
+        run: |
+          set -euo pipefail
+          # `--pack-destination` не создаёт каталог сам, поэтому создаём и
+          # проверяем тарбол здесь: сломанный pack обязан падать в этом шаге с
+          # читаемой причиной, а не двумя командами позже как ENOENT.
+          mkdir -p "$GITHUB_WORKSPACE/.release"
+          npm pack --workspace @goodea/olimpyx --pack-destination "$GITHUB_WORKSPACE/.release"
+          ls -l "$GITHUB_WORKSPACE/.release"
+          TARBALL="$(find "$GITHUB_WORKSPACE/.release" -maxdepth 1 -name '*.tgz' -print -quit)"
+          if [ -z "$TARBALL" ]; then
+            echo "::error::npm pack produced no tarball in ./.release"
+            exit 1
+          fi
+          echo "packed: $TARBALL"
+
+          # Дверь CLI: ставим так, как получит потребитель, и запускаем.
+          npm install -g --prefix "$GITHUB_WORKSPACE/.release/prefix" "$TARBALL"
+          "$GITHUB_WORKSPACE/.release/prefix/bin/olimpyx" --help > /dev/null
+          # …и одну настоящую команду, не только `--help`: бинарь, который
+          # печатает usage и умирает на первой операции, прошёл бы help-only
+          # проверку. `status` не требует ни сервера, ни ключей.
+          OLIMPYX_HOME="$GITHUB_WORKSPACE/.release/home" \
+            "$GITHUB_WORKSPACE/.release/prefix/bin/olimpyx" status > /dev/null
+          echo "the installed CLI runs"
+
+          # Дверь БИБЛИОТЕКИ, той же дорогой, что и потребитель: резолвим
+          # `exports` снаружи пакета и импортируем. У пакета есть `bin`, поэтому
+          # он продолжал бы «работать» со сломанным `exports` — эту половину
+          # `--help` не достаёт.
+          mkdir -p "$GITHUB_WORKSPACE/.release/importer"
+          cd "$GITHUB_WORKSPACE/.release/importer"
+          npm init -y > /dev/null
+          npm install "$TARBALL" > /dev/null
+          node -e "
+            import('@goodea/olimpyx').then((core) => {
+              const doors = Object.keys(core).sort();
+              console.log('core entry exports: ' + doors.join(', '));
+              if (doors.length === 0) {
+                throw new Error('the core entry resolved but exported nothing');
+              }
+            }).catch((error) => { console.error(error); process.exit(1); });
+          "
+          echo "the library entry resolves"
+
+      # Без токена. Аутентификация — OIDC-личность этого workflow, сопоставленная
+      # с trusted publisher, зарегистрированным на пакете
+      # (`MrCipherSmith/olimpyx`, `release.yml`).
+      #
+      # Порядок бутстрапа стоит записать, он неочевиден: trusted publisher
+      # настраивается на `npmjs.com → Packages → @goodea/olimpyx → Settings →
+      # Trusted publishing`, то есть **пакет уже должен существовать** — самая
+      # первая публикация нового пакета через него невозможна. Для
+      # `@goodea/olimpyx` та первая публикация (0.1.0) уже ушла вручную
+      # 2026-09-20, так что регистрация доступна и токен больше не нужен.
+      #
+      # `--provenance` требует `id-token: write`, выданный выше ровно для этого,
+      # и публичного репозитория — olimpyx публичный.
+      - name: Publish to npm
+        working-directory: packages/client
+        run: npm publish --provenance --access public
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file ./.release/notes.md \
+            ./.release/*.tgz
