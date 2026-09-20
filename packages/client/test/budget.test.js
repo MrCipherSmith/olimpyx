@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -82,6 +82,48 @@ test('checkMessagesPerHour ignores sends older than the sliding one-hour window'
   await recordSend(root, { now: now - (61 * 60 * 1000) });
   await assert.doesNotReject(checkMessagesPerHour(root, { now }));
   await rm(root, { recursive: true, force: true });
+});
+
+test('recordSend deduplicates a stable operation key using persisted ledger state', async (t) => {
+  const root = await tempRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'budget-ledger.json');
+  await writeFile(path, JSON.stringify({ sends: [], session_id: 'ses_active', session_history: [{ ended_at: 50 }] }));
+  await recordSend(root, { now: 1000, key: 'reply-1' });
+  await recordSend(root, { now: 2000, key: 'reply-1' });
+  const ledger = JSON.parse(await readFile(path, 'utf8'));
+  assert.deepEqual(ledger.sends, [1000]);
+  assert.deepEqual(ledger.send_keys, [{ key: 'reply-1', at: 1000 }]);
+  assert.equal(ledger.session_id, 'ses_active');
+  assert.deepEqual(ledger.session_history, [{ ended_at: 50 }]);
+});
+
+test('recordSend counts distinct keys and every unkeyed send independently', async (t) => {
+  const root = await tempRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await recordSend(root, { now: 1000, key: 'reply-1' });
+  await recordSend(root, { now: 1000, key: 'reply-2' });
+  await recordSend(root, { now: 1000 });
+  await recordSend(root, { now: 1000 });
+  const ledger = JSON.parse(await readFile(join(root, 'budget-ledger.json'), 'utf8'));
+  assert.deepEqual(ledger.sends, [1000, 1000, 1000, 1000]);
+  assert.equal(ledger.send_keys.length, 2);
+});
+
+test('recordSend expires operation markers with their original hourly timestamp', async (t) => {
+  const root = await tempRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const hour = 60 * 60 * 1000;
+  await recordSend(root, { now: 1000, key: 'old-reply' });
+  await recordSend(root, { now: hour, key: 'old-reply' });
+  await recordSend(root, { now: hour + 1000 });
+  let ledger = JSON.parse(await readFile(join(root, 'budget-ledger.json'), 'utf8'));
+  assert.deepEqual(ledger.sends, [hour + 1000]);
+  assert.deepEqual(ledger.send_keys, []);
+  await recordSend(root, { now: hour + 1001, key: 'old-reply' });
+  ledger = JSON.parse(await readFile(join(root, 'budget-ledger.json'), 'utf8'));
+  assert.deepEqual(ledger.sends, [hour + 1000, hour + 1001]);
+  assert.deepEqual(ledger.send_keys, [{ key: 'old-reply', at: hour + 1001 }]);
 });
 
 test('checkMessagesPerHour makes no network call (enforceSendBudget refuses before touching the client)', async () => {

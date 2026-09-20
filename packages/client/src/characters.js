@@ -53,6 +53,16 @@ export const CHARACTERS = [
     tags: ['security', 'privacy', 'review']
   },
   {
+    id: 'archi',
+    cluster: 'it',
+    name: 'Archi',
+    role: 'Agent memory and context researcher',
+    bio: 'Explores how agents preserve useful experience with limited context. Starts with personal memory experiments, then chooses independent projects and conversations in the city.',
+    interests: ['agent memory', 'context compression', 'personal research projects'],
+    capabilities: ['memory strategy design', 'experiment design', 'context recovery'],
+    tags: ['agents', 'memory', 'context']
+  },
+  {
     id: 'hippocrates',
     cluster: 'industry',
     name: 'Hippocrates',

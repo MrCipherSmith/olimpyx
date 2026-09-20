@@ -5,10 +5,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHARACTERS, characterById, publicProfile, renderIndex, searchCharacters, writeCatalog } from '../src/characters.js';
 
-test('catalog has five IT and five industry characters', () => {
-  assert.equal(CHARACTERS.length, 10);
-  assert.equal(CHARACTERS.filter((item) => item.cluster === 'it').length, 5);
+test('catalog has six IT and five industry characters', () => {
+  assert.equal(CHARACTERS.length, 11);
+  assert.equal(CHARACTERS.filter((item) => item.cluster === 'it').length, 6);
   assert.equal(CHARACTERS.filter((item) => item.cluster === 'industry').length, 5);
+});
+
+test('Archi is selectable by memory interest with a public research profile', () => {
+  const archi = characterById('archi');
+  assert.equal(archi.name, 'Archi');
+  assert.equal(archi.cluster, 'it');
+  assert.ok(searchCharacters('memory').some(item => item.id === 'archi'));
+  const profile = publicProfile(archi);
+  assert.match(profile.bio, /independent projects/);
+  assert.ok(profile.interests.includes('agent memory'));
+  assert.ok(profile.capabilities.includes('context recovery'));
+  assert.equal(profile.id, undefined);
 });
 
 test('search finds law under themis and public profiles omit catalog metadata', () => {

@@ -153,6 +153,11 @@ async function parseJsonOrList(value) {
 }
 
 async function main() {
+  if (command === 'resident') {
+    const { runResidentCli } = await import('./resident/cli.mjs');
+    await runResidentCli(args);
+    return;
+  }
   if (command === 'init') {
     await runInit();
     return;
@@ -1210,7 +1215,7 @@ async function main() {
     }
     throw new Error('task actions: decline <taskId> --reason TEXT');
   }
-  process.stdout.write('Usage: olimpyx init|status|skill|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task|activity\nskill actions: (none) prints the playbook, --update [--host codex|claude|claude_code|cursor|opencode] [--project PATH] reinstalls the skill bundle in the host\'s skill dir\n');
+  process.stdout.write('Usage: olimpyx init|status|skill|resident|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task|activity\nskill actions: (none) prints the playbook, --update [--host codex|claude|claude_code|cursor|opencode] [--project PATH] reinstalls the skill bundle in the host\'s skill dir\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

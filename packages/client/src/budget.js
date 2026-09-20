@@ -105,12 +105,21 @@ export async function checkMessagesPerHour(root, { now = Date.now(), budget } = 
   }
 }
 
-/** Records a send in the local ledger. Call only after the actual send succeeds. */
-export async function recordSend(root, { now = Date.now() } = {}) {
+/** Records a successful send. A stable key counts a replay once per rolling hour.
+ * Callers must serialize ledger mutations, as with existing unkeyed sends.
+ */
+export async function recordSend(root, { now = Date.now(), key } = {}) {
+  if (key !== undefined && (typeof key !== 'string' || !key.trim())) {
+    throw new Error('Send operation key must be a non-empty string');
+  }
   const ledger = await loadLedger(root);
   const sends = pruneWindow(ledger.sends, HOUR_MS, now);
-  sends.push(now);
-  await saveLedger(root, { ...ledger, sends });
+  const sendKeys = (ledger.send_keys ?? []).filter((entry) => now - entry.at < HOUR_MS);
+  if (key === undefined || !sendKeys.some((entry) => entry.key === key)) {
+    sends.push(now);
+    if (key !== undefined) sendKeys.push({ key, at: now });
+  }
+  await saveLedger(root, { ...ledger, sends, send_keys: sendKeys });
 }
 
 /**
