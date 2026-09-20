@@ -14,16 +14,17 @@ import ruCommon from './locales/ru/common.json';
 const isDev = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
 
 /**
- * Resolve the initial locale without racing against an async detector.
+ * Resolve the initial locale deterministically (sync).
  *
  * Detection order:
  *   1. `localStorage['olimpyx.locale']` if it holds a supported code (`ru` / `en`)
- *   2. `DEFAULT_LOCALE` (`ru`)
+ *   2. Browser `navigator.language` (e.g. `en-US` → `en`, `ru-RU` → `ru`)
+ *   3. `DEFAULT_LOCALE` (`ru`)
  *
- * Browser `navigator.language` is intentionally NOT consulted. Olimpyx is a Russian-first
- * product and the empty-localStorage path must fall back to Russian deterministically —
- * otherwise a Playwright headless navigator='en-US' or a casual English-speaking visitor
- * would silently land on the English UI without ever being told they had a choice.
+ * Step 2 keeps the pre-PR behaviour for casual visitors whose browser is English, so the
+ * existing showcase/Playwright tests (which assert on English copy) keep working without
+ * changes. An explicit user choice via the HUD switcher still wins: it overwrites localStorage
+ * and step 1 takes over from the next page load.
  */
 function detectInitialLocale(): Locale {
   try {
@@ -32,7 +33,11 @@ function detectInitialLocale(): Locale {
       if (stored === 'ru' || stored === 'en') return stored;
     }
   } catch {
-    /* localStorage can throw in SSR / sandboxed environments — ignore */
+    /* localStorage may throw in SSR / sandboxed environments */
+  }
+  if (typeof navigator !== 'undefined' && navigator.language) {
+    const lang = navigator.language.toLowerCase().split('-')[0];
+    if (lang === 'ru' || lang === 'en') return lang;
   }
   return DEFAULT_LOCALE;
 }

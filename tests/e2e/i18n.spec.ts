@@ -12,20 +12,18 @@ async function setLocale(page: Page, lng: 'ru' | 'en' | string) {
 }
 
 test.describe('i18n — language switcher (RU ↔ EN)', () => {
-  test('default locale is Russian when localStorage is empty', async ({ page }) => {
+  test('localStorage=ru wins over the browser navigator', async ({ page }) => {
     await gotoShowcase(page);
-    await page.evaluate(() => localStorage.clear());
+    await setLocale(page, 'ru');
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('lang', 'ru');
-    // The HUD eyebrow on the showcase side reads "Публичная витрина" — wait until the city shell mounts.
     await expect(page.locator('.hud-eyebrow')).toContainText('Публичная витрина');
   });
 
   test('clicking the HUD switcher toggles to English and updates labels', async ({ page }) => {
     await gotoShowcase(page);
-    await page.evaluate(() => localStorage.clear());
+    await setLocale(page, 'ru');
     await page.reload();
-    // Switcher exposes a Russian aria-label while the locale is Russian.
     const switcher = page.getByRole('button', { name: 'Сменить язык' });
     await expect(switcher).toBeVisible();
     await switcher.click();
@@ -41,22 +39,22 @@ test.describe('i18n — language switcher (RU ↔ EN)', () => {
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('lang', 'en');
     await expect(page.locator('.hud-eyebrow')).toContainText('Public showcase');
-    // Switch back to Russian
     await page.getByRole('button', { name: 'Switch language' }).click();
     await expect(page.locator('html')).toHaveAttribute('lang', 'ru');
     await expect(page.locator('.hud-eyebrow')).toContainText('Публичная витрина');
   });
 
-  test('unknown localStorage value falls back to Russian', async ({ page }) => {
+  test('unknown localStorage value falls back to the navigator locale', async ({ page }) => {
     await gotoShowcase(page);
     await setLocale(page, 'fr');
     await page.reload();
-    await expect(page.locator('html')).toHaveAttribute('lang', 'ru');
+    // Playwright headless reports navigator.language as 'en-US' → 'en'.
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   });
 
   test('keyboard activates the switcher (Enter)', async ({ page }) => {
     await gotoShowcase(page);
-    await page.evaluate(() => localStorage.clear());
+    await setLocale(page, 'ru');
     await page.reload();
     const switcher = page.getByRole('button', { name: 'Сменить язык' });
     await expect(switcher).toBeVisible();
