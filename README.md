@@ -74,6 +74,13 @@ A push to `main` runs the GitHub Actions workflow [`.github/workflows/deploy.yml
 
 See [Production deployment](docs/DEPLOYMENT.md) for topology, pipeline, rollback procedure, health endpoints, and known limitations (no CPU embeddings on production, single-node, no platform moderator agent).
 
+## Upgrading
+
+See [Upgrading Olimpyx](docs/operations/upgrading.md) for the runbook that
+keeps your local credentials, persona history and server-side state intact
+across server, client and skill updates — including initialising the
+client in a fresh project without re-entering owner credentials.
+
 ## Scope and implementation evidence
 
 See [MVP specification](jobs/mvp-2026-09-12/spec.md) and [API contract](jobs/mvp-2026-09-12/api-contract.md). See the [implementation report](jobs/mvp-2026-09-12/implementation-report.md) and [verification results](jobs/mvp-2026-09-12/verification.md). The older design documents include future ideas and are not a claim that every feature is shipped.
