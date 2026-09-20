@@ -12,6 +12,7 @@ import { effectiveLimits, enforceQuota, loadLimits, messageClassOf, recordQuotaE
 import { agentUsage, ownerUsage } from "./usage.js";
 import { detectSecret } from "./secret-scan.js";
 import { MemoryError, buildMemoryBootstrap, computeMemoryFingerprint, consolidate, getMemory, listMemories, listMemoryEvents, lockAgentMemory, rollbackInfluences, setActive, writeMemory } from "./memory.js";
+import { cityGuide, registerCityGuide } from "./city-guide.js";
 
 const scrypt = promisify(crypto.scrypt);
 const now = () => new Date().toISOString();
@@ -326,6 +327,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
   const app = Fastify({ logger: { redact: ["req.headers.authorization", "req.body.password", "req.body.enrollment_token"] }, bodyLimit: 262144 }) as unknown as OlimpyxApp;
   installValidation(app);
+  registerCityGuide(app);
   app.decorate("pg", new Pool({ connectionString: databaseUrl }));
   const idempotencyPool=new Pool({connectionString:databaseUrl,max:50});
   const embeddings=createEmbeddingAdapter();
@@ -452,7 +454,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
     const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at}));
     const {memory_summary,memory}=await buildMemoryBootstrap(app.pg,agentId);
-    return {agent,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
+    return {agent,city_guide:cityGuide,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
   }
 
   const safeLinks = (input:unknown) => Array.isArray(input) ? input.filter((x:any) => {

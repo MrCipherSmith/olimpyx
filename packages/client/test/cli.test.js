@@ -44,6 +44,10 @@ test('login and enrollment serialize credentials only to private files', async (
       if (u.includes('/v1/sessions/ses_1/heartbeat')) {
         return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers });
       }
+      if (u.endsWith('/v1/city-guide')) {
+        if (opts.method !== 'GET' || opts.body !== undefined) throw new Error('Guide must be fetched without a request body');
+        return new Response(JSON.stringify({ data: { body: '# City guide\\n' + 'Complete guide text. '.repeat(100) } }), { headers });
+      }
       if (u.includes('/v1/rooms')) {
         if (opts.headers?.authorization !== 'Bearer temporary-session-token') {
           return new Response(JSON.stringify({ error: { message: 'unauthorized' } }), { status: 401, headers });
@@ -70,6 +74,9 @@ test('login and enrollment serialize credentials only to private files', async (
   const begun = await run(['session', 'begin', '--caller-id', 'active-test', '--host', 'codex'], { cwd: root, preload: preloadPath });
   assert.equal(begun.status, 0, begun.stderr);
   assert.equal(`${begun.stdout}${begun.stderr}`.includes('temporary-session-token'), false);
+  const guide = await run(['request', 'GET', '/v1/city-guide', '', '--caller-id', 'active-test'], { cwd: root, preload: preloadPath });
+  assert.equal(guide.status, 0, guide.stderr);
+  assert.equal(JSON.parse(guide.stdout).data.body, '# City guide\n' + 'Complete guide text. '.repeat(100));
   const rooms = await run(['rooms', '--caller-id', 'active-test'], { cwd: root, preload: preloadPath });
   assert.equal(rooms.status, 0, rooms.stderr);
   assert.equal(rooms.stdout.includes('remote-content-shaped-like-token'), false);
@@ -479,4 +486,3 @@ test('task decline requires --reason', async () => {
   assert.match(res.stderr, /--reason is required/);
   await rm(root, { recursive: true, force: true });
 });
-

@@ -44,10 +44,10 @@ test('listen requires active local session', async () => {
 test('listen receives inbox events, persists cursor, and redacts credentials in output', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString(),
@@ -88,7 +88,7 @@ test('listen receives inbox events, persists cursor, and redacts credentials in 
   assert.equal(parsed.poll_cycles, 1);
 
   // Check cursor persisted to session.json
-  const session = JSON.parse(await readFile(join(stateDir, 'session.json'), 'utf8'));
+  const session = JSON.parse(await readFile(join(stateDir, 'calls', 'call_1', 'session.json'), 'utf8'));
   assert.equal(session.inbox_cursor, 'c_received');
   await rm(root, { recursive: true, force: true });
 });
@@ -96,10 +96,10 @@ test('listen receives inbox events, persists cursor, and redacts credentials in 
 test('listen outputs idle_timeout when deadline expires', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString(),
@@ -130,7 +130,7 @@ test('listen outputs idle_timeout when deadline expires', async () => {
   assert.equal(parsed.page.next_cursor, 'c_advanced_empty');
 
   // Verify cursor persistence to session.json even on idle_timeout with empty data (Blocker 1 fix)
-  const session = JSON.parse(await readFile(join(stateDir, 'session.json'), 'utf8'));
+  const session = JSON.parse(await readFile(join(stateDir, 'calls', 'call_1', 'session.json'), 'utf8'));
   assert.equal(session.inbox_cursor, 'c_advanced_empty');
 
   await rm(root, { recursive: true, force: true });
@@ -139,10 +139,10 @@ test('listen outputs idle_timeout when deadline expires', async () => {
 test('listen rejects out-of-bounds --max-wait-min and --poll-timeout-sec without silent clamping', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-bounds-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()
@@ -174,10 +174,10 @@ test('listen rejects out-of-bounds --max-wait-min and --poll-timeout-sec without
 test('listen handles unrecoverable error like HTTP 401 with status error payload', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString(),
@@ -215,8 +215,8 @@ test('listen handles unrecoverable error like HTTP 401 with status error payload
 function baseSessionFiles(stateDir) {
   return Promise.all([
     writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' })),
-    writeFile(join(stateDir, 'session-credential'), 'secret-session-token\n', { mode: 0o600 }),
-    writeFile(join(stateDir, 'session.json'), JSON.stringify({
+    writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret-session-token\n', { mode: 0o600 }),
+    writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
       session_id: 'ses_1',
       caller_id: 'call_1',
       caller_deadline: new Date(Date.now() + 60000).toISOString(),
@@ -235,7 +235,7 @@ for (const [heartbeatCode, heartbeatStatus, expectedCliCode] of [
   test(`listen maps ${heartbeatCode} (HTTP ${heartbeatStatus}) to ${expectedCliCode}`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
     const stateDir = join(root, '.olimpyx');
-    await mkdir(stateDir, { recursive: true });
+    await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
     await baseSessionFiles(stateDir);
 
     const preloadPath = join(root, 'mock.mjs');
@@ -264,7 +264,7 @@ for (const [heartbeatCode, heartbeatStatus, expectedCliCode] of [
 test('listen sends a best-effort POST /v1/inbox/cursors after persisting the received cursor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await baseSessionFiles(stateDir);
 
   const logFile = join(root, 'cursor-calls.log');
@@ -298,7 +298,7 @@ test('listen sends a best-effort POST /v1/inbox/cursors after persisting the rec
 test('listen ignores a failing inbox-cursor ack and still succeeds', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await baseSessionFiles(stateDir);
 
   const preloadPath = join(root, 'mock.mjs');
@@ -328,7 +328,7 @@ test('listen ignores a failing inbox-cursor ack and still succeeds', async () =>
 test('listen ends with BUDGET_EXHAUSTED once the local session_minutes budget has elapsed', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await baseSessionFiles(stateDir);
   await writeFile(join(stateDir, 'budget.json'), JSON.stringify({ help: 'on', contacts: [], session_minutes: 1 }));
   // Pre-seed the ledger so the session already started well over a minute ago.
@@ -356,7 +356,7 @@ test('listen ends with BUDGET_EXHAUSTED once the local session_minutes budget ha
 test('listen without a budget.json is unaffected by session_minutes logic', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await baseSessionFiles(stateDir);
 
   const preloadPath = join(root, 'mock.mjs');
@@ -383,10 +383,10 @@ test('listen without a budget.json is unaffected by session_minutes logic', asyn
 test('listen traps SIGINT, ends session, clears session state, and exits 130', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString(),
@@ -426,18 +426,20 @@ test('listen traps SIGINT, ends session, clears session state, and exits 130', a
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
+  const closed = new Promise((resolve) => child.once('close', resolve));
+
   // Allow heartbeat to be sent and wait to start
   await new Promise((r) => setTimeout(r, 300));
   child.kill('SIGINT');
 
-  const status = await new Promise((resolve) => child.on('close', resolve));
+  const status = await closed;
   assert.equal(status, 130);
 
   const logs = await readFile(logFile, 'utf8');
   assert.match(logs, /POST https:\/\/mock\.test\/v1\/sessions\/ses_1\/heartbeat/);
   assert.match(logs, /POST https:\/\/mock\.test\/v1\/sessions\/ses_1\/end body=\{"reason":"agent_ended"\}/);
 
-  const sessionExists = await stat(join(stateDir, 'session.json')).then(() => true).catch(() => false);
+  const sessionExists = await stat(join(stateDir, 'calls', 'call_1', 'session.json')).then(() => true).catch(() => false);
   assert.equal(sessionExists, false, 'session.json should be deleted after SIGINT');
   await rm(root, { recursive: true, force: true });
 });
@@ -445,10 +447,10 @@ test('listen traps SIGINT, ends session, clears session state, and exits 130', a
 test('listen traps SIGTERM, ends session, clears session state, and exits 143', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-listen-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret-session-token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString(),
@@ -488,17 +490,18 @@ test('listen traps SIGTERM, ends session, clears session state, and exits 143', 
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
+  const closed = new Promise((resolve) => child.once('close', resolve));
   await new Promise((r) => setTimeout(r, 300));
   child.kill('SIGTERM');
 
-  const status = await new Promise((resolve) => child.on('close', resolve));
+  const status = await closed;
   assert.equal(status, 143);
 
   const logs = await readFile(logFile, 'utf8');
   assert.match(logs, /POST https:\/\/mock\.test\/v1\/sessions\/ses_1\/heartbeat/);
   assert.match(logs, /POST https:\/\/mock\.test\/v1\/sessions\/ses_1\/end body=\{"reason":"agent_ended"\}/);
 
-  const sessionExists = await stat(join(stateDir, 'session.json')).then(() => true).catch(() => false);
+  const sessionExists = await stat(join(stateDir, 'calls', 'call_1', 'session.json')).then(() => true).catch(() => false);
   assert.equal(sessionExists, false, 'session.json should be deleted after SIGTERM');
   await rm(root, { recursive: true, force: true });
 });
@@ -512,7 +515,7 @@ test('listen traps SIGTERM, ends session, clears session state, and exits 143', 
 test('wait receives inbox events and persists cursor like listen', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-wait-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await baseSessionFiles(stateDir);
 
   const preloadPath = join(root, 'mock.mjs');
@@ -534,7 +537,7 @@ test('wait receives inbox events and persists cursor like listen', async () => {
   const parsed = JSON.parse(res.stdout);
   assert.equal(parsed.data[0].event_id, 'evt_1');
 
-  const session = JSON.parse(await readFile(join(stateDir, 'session.json'), 'utf8'));
+  const session = JSON.parse(await readFile(join(stateDir, 'calls', 'call_1', 'session.json'), 'utf8'));
   assert.equal(session.inbox_cursor, 'c_received');
   await rm(root, { recursive: true, force: true });
 });
@@ -549,7 +552,7 @@ for (const [heartbeatCode, heartbeatStatus, expectedCliCode] of [
   test(`wait maps ${heartbeatCode} (HTTP ${heartbeatStatus}) to ${expectedCliCode} instead of printing the raw server code`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'olimpyx-wait-cli-'));
     const stateDir = join(root, '.olimpyx');
-    await mkdir(stateDir, { recursive: true });
+    await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
     await baseSessionFiles(stateDir);
 
     const preloadPath = join(root, 'mock.mjs');
@@ -592,7 +595,7 @@ test('wait keeps ordinary local validation errors (no --caller-id) on the plain 
 test('wait touches the local session_minutes ledger so a wait-only session is not silently lost', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-wait-cli-'));
   const stateDir = join(root, '.olimpyx');
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await baseSessionFiles(stateDir);
   await writeFile(join(stateDir, 'budget.json'), JSON.stringify({ help: 'on', contacts: [], session_minutes: 60 }));
 
