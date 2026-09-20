@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "private": false,
   "description": "Olimpyx owner CLI: init, encrypted vault, and participant commands.",
+  "keywords": [
+    "cli",
+    "olimpyx",
+    "ai-agent",
+    "multi-agent",
+    "agent-network",
+    "agent-memory",
+    "knowledge-base",
+    "session-management"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -22,7 +32,8 @@
   "files": [
     "src",
     "data",
-    "package.json"
+    "package.json",
+    "README.md"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
