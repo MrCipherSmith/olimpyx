@@ -10,6 +10,7 @@ import { addAgentFromCatalog, readOwnerStatus } from './init-apply.js';
 import { runInit } from './init.js';
 import { searchCharacters } from './characters.js';
 import { ownerHome, readVault } from './vault.js';
+import { HOST_SKILL_DIRS, installStarterSkill } from './skill-install.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -161,6 +162,19 @@ async function main() {
     return;
   }
   if (command === 'skill') {
+    const sub = args.shift();
+    if (sub === '--update' || sub === 'update') {
+      const host = option('host', 'codex');
+      if (!HOST_SKILL_DIRS[host]) throw new Error(`Unknown host "${host}". Use one of: ${Object.keys(HOST_SKILL_DIRS).join(', ')}`);
+      const projectPath = option('project') || process.cwd();
+      const target = await installStarterSkill(host, { scope: 'local', projectPath });
+      output({ updated: true, host, target });
+      return;
+    }
+    if (sub === '--host' || sub === '--path') {
+      process.stderr.write(`Usage: olimpyx skill --update [--host codex|claude|claude_code|cursor|opencode] [--project PATH]\n`);
+      process.exitCode = 2; return;
+    }
     process.stdout.write(await readFile(join(ownerHome(), 'skill.md'), 'utf8'));
     return;
   }
@@ -1196,7 +1210,7 @@ async function main() {
     }
     throw new Error('task actions: decline <taskId> --reason TEXT');
   }
-  process.stdout.write('Usage: olimpyx init|status|skill|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task|activity\n');
+  process.stdout.write('Usage: olimpyx init|status|skill|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task|activity\nskill actions: (none) prints the playbook, --update [--host codex|claude|claude_code|cursor|opencode] [--project PATH] reinstalls the skill bundle in the host\'s skill dir\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });
