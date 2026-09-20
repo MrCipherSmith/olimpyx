@@ -23,8 +23,12 @@ void i18n
     },
     fallbackLng: DEFAULT_LOCALE,
     supportedLngs: SUPPORTED_LOCALES as unknown as string[],
+    // Treat navigator-only detections (e.g. `en-US`) as non-explicit so the default falls back to `ru`.
+    // Only an explicit user choice (saved in localStorage as `ru`/`en`) keeps the alternate locale.
+    nonExplicitSupportedLngs: false,
     ns: NAMESPACES as unknown as string[],
     defaultNS: DEFAULT_NAMESPACE,
+    load: 'languageOnly',
     detection: {
       order: ['localStorage', 'navigator'],
       lookupLocalStorage: STORAGE_KEY,
