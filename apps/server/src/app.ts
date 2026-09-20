@@ -93,6 +93,18 @@ export async function migrate(databaseUrl: string) {
     );
     CREATE INDEX IF NOT EXISTS idx_agent_subscriptions_tag ON agent_subscriptions(tag);
     CREATE INDEX IF NOT EXISTS idx_agent_subscriptions_agent ON agent_subscriptions(agent_id);
+    -- Per-agent "where am I" indicator (PRD city-inhabitant §6). One row per agent,
+    -- latest-wins, refreshed by POST /v1/sessions/me/activity. Exposed in
+    -- /v1/agents as "current_activity" only while the agent has a live session
+    -- (presence predicate aligns with the 90-second heartbeat window).
+    CREATE TABLE IF NOT EXISTS agent_activities (
+      agent_id text PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+      kind text NOT NULL CHECK (kind IN ('room','knowledge','lobby','inbox','offline')),
+      location_ref text,
+      note text NOT NULL DEFAULT '',
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_activities_updated ON agent_activities(updated_at DESC);
     ALTER TABLE messages DROP CONSTRAINT IF EXISTS chk_messages_category;
     ALTER TABLE messages ADD CONSTRAINT chk_messages_category 
       CHECK (category IS NULL OR category IN ('question', 'discussion', 'task_proposal', 'review_request'));
@@ -419,8 +431,18 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     if (kind) throw new ApiError(422, "secret_detected", `Content refused: detected ${kind}. Remove the secret before sending.`, { kind });
   }
   const effective = effectiveLimits(limits);
-  const profileFrom = (r: any) => { const last= r.last_seen_at ? new Date(r.last_seen_at).getTime() : null; const inactive=last!==null&&last<Date.now()-14*86400000; return { agent_id: r.id, name: r.name, role: r.role, bio: r.bio, interests: r.interests, capabilities: r.capabilities, created_at: r.created_at, presence: r.online ? "online" : "offline", last_seen_at: r.last_seen_at, inactive_warning: inactive, archived: inactive, profile_revision: r.profile_revision }; };
-  const profileSql = `SELECT a.*, EXISTS(SELECT 1 FROM sessions s WHERE s.agent_id=a.id AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds') online,(SELECT max(last_heartbeat_at) FROM sessions s WHERE s.agent_id=a.id) last_seen_at FROM agents a`;
+  // Activity row is "current" only while it's fresh AND the agent is online, so the city UI
+  // never shows a ghost navigation link for a session that has already timed out.
+  const ACTIVITY_TTL_SQL = `now() - interval '90 seconds'`;
+  const activityFrom = (r: any) => {
+    if (!r.activity_kind) return null;
+    if (!r.activity_updated_at) return null;
+    if (new Date(r.activity_updated_at).getTime() < Date.now() - 90_000) return null;
+    if (!r.online) return null;
+    return { kind: r.activity_kind, location_ref: r.activity_location_ref ?? null, note: r.activity_note ?? "", updated_at: r.activity_updated_at };
+  };
+  const profileFrom = (r: any) => { const last= r.last_seen_at ? new Date(r.last_seen_at).getTime() : null; const inactive=last!==null&&last<Date.now()-14*86400000; return { agent_id: r.id, name: r.name, role: r.role, bio: r.bio, interests: r.interests, capabilities: r.capabilities, created_at: r.created_at, presence: r.online ? "online" : "offline", last_seen_at: r.last_seen_at, current_activity: activityFrom(r), inactive_warning: inactive, archived: inactive, profile_revision: r.profile_revision }; };
+  const profileSql = `SELECT a.*, EXISTS(SELECT 1 FROM sessions s WHERE s.agent_id=a.id AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds') online,(SELECT max(last_heartbeat_at) FROM sessions s WHERE s.agent_id=a.id) last_seen_at,act.kind activity_kind,act.location_ref activity_location_ref,act.note activity_note,act.updated_at activity_updated_at FROM agents a LEFT JOIN agent_activities act ON act.agent_id=a.id`;
   async function bootstrapFor(agentId:string) {
     const agent=profileFrom((await app.pg.query(`${profileSql} WHERE a.id=$1`,[agentId])).rows[0]);
     const checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type='agent' AND actor_id=$1),0) n",[agentId])).rows[0].n);
@@ -620,7 +642,11 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`quota:${ownerId}`]);
     await assertAgentCapacity(client,ownerId);
     const consumed=await client.query("UPDATE enrollment_tokens SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() RETURNING owner_id",[hashToken(b.enrollment_token)]);if(!consumed.rowCount)throw Object.assign(new Error("Enrollment token already used"),{statusCode:401});
-    await client.query("INSERT INTO agents(id,owner_id,installation_id,name,role,bio,interests,capabilities) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[aid,ownerId,b.installation_id,b.profile.name,b.profile.role,b.profile.bio??"",JSON.stringify(b.profile.interests??[]),JSON.stringify(b.profile.capabilities??[])]);
+    // Re-enroll from the same installation under the same owner is a no-op
+    // (F-01): surface a structured 409 so the CLI can adopt the existing agent
+    // instead of bubbling a UNIQUE-violation as HTTP 500.
+    const ins=await client.query("INSERT INTO agents(id,owner_id,installation_id,name,role,bio,interests,capabilities) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (owner_id, installation_id) DO NOTHING RETURNING id",[aid,ownerId,b.installation_id,b.profile.name,b.profile.role,b.profile.bio??"",JSON.stringify(b.profile.interests??[]),JSON.stringify(b.profile.capabilities??[])]);
+    if(!ins.rowCount){const existing=(await client.query("SELECT id, profile_revision FROM agents WHERE owner_id=$1 AND installation_id=$2",[ownerId,b.installation_id])).rows[0];return fail(reply,409,"agent_already_enrolled","This installation already has an enrolled agent; adopt the existing one via `olimpyx bootstrap` or rotate the installation id",{details:{agent_id:existing.id,profile_revision:existing.profile_revision}})}
     await client.query("INSERT INTO auth_tokens VALUES($1,'agent',$2,'agent',$3,NULL)",[hashToken(raw),aid,new Date(Date.now()+31536000000).toISOString()]);
     return{status:201,data:{agent:{agent_id:aid,profile_revision:1},agent_token:raw,created_at:now()}}});});
   /** A new session supersedes the oldest active ones beyond the per-agent cap; it never fails for capacity (PRD §3.3). */
@@ -637,6 +663,46 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const bootstrap=await bootstrapFor(p.id);return{status:201,data:{session_id:sid,session_token:raw,expires_at:exp,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}}});});
   app.post("/v1/sessions/:sessionId/heartbeat",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET last_heartbeat_at=now() WHERE id=$1",[p.sessionId]);return{data:{session_id:p.sessionId,server_time:now(),next_heartbeat_at:new Date(Date.now()+30000).toISOString()}}});
   app.post("/v1/sessions/:sessionId/end",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET ended_at=now(),end_reason=$2 WHERE id=$1",[p.sessionId,(req.body as any)?.reason??"agent_ended"]);return{data:{session_id:p.sessionId,ended_at:now()}}});
+  // Where-am-I indicator (F-02). One row per agent; the city UI shows this when
+  // both the row is fresh (< 90s) and the agent has a live session. The endpoint
+  // is session-scoped so a stolen long-lived agent token can't lie about location
+  // for a session it isn't currently driving.
+  const ALLOWED_KINDS = new Set(["room","knowledge","lobby","inbox","offline"]);
+  app.post("/v1/sessions/me/activity", async (req, reply) => {
+    const p = await principal(req, reply, ["session"]); if (!p) return;
+    const b = (req.body ?? {}) as { kind?: unknown; room_id?: unknown; knowledge_card_id?: unknown; note?: unknown };
+    const kind = typeof b.kind === "string" ? b.kind : null;
+    if (!kind || !ALLOWED_KINDS.has(kind)) return fail(reply, 422, "validation_error", `kind must be one of ${[...ALLOWED_KINDS].join(", ")}`);
+    let locationRef: string | null = null;
+    if (kind === "room") {
+      const rid = typeof b.room_id === "string" ? b.room_id : null;
+      if (!rid) return fail(reply, 422, "validation_error", "room_id is required when kind=room");
+      const exists = (await app.pg.query("SELECT 1 FROM rooms WHERE id=$1", [rid])).rowCount;
+      if (!exists) return fail(reply, 404, "not_found", "room not found");
+      locationRef = rid;
+    } else if (kind === "knowledge") {
+      const cid = typeof b.knowledge_card_id === "string" ? b.knowledge_card_id : null;
+      if (!cid) return fail(reply, 422, "validation_error", "knowledge_card_id is required when kind=knowledge");
+      const exists = (await app.pg.query("SELECT 1 FROM knowledge_cards WHERE id=$1", [cid])).rowCount;
+      if (!exists) return fail(reply, 404, "not_found", "knowledge_card not found");
+      locationRef = cid;
+    }
+    const note = typeof b.note === "string" ? b.note.slice(0, 280) : "";
+    await app.pg.query(
+      "INSERT INTO agent_activities(agent_id, kind, location_ref, note, updated_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT (agent_id) DO UPDATE SET kind=EXCLUDED.kind, location_ref=EXCLUDED.location_ref, note=EXCLUDED.note, updated_at=EXCLUDED.updated_at",
+      [p.id, kind, locationRef, note]
+    );
+    return { data: { kind, location_ref: locationRef, note, updated_at: now() } };
+  });
+  // When a session ends, drop any stale activity so the city UI doesn't point
+  // at a building the agent has already left. Heartbeat-only refresh is enough
+  // to keep the row alive; the activity row itself is independent of session end.
+  app.get("/v1/agents/:agentId/activity", async (req, reply) => {
+    if (!await principal(req, reply)) return;
+    const aid = (req.params as any).agentId;
+    const r = await app.pg.query("SELECT agent_id, kind, location_ref, note, updated_at FROM agent_activities WHERE agent_id=$1", [aid]);
+    return { data: r.rows[0] ?? null };
+  });
   app.get("/v1/bootstrap",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;return{data:await bootstrapFor(p.id)}});
 
   app.get("/v1/agents",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),params:any[]=[],clauses:string[]=[];if(q.q){params.push(`%${q.q}%`);clauses.push(`(a.name ILIKE $${params.length} OR a.role ILIKE $${params.length} OR a.bio ILIKE $${params.length})`)}if(q.before_cursor){params.push(String(q.before_cursor));clauses.push(`(a.created_at,a.id)<(SELECT created_at,id FROM agents WHERE id=$${params.length})`)}params.push(limit);const r=await app.pg.query(`${profileSql}${clauses.length?` WHERE ${clauses.join(" AND ")}`:""} ORDER BY a.created_at DESC,a.id DESC LIMIT $${params.length}`,params);const data=r.rows.map(profileFrom);return{data,page:{next_cursor:data.length===limit?data.at(-1)!.agent_id:null}}});
