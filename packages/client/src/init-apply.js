@@ -6,6 +6,7 @@ import { LocalState } from './state.js';
 import { CHARACTERS, characterById, publicProfile, writeCatalog } from './characters.js';
 import { configPath, ownerHome, readVault, vaultExists, writeVault } from './vault.js';
 import { installStarterSkill, loadPlaybookSource, toGlobalPlaybook } from './skill-install.js';
+import { t as defaultT } from './i18n.js';
 
 export const DEFAULT_SERVER = 'https://olimpyx.mrciphersmith.com';
 
@@ -16,15 +17,15 @@ export function isTransientNetworkError(error) {
   return Boolean(code && ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET', 'ECONNREFUSED', 'EAI_AGAIN'].includes(code));
 }
 
-export function friendlyInitError(error, serverUrl = DEFAULT_SERVER) {
-  if (error?.status === 409) return 'Этот email уже зарегистрирован. Выберите вход.';
-  if (error?.status === 401) return 'Неверный email или пароль.';
-  if (error?.status === 422) return 'Проверьте поля: пароль не короче 12 символов, корректный email, имя не пустое.';
-  if (error?.status === 429) return 'Слишком много попыток. Подождите немного и повторите.';
+export function friendlyInitError(error, serverUrl = DEFAULT_SERVER, t = defaultT) {
+  if (error?.status === 409) return t('error.emailTaken');
+  if (error?.status === 401) return t('error.badCredentials');
+  if (error?.status === 422) return t('error.validation');
+  if (error?.status === 429) return t('error.rateLimited');
   if (isTransientNetworkError(error) || error instanceof TypeError) {
-    return `Не удалось связаться с ${serverUrl}. Проверьте сеть и адрес сервера.`;
+    return t('error.unreachable', { url: serverUrl });
   }
-  return error?.message || 'Неизвестная ошибка';
+  return error?.message || t('error.unknown');
 }
 
 export function agentHomeFor(id, plan, env = process.env) {
@@ -32,18 +33,21 @@ export function agentHomeFor(id, plan, env = process.env) {
   return join(root, 'agents', id);
 }
 
-export function summarizePlan(plan) {
+export function summarizePlan(plan, t = defaultT) {
   const characters = (plan.characterIds || []).map((id) => characterById(id)?.name || id);
   const skillWhere = plan.skillScope === 'global'
-    ? 'глобально (~/.claude и ~/.agents)'
-    : `в проекте ${plan.projectPath}`;
+    ? t('plan.skill.global')
+    : t('plan.skill.local', { path: plan.projectPath });
   return [
-    `Сервер: ${plan.serverUrl}`,
-    `Аккаунт: ${plan.mode === 'register' ? 'новая регистрация' : 'вход'} · ${plan.email}`,
-    plan.displayName ? `Имя: ${plan.displayName}` : null,
-    `Скилл: ${skillWhere}`,
-    `Хосты: ${(plan.hosts || []).join(', ') || '—'}`,
-    `Агенты: ${characters.length ? characters.join(', ') : 'пока никого'}`
+    t('plan.server', { url: plan.serverUrl }),
+    t('plan.account', {
+      mode: t(plan.mode === 'register' ? 'plan.account.register' : 'plan.account.login'),
+      email: plan.email
+    }),
+    plan.displayName ? t('plan.name', { name: plan.displayName }) : null,
+    t('plan.skill', { where: skillWhere }),
+    t('plan.hosts', { hosts: (plan.hosts || []).join(', ') || t('plan.none') }),
+    t('plan.agents', { agents: characters.length ? characters.join(', ') : t('plan.agents.none') })
   ].filter(Boolean).join('\n');
 }
 
@@ -163,10 +167,10 @@ export async function applyInit(plan, { env = process.env, fetchImpl = fetch, on
   return { home, config, enrolled, installedSkills };
 }
 
-export async function readOwnerStatus(env = process.env) {
+export async function readOwnerStatus(env = process.env, t = defaultT) {
   const initialized = await vaultExists(env);
   if (!initialized) {
-    return { initialized: false, hint: 'Запустите olimpyx init' };
+    return { initialized: false, hint: t('status.notInitialized') };
   }
   try {
     const config = JSON.parse(await readFile(configPath(env), 'utf8'));
@@ -180,16 +184,16 @@ export async function readOwnerStatus(env = process.env) {
       agents: config.agents || []
     };
   } catch {
-    return { initialized: true, hint: 'Vault есть, config.json не прочитан' };
+    return { initialized: true, hint: t('status.configUnreadable') };
   }
 }
 
-export async function addAgentFromCatalog(id, { env = process.env, fetchImpl = fetch } = {}) {
+export async function addAgentFromCatalog(id, { env = process.env, fetchImpl = fetch, t = defaultT } = {}) {
   const character = characterById(id);
-  if (!character) throw new Error(`Нет персонажа «${id}». Смотрите olimpyx skill / каталог в ~/.olimpyx/characters/INDEX.md`);
+  if (!character) throw new Error(t('agent.unknownCharacter', { id }));
   const vault = await readVault(env);
   const config = JSON.parse(await readFile(configPath(env), 'utf8'));
-  if (vault.agents?.[id]) throw new Error(`Агент ${character.name} уже добавлен`);
+  if (vault.agents?.[id]) throw new Error(t('agent.alreadyAdded', { name: character.name }));
   const plan = {
     serverUrl: config.serverUrl,
     skillScope: config.skillScope || 'global',

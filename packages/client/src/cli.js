@@ -63,6 +63,22 @@ async function ownerServerUrl() {
   if (local.serverUrl) return local.serverUrl;
   try { return JSON.parse(await readFile(join(ownerHome(), 'config.json'), 'utf8')).serverUrl; } catch { return null; }
 }
+
+// Every owner-scoped client goes through here. Resolving the server from `state` alone --
+// which is rooted at the WORKING DIRECTORY (`OLIMPYX_HOME` or ./.olimpyx), not at the owner
+// home -- made these commands depend on where they were run from. After a global `init`
+// the owner config lives in ~/.olimpyx, so from any other directory the URL came back
+// undefined and the client constructor died on `undefined.replace`; worse, standing in a
+// project configured against a DIFFERENT server sent the owner's real token there and the
+// server answered 401 "Invalid or expired credential" -- a message that points at the token
+// when the token was never the problem. ownerServerUrl() keeps the project-local config
+// first and falls back to the owner home, which is what `usage` already did and the rest
+// did not.
+async function ownerClientWith(token) {
+  const serverUrl = await ownerServerUrl();
+  if (!serverUrl) throw new Error('Not configured. Run: olimpyx init (or olimpyx configure --server URL)');
+  return new OlimpyxClient({ serverUrl, token });
+}
 // Resolves this agent's own owner id for the local budget's owner-scoping (budget.js
 // isOwnTaskRoom/evaluateHelpPolicy, PRD §3.4): `enroll`/`owner-login` normally already
 // cache it in config.json, so this is usually a plain local read with no network call.
@@ -75,7 +91,7 @@ async function resolveOwnerId(config) {
   const ownerToken = await tryLoadOwnerToken();
   if (!ownerToken) return null;
   try {
-    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    const client = await ownerClientWith(ownerToken);
     const me = await client.request('GET', '/v1/owners/me');
     const ownerId = me?.data?.owner_id ?? null;
     if (ownerId) await state.saveConfig({ ...config, ownerId });
@@ -86,10 +102,8 @@ async function resolveOwnerId(config) {
 }
 async function requireOwnerClient() {
   const ownerToken = await tryLoadOwnerToken();
-  const serverUrl = await ownerServerUrl();
-  if (!serverUrl) throw new Error('Not configured. Run: olimpyx init');
   if (!ownerToken) throw new Error('No owner credential. Run olimpyx init or owner-login.');
-  return new OlimpyxClient({ serverUrl, token: ownerToken });
+  return ownerClientWith(ownerToken);
 }
 // Best-effort so the server can prune acknowledged inbox events (PRD §3.3); a failure
 // here must never interrupt the caller, which has already persisted the cursor locally.
@@ -150,7 +164,7 @@ async function main() {
     const password = process.env.OLIMPYX_OWNER_PASSWORD || (option('password-stdin') ? await stdin() : null);
     if (!email || !password) throw new Error('Use --email and either --password-stdin or OLIMPYX_OWNER_PASSWORD');
     const config = await state.loadConfig();
-    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: null });
+    const client = await ownerClientWith(null);
     const result = await client.request('POST', '/v1/owners/login', { email, password });
     await state.init(); await state.saveOwnerCredential(result.data.access_token);
     // Cache this agent's owner id locally (budget.js isOwnTaskRoom/evaluateHelpPolicy
@@ -172,7 +186,7 @@ async function main() {
     if (!profile) throw new Error('--profile JSON or --profile @file is required');
     const config = await state.loadConfig();
     const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
-    const owner = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    const owner = await ownerClientWith(ownerToken);
     // Always resolve this agent's own owner id from the owner token, even when config.ownerId
     // is already cached: enroll is what actually binds this installation's agent to an owner,
     // so a stale or previously-mismatched cached value must not be trusted here -- the owner
@@ -647,7 +661,7 @@ async function main() {
       let syncError = null;
       if (ownerToken) {
         try {
-          const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+          const client = await ownerClientWith(ownerToken);
           server = await client.rollbackMemories(agentId, payload, { idempotencyKey });
         } catch (error) {
           syncError = error;
@@ -831,10 +845,9 @@ async function main() {
   if (command === 'incidents') {
     const status = option('status');
     const limit = option('limit');
-    const config = await state.loadConfig();
     const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
     if (!ownerToken) throw new Error('Owner authentication required. Run owner-login first or set OLIMPYX_OWNER_TOKEN.');
-    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    const client = await ownerClientWith(ownerToken);
     output(await client.getOwnerIncidents({ status, limit }));
     return;
   }
@@ -845,10 +858,9 @@ async function main() {
     if (!reason) throw new Error('--reason <text> is required');
     const evidenceRaw = option('evidence');
     const evidence = evidenceRaw ? await parseJsonOrList(evidenceRaw) : [];
-    const config = await state.loadConfig();
     const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
     if (!ownerToken) throw new Error('Owner authentication required. Run owner-login first or set OLIMPYX_OWNER_TOKEN.');
-    const client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+    const client = await ownerClientWith(ownerToken);
     output(await client.appealIncident(incidentId, { reason, evidence }));
     return;
   }
@@ -877,8 +889,7 @@ async function main() {
     } else {
       const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
       if (ownerToken) {
-        const config = await state.loadConfig();
-        client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+        client = await ownerClientWith(ownerToken);
       } else {
         client = await configuredClient(undefined, 'session');
       }
@@ -1085,8 +1096,7 @@ async function main() {
     } else {
       const ownerToken = await tryLoadOwnerToken();
       if (ownerToken) {
-        const config = await state.loadConfig();
-        client = new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+        client = await ownerClientWith(ownerToken);
       } else {
         client = await configuredClient();
       }

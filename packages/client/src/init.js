@@ -2,89 +2,90 @@ import * as p from '@clack/prompts';
 import { resolve } from 'node:path';
 import { CHARACTERS } from './characters.js';
 import { applyInit, DEFAULT_SERVER, summarizePlan } from './init-apply.js';
+import { t } from './i18n.js';
 
 function stopped(value) {
   if (p.isCancel(value)) {
-    p.cancel('Ничего не записано.');
+    p.cancel(t('init.cancelled'));
     process.exit(0);
   }
   return value;
 }
 
 export async function collectPlan({ cwd = process.cwd() } = {}) {
-  p.intro('Olimpyx · подключение к городу');
+  p.intro(t('init.intro'));
 
   const serverUrl = String(stopped(await p.text({
-    message: 'Сервер',
+    message: t('init.server'),
     initialValue: DEFAULT_SERVER,
     placeholder: DEFAULT_SERVER,
     validate: (value) => {
       try {
         const url = new URL(value);
-        if (!/^https?:$/.test(url.protocol)) return 'Нужен http или https';
+        if (!/^https?:$/.test(url.protocol)) return t('init.server.protocol');
       } catch {
-        return 'Это не похоже на URL';
+        return t('init.server.invalid');
       }
     }
   }))).replace(/\/$/, '');
 
   const mode = stopped(await p.select({
-    message: 'Аккаунт владельца',
+    message: t('init.account'),
     options: [
-      { value: 'register', label: 'Создать новый', hint: 'email + пароль + имя' },
-      { value: 'login', label: 'Войти', hint: 'уже регистрировались на сайте' }
+      { value: 'register', label: t('init.account.register'), hint: t('init.account.register.hint') },
+      { value: 'login', label: t('init.account.login'), hint: t('init.account.login.hint') }
     ]
   }));
 
   const email = String(stopped(await p.text({
-    message: 'Email',
+    message: t('init.email'),
     placeholder: 'you@example.com',
-    validate: (value) => /\S+@\S+\.\S+/.test(value) ? undefined : 'Нужен обычный email'
+    validate: (value) => /\S+@\S+\.\S+/.test(value) ? undefined : t('init.email.invalid')
   }))).trim().toLowerCase();
 
   let displayName;
   if (mode === 'register') {
     displayName = String(stopped(await p.text({
-      message: 'Отображаемое имя',
-      placeholder: 'Как вас видно в городе',
-      validate: (value) => value.trim() ? undefined : 'Имя не должно быть пустым'
+      message: t('init.displayName'),
+      placeholder: t('init.displayName.hint'),
+      validate: (value) => value.trim() ? undefined : t('init.displayName.empty')
     }))).trim();
   }
 
   const password = String(stopped(await p.password({
-    message: 'Пароль',
-    validate: (value) => value.length >= 12 ? undefined : 'Не короче 12 символов'
+    message: t('init.password'),
+    validate: (value) => value.length >= 12 ? undefined : t('init.password.short')
   })));
   if (mode === 'register') {
     const again = String(stopped(await p.password({
-      message: 'Пароль ещё раз',
-      validate: (value) => value === password ? undefined : 'Пароли не совпали'
+      message: t('init.password.again'),
+      validate: (value) => value === password ? undefined : t('init.password.mismatch')
     })));
     if (again !== password) {
-      p.cancel('Пароли не совпали.');
+      p.cancel(t('init.password.mismatch'));
       process.exit(0);
     }
   }
 
   const skillScope = stopped(await p.select({
-    message: 'Куда поставить стартер-скилл',
+    message: t('init.skillScope'),
     options: [
-      { value: 'global', label: 'Глобально', hint: '~/.claude/skills и ~/.agents/skills' },
-      { value: 'local', label: 'В проект', hint: 'текущая папка, путь можно поправить' }
+      { value: 'global', label: t('init.skillScope.global'), hint: t('init.skillScope.global.hint') },
+      { value: 'local', label: t('init.skillScope.local'), hint: t('init.skillScope.local.hint') }
     ]
   }));
 
   let projectPath = cwd;
   if (skillScope === 'local') {
     projectPath = resolve(String(stopped(await p.text({
-      message: 'Путь проекта',
+      message: t('init.projectPath'),
       initialValue: cwd,
-      hint: 'Enter — оставить текущий'
+      hint: t('init.projectPath.hint')
     }))));
   }
 
   const hosts = stopped(await p.multiselect({
-    message: 'Хосты для скилла',
+    message: t('init.hosts'),
     options: [
       { value: 'claude', label: 'Claude Code', hint: '.claude/skills' },
       { value: 'codex', label: 'Codex', hint: '.agents/skills' }
@@ -94,13 +95,13 @@ export async function collectPlan({ cwd = process.cwd() } = {}) {
   }));
 
   const characterIds = stopped(await p.groupMultiselect({
-    message: 'Базовые персонажи (пробел — выбрать, Enter — дальше)',
+    message: t('init.characters'),
     options: {
-      IT: CHARACTERS.filter((item) => item.cluster === 'it').map((item) => ({
+      [t('init.characters.it')]: CHARACTERS.filter((item) => item.cluster === 'it').map((item) => ({
         value: item.id,
         label: `${item.name} — ${item.role}`
       })),
-      'Отрасли': CHARACTERS.filter((item) => item.cluster === 'industry').map((item) => ({
+      [t('init.characters.industry')]: CHARACTERS.filter((item) => item.cluster === 'industry').map((item) => ({
         value: item.id,
         label: `${item.name} — ${item.role}`
       }))
@@ -110,13 +111,13 @@ export async function collectPlan({ cwd = process.cwd() } = {}) {
   })) || [];
 
   const plan = { serverUrl, mode, email, password, displayName, skillScope, projectPath, hosts, characterIds };
-  p.note(summarizePlan(plan), 'Сводка');
+  p.note(summarizePlan(plan, t), t('init.summary'));
   const ok = stopped(await p.confirm({
-    message: 'Записать vault, скилл и выбранных агентов?',
+    message: t('init.confirm'),
     initialValue: true
   }));
   if (!ok) {
-    p.cancel('Ничего не записано.');
+    p.cancel(t('init.cancelled'));
     process.exit(0);
   }
   return plan;
@@ -124,44 +125,44 @@ export async function collectPlan({ cwd = process.cwd() } = {}) {
 
 export async function runInit() {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error('olimpyx init нужен интерактивный терминал. Запустите в обычном терминале, не из пайпа.');
+    throw new Error(t('init.needsTty'));
   }
   const plan = await collectPlan();
   const spin = p.spinner();
   const labels = {
-    account: plan.mode === 'register' ? 'Регистрируем владельца' : 'Входим',
-    vault: 'Шифруем vault',
-    catalog: 'Копируем каталог персонажей',
-    playbook: 'Пишем playbook',
-    skills: 'Ставим стартер-скилл'
+    account: t(plan.mode === 'register' ? 'init.progress.register' : 'init.progress.login'),
+    vault: t('init.progress.vault'),
+    catalog: t('init.progress.catalog'),
+    playbook: t('init.progress.playbook'),
+    skills: t('init.progress.skills')
   };
-  spin.start('Подключаемся…');
+  spin.start(t('init.progress.connecting'));
   try {
     const result = await applyInit(plan, {
       onProgress: (step) => {
-        if (step.startsWith('agent:')) spin.message(`Регистрируем ${step.slice(6)}`);
+        if (step.startsWith('agent:')) spin.message(t('init.progress.agent', { name: step.slice(6) }));
         else spin.message(labels[step] || step);
       }
     });
-    spin.stop('Готово');
+    spin.stop(t('init.progress.done'));
     const agentLines = result.enrolled.length
       ? result.enrolled.map((item) => `  ${item.id} → ${item.home}`).join('\n')
-      : '  (никого — добавите позже: olimpyx agent add prometheus)';
+      : `  ${t('init.written.noAgents')}`;
     p.note(
       [
-        `Дом владельца: ${result.home}`,
-        `Скилл:`,
+        t('init.written.home', { path: result.home }),
+        t('init.written.skill'),
         ...result.installedSkills.map((path) => `  ${path}`),
-        'Агенты:',
+        t('init.written.agents'),
         agentLines,
         '',
-        'Дальше: olimpyx status · olimpyx skill'
+        t('init.written.next')
       ].join('\n'),
-      'Что записано'
+      t('init.written')
     );
-    p.outro('Пароль больше не нужно класть в файлы проекта.');
+    p.outro(t('init.outro'));
   } catch (error) {
-    spin.stop('Не вышло');
+    spin.stop(t('init.progress.failed'));
     throw error;
   }
 }
