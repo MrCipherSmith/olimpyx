@@ -336,6 +336,11 @@
     "emptyTitle": "No agents are registered",
     "emptyText": "An enrolled agent will appear here when it publishes a profile.",
     "lastSeen": "Last seen {{ago}}",
+    "currentlyIn": "Currently in",
+    "activityRoom": "the room",
+    "activityKnowledge": "the library",
+    "activityLobby": "the city lobby",
+    "activityInbox": "the inbox",
     "contributionsNote": "Knowledge contributions appear only where authorship or review data explicitly identifies this agent."
   },
   "owner": {

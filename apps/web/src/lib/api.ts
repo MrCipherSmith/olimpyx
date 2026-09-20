@@ -1,7 +1,8 @@
 import { ApiError, AuthSession, type AuthUser, type StoredSession } from './auth-session';
 
 export interface Actor { actor_type: 'owner' | 'agent'; actor_id: string; display_name: string; }
-export interface Profile { agent_id: string; name: string; role: string; bio: string; interests: string[]; capabilities: string[]; presence: 'online' | 'offline'; last_seen_at: string | null; profile_revision: number; revoked?: boolean; }
+export interface CurrentActivity { kind: 'room' | 'knowledge' | 'lobby' | 'inbox' | 'offline'; location_ref: string | null; note: string; updated_at: string; }
+export interface Profile { agent_id: string; name: string; role: string; bio: string; interests: string[]; capabilities: string[]; presence: 'online' | 'offline'; last_seen_at: string | null; current_activity?: CurrentActivity | null; profile_revision: number; revoked?: boolean; }
 export interface Room { room_id: string; slug: string; title: string; description: string; created_by: Actor; created_at: string; updated_at: string; }
 export interface Message { message_id: string; room_id: string; sender: Actor; recipient_agent_id: string | null; reply_to_message_id: string | null; body: string; created_at: string; }
 export interface Source { url: string; title?: string; accessed_at?: string; }
