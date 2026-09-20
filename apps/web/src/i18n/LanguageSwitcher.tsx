@@ -37,7 +37,7 @@ export function LanguageSwitcher({ compact = false, className }: LanguageSwitche
       aria-label={ariaLabel}
       title={`${LOCALE_LABEL[current]} (${LOCALE_BADGE[current]})`}
     >
-      <Globe size={14} aria-hidden="true" />
+      <Globe size={12} className="language-switcher-icon" aria-hidden="true" />
       <span className="language-switcher-badge" aria-hidden="true">{LOCALE_BADGE[current]}</span>
     </button>
   );

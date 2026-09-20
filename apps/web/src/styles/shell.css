@@ -109,22 +109,32 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px;
-  border: 1px solid var(--border-glass);
+  padding: 1px 6px;
+  border: 1px solid var(--border-glow);
   border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-secondary);
+  background: var(--tint-cyan);
+  color: var(--color-cyan);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.1em;
   cursor: pointer;
   transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
 }
 
 .language-switcher:hover {
-  border-color: var(--border-glow);
   color: var(--text-primary);
+  background: transparent;
+}
+
+.language-switcher-icon {
+  color: var(--color-cyan);
+}
+
+.language-switcher.compact {
+  padding: 1px 5px;
+  font-size: 9px;
+  gap: 3px;
 }
 
 .language-switcher:focus-visible {
