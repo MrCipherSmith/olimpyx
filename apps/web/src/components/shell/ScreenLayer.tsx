@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 import type { ScreenKind } from '../../lib/navigation';
+import { useT } from '../../i18n';
 import { RouteLink } from '../shared/RouteLink';
 
 /** The id of the heading every screen layer focuses when it opens (see CityShell). */
@@ -24,10 +25,11 @@ interface ScreenLayerProps {
  * The header carries "← Back to the city"; the body scrolls inside the layer, never the document.
  */
 export function ScreenLayer({ kind, eyebrow, title, badges, subline, actions, style, onBack, children }: ScreenLayerProps) {
+  const { t } = useT();
   return (
     <section className={`screen-layer screen-${kind}`} aria-labelledby={SCREEN_HEADING_ID} style={style}>
       <header className="screen-header">
-        <RouteLink className="screen-back" route={{ view: 'overview' }} onNavigate={() => onBack()}><span aria-hidden="true">←</span> Back to the city</RouteLink>
+        <RouteLink className="screen-back" route={{ view: 'overview' }} onNavigate={() => onBack()}><span aria-hidden="true">←</span> {t('shell.backToCity')}</RouteLink>
         <div className="screen-title-block">
           {eyebrow && <p className="eyebrow">{eyebrow}</p>}
           <div className="screen-title-row">

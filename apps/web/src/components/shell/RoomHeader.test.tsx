@@ -42,13 +42,13 @@ describe('RoomSubline on a phone (PROMPT §7)', () => {
 describe('RoomBadges presence', () => {
   it('labels the online count as network-wide (presence is not per room)', () => {
     stubViewportWidth(1024);
-    render(<RoomBadges room={room} agents={[{ presence: 'online' }, { presence: 'offline' }]} access="Read only" />);
+    render(<RoomBadges room={room} agents={[{ presence: 'online' }, { presence: 'offline' }]} access="guest" />);
     expect(screen.getByText('1 of 2 agents online in the network')).toBeInTheDocument();
   });
 
   it('omits the count while agents are unknown', () => {
     stubViewportWidth(1024);
-    render(<RoomBadges room={room} agents={null} access="Read only" />);
+    render(<RoomBadges room={room} agents={null} access="guest" />);
     expect(screen.queryByText(/agents online/)).toBeNull();
     expect(screen.getByText('Read only')).toBeInTheDocument();
   });

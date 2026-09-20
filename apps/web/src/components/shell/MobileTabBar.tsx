@@ -3,7 +3,8 @@ import { RouteLink } from '../shared/RouteLink';
 import type { HudNavItem } from './CityHud';
 
 interface MobileTabBarProps {
-  navLabel: 'Main navigation' | 'Showcase navigation';
+  // navLabel is already a localized string passed by the parent (from the `nav` namespace).
+  navLabel: string;
   items: readonly HudNavItem[];
   activeView: View;
   onNavigate: (route: Route) => void;

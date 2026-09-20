@@ -1,5 +1,6 @@
 import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from 'react';
 import { messageFrom } from '../../lib/format';
+import { useT } from '../../i18n';
 import { ArchetypePreview } from '../city/ArchetypePreview';
 import {
   archetypeColorVar, categoryInfo, encodeRoomMetadata, getArchetype, maxDescriptionLength,
@@ -22,6 +23,7 @@ function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
 const FOCUSABLE_SELECTOR = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
 
 export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { title: string; description?: string }) => Promise<void> }) {
+  const { t } = useT();
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [category, setCategory] = useState<ArchetypeCategory>('science');
@@ -91,20 +93,20 @@ export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreat
       <form ref={formRef} className="modal archetype-modal" role="dialog" aria-modal="true" aria-labelledby="create-room-title" onSubmit={submit}>
         <div className="section-heading">
           <div>
-            <p className="eyebrow">NEW PUBLIC ROOM</p>
-            <h2 id="create-room-title">Start a discussion</h2>
+            <p className="eyebrow">{t('rooms.create.eyebrow')}</p>
+            <h2 id="create-room-title">{t('rooms.create.heading')}</h2>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} disabled={sending} aria-label="Close create room dialog">×</button>
+          <button type="button" className="icon-button" onClick={onClose} disabled={sending} aria-label={t('rooms.create.close')}>×</button>
         </div>
         <div className="archetype-modal-scroll">
-          <label>Title<input name="title" required maxLength={120} autoFocus /></label>
+          <label>{t('rooms.create.titleLabel')}<input name="title" required maxLength={120} autoFocus /></label>
 
           <fieldset className="archetype-picker">
-            <legend className="eyebrow">City building <span className="muted">optional</span></legend>
+            <legend className="eyebrow">{t('rooms.create.building')} <span className="muted">{t('rooms.create.optional')}</span></legend>
             <button type="button" className={`archetype-auto${archetypeId === null ? ' selected' : ''}`} aria-pressed={archetypeId === null} onClick={() => setArchetypeId(null)}>
-              Automatic — derived from the room id
+              {t('rooms.create.automatic')}
             </button>
-            <div className="category-tabs" role="group" aria-label="Building category" onKeyDown={moveFocus}>
+            <div className="category-tabs" role="group" aria-label={t('rooms.create.buildingCategory')} onKeyDown={moveFocus}>
               {ROOM_CATEGORIES.map(item => (
                 <button key={item.id} type="button" className={`category-tab${category === item.id ? ' active' : ''}`} aria-pressed={category === item.id} onClick={() => setCategory(item.id)}>
                   <span aria-hidden="true">{item.icon}</span> {item.labelEn}
@@ -129,22 +131,22 @@ export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreat
             <div className="archetype-preview" style={accentStyle(archetypeColorVar(selected?.color ?? 'cyan'))} aria-live="polite">
               {selected ? <ArchetypePreview archetype={selected} /> : <span className="archetype-preview-auto" aria-hidden="true">✦</span>}
               <div>
-                <strong>{selected ? `${selected.nameEn} · ${selected.name}` : 'Automatic layout'}</strong>
-                <small>{selected ? selected.summary : 'The city picks a stable building for this room from its id.'}</small>
-                {selected && <small className="muted">Stored as a short prefix at the start of the description; agents and the CLI see it in the raw text.</small>}
+                <strong>{selected ? `${selected.nameEn} · ${selected.name}` : t('rooms.create.automaticLayout')}</strong>
+                <small>{selected ? selected.summary : t('rooms.create.automaticSummary')}</small>
+                {selected && <small className="muted">{t('rooms.create.storedHint')}</small>}
               </div>
             </div>
           </fieldset>
 
-          <label>Description <span className="muted">optional</span>
+          <label>{t('rooms.create.descriptionLabel')}
             <textarea name="description" maxLength={limit} rows={3} value={description} onChange={event => setDescription(event.target.value)} aria-describedby="create-room-description-limit" />
           </label>
-          <small id="create-room-description-limit" className="muted">{description.trim().length} / {limit} characters</small>
+          <small id="create-room-description-limit" className="muted">{t('rooms.create.charactersCount', { count: description.trim().length, limit })}</small>
         </div>
         {error && <ErrorText text={error} />}
         <div className="modal-actions">
-          <button type="button" className="secondary" onClick={onClose} disabled={sending}>Cancel</button>
-          <button className="primary" disabled={sending || description.trim().length > limit}>{sending ? 'Creating…' : 'Create room'}</button>
+          <button type="button" className="secondary" onClick={onClose} disabled={sending}>{t('rooms.create.cancel')}</button>
+          <button className="primary" disabled={sending || description.trim().length > limit}>{sending ? t('rooms.create.submitting') : t('rooms.create.submit')}</button>
         </div>
       </form>
     </div>

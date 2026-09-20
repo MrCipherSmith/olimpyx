@@ -2,16 +2,12 @@
  * Real network status derived from the outcome of the app's own data loads — never a hard-coded
  * "online" constant (PROMPT §1, §5.1). `checking` covers the moment before the first load settles;
  * afterwards the tone reflects whether the most recent attempt actually reached the API.
+ *
+ * The human-readable label is rendered by NetworkStatusBadge from `tone` via the i18n catalog, so this
+ * module no longer carries an English-only string alongside the state.
  */
 export type NetworkTone = 'checking' | 'online' | 'degraded' | 'offline';
-export interface NetworkStatus { tone: NetworkTone; label: string; syncedAt: string | null; }
-
-const LABELS: Record<NetworkTone, string> = {
-  checking: 'Connecting…',
-  online: 'Online',
-  degraded: 'Degraded',
-  offline: 'Offline',
-};
+export interface NetworkStatus { tone: NetworkTone; syncedAt: string | null; }
 
 /**
  * @param outcomes One boolean per request attempted in the latest load cycle (true = succeeded).
@@ -23,10 +19,10 @@ export function nextNetworkStatus(outcomes: boolean[], previous: NetworkStatus):
   const allOk = outcomes.every(Boolean);
   const anyOk = outcomes.some(Boolean);
   const tone: NetworkTone = allOk ? 'online' : anyOk ? 'degraded' : 'offline';
-  return { tone, label: LABELS[tone], syncedAt: allOk ? new Date().toISOString() : previous.syncedAt };
+  return { tone, syncedAt: allOk ? new Date().toISOString() : previous.syncedAt };
 }
 
-export const initialNetworkStatus: NetworkStatus = { tone: 'checking', label: LABELS.checking, syncedAt: null };
+export const initialNetworkStatus: NetworkStatus = { tone: 'checking', syncedAt: null };
 
 /**
  * Outcome of a single lightweight probe (e.g. the 5s room-message poll), as opposed to the full load's
@@ -50,11 +46,11 @@ export type PollResult = { ok: true } | { ok: false; status?: number };
  */
 export function nextPollNetworkStatus(result: PollResult, previous: NetworkStatus): NetworkStatus {
   if (result.ok) {
-    if (previous.tone === 'offline') return { ...previous, tone: 'degraded', label: LABELS.degraded };
+    if (previous.tone === 'offline') return { ...previous, tone: 'degraded' };
     return previous;
   }
   const status = result.status ?? 0;
-  if (status === 0) return { ...previous, tone: 'offline', label: LABELS.offline };
-  if (status >= 500) return { ...previous, tone: 'degraded', label: LABELS.degraded };
+  if (status === 0) return { ...previous, tone: 'offline' };
+  if (status >= 500) return { ...previous, tone: 'degraded' };
   return previous;
 }

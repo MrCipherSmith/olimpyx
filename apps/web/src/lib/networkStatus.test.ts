@@ -36,9 +36,9 @@ describe('nextNetworkStatus', () => {
 // authority as a full load cycle — only a real network failure may declare Offline, and success
 // alone must never fast-forward straight to Online.
 describe('nextPollNetworkStatus', () => {
-  const online: NetworkStatus = { tone: 'online', label: 'Online', syncedAt: 't0' };
-  const degraded: NetworkStatus = { tone: 'degraded', label: 'Degraded', syncedAt: 't0' };
-  const offline: NetworkStatus = { tone: 'offline', label: 'Offline', syncedAt: 't0' };
+  const online: NetworkStatus = { tone: 'online', syncedAt: 't0' };
+  const degraded: NetworkStatus = { tone: 'degraded', syncedAt: 't0' };
+  const offline: NetworkStatus = { tone: 'offline', syncedAt: 't0' };
 
   it('a network failure (no response at all) marks the network offline', () => {
     expect(nextPollNetworkStatus({ ok: false, status: 0 }, online).tone).toBe('offline');

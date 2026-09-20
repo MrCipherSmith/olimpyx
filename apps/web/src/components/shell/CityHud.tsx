@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import type { Route, View } from '../../lib/navigation';
 import type { NetworkStatus } from '../../lib/networkStatus';
+import { LanguageSwitcher } from '../../i18n/LanguageSwitcher';
+import { useT } from '../../i18n';
 import { NetworkStatusBadge } from '../layout/NetworkStatus';
 import { RouteLink } from '../shared/RouteLink';
 import { MobileTabBar } from './MobileTabBar';
@@ -19,7 +21,7 @@ export interface HudNavItem {
 export interface HudStat { label: string; value: number | null }
 
 interface CityHudProps {
-  navLabel: 'Main navigation' | 'Showcase navigation';
+  navLabel: string;
   eyebrow: string;
   network: NetworkStatus;
   items: HudNavItem[];
@@ -38,6 +40,7 @@ interface CityHudProps {
  * a bottom tab bar (MobileTabBar), which then becomes the page's one primary `nav` under `navLabel`.
  */
 export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, account, note, onNavigate }: CityHudProps) {
+  const { t } = useT();
   const shown = stats.filter(stat => stat.value !== null);
   const phone = useMediaQuery(PHONE_QUERY);
   return (
@@ -50,6 +53,7 @@ export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, 
             <span className="hud-brand-tag">CITY</span>
           </div>
           <NetworkStatusBadge status={network} />
+          {!phone && <LanguageSwitcher className="hud-language" />}
         </div>
         <p className="eyebrow hud-eyebrow">{eyebrow}</p>
         {note}
@@ -70,11 +74,11 @@ export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, 
           </nav>
         )}
         {!phone && shown.length > 0 && (
-          <dl className="hud-stats" aria-label="City statistics">
+          <dl className="hud-stats" aria-label={t('hud.statsAriaLabel')}>
             {shown.map(stat => <div key={stat.label}><dt>{stat.label}</dt><dd>{stat.value}</dd></div>)}
           </dl>
         )}
-        <div className="hud-account">{account}</div>
+        <div className="hud-account">{phone && <LanguageSwitcher className="hud-language-mobile" />}{account}</div>
       </header>
       {phone && <MobileTabBar navLabel={navLabel} items={items} activeView={activeView} onNavigate={onNavigate} />}
     </>
@@ -88,11 +92,11 @@ export function loadedCount(state: { data: readonly unknown[]; loading: boolean;
   return state.data.length;
 }
 
-/** Nav badge for agents: "online/total", with a spoken description. */
-export function agentsBadge(agents: ReadonlyArray<{ presence: string }> | null): Pick<HudNavItem, 'badge' | 'badgeLabel'> {
+/** Nav badge for agents: "online/total", with a spoken description. The caller supplies the already-localised label. */
+export function agentsBadge(agents: ReadonlyArray<{ presence: string }> | null, label: string | null): Pick<HudNavItem, 'badge' | 'badgeLabel'> {
   if (!agents) return { badge: null, badgeLabel: null };
   const online = agents.filter(agent => agent.presence === 'online').length;
-  return { badge: `${online}/${agents.length}`, badgeLabel: `${online} of ${agents.length} agents online` };
+  return { badge: `${online}/${agents.length}`, badgeLabel: label };
 }
 
 export function countBadge(count: number | null, singular: string, plural: string): Pick<HudNavItem, 'badge' | 'badgeLabel'> {
