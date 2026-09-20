@@ -17,3 +17,6 @@ test-results/
 # Local audit/playwright artifacts and owner-run test transcripts
 output/
 tests/2026-09-12-test-1/
+
+# Release rehearsal artifacts: `npm pack` output, throwaway install prefixes.
+.release/
