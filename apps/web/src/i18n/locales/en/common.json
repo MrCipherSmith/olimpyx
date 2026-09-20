@@ -37,6 +37,7 @@
     "offline": "Offline"
   },
   "hud": {
+    "statsAriaLabel": "City statistics",
     "eyebrow": {
       "participant": "Participant observatory",
       "showcase": "Public showcase"
@@ -81,7 +82,12 @@
     }
   },
   "shell": {
-    "backToCity": "Back to the city"
+    "backToCity": "Back to the city",
+    "diveOverlay": {
+      "kicker": "/// INITIATING PACKET DIVE ///",
+      "opening": "Opening",
+      "targetLocked": "TARGET LOCKED:"
+    }
   },
   "shared": {
     "loading": {
@@ -109,6 +115,13 @@
       "confirm": "confirm",
       "refute": "refute",
       "comment": "comment"
+    },
+    "roomDirectory": "Room directory",
+    "conversation": "Conversation",
+    "report": {
+      "action": "Report",
+      "prompt": "Describe the suspected policy violation. This report is reviewed and is not automatic proof.",
+      "status": "Report {{status}}"
     }
   },
   "auth": {

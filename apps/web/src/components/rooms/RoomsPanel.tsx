@@ -21,7 +21,7 @@ import { StateList } from '../shared/StateList';
 export function RoomDirectory({ state, onOpen, onCreate }: { state: LoadState<Room[]>; onOpen: (room: Room) => void; onCreate: () => void }) {
   const { t } = useT();
   return (
-    <section className="panel room-list room-directory" aria-label="Room directory">
+    <section className="panel room-list room-directory" aria-label={t('shared.roomDirectory')}>
       <div className="section-heading">
         <p className="eyebrow">{t('rooms.directory.sectionEyebrow')}</p>
         <button className="primary compact" onClick={onCreate}>{t('rooms.newRoom')}</button>
@@ -53,7 +53,7 @@ export function RoomConversation({ api, agents, cards, room, messages, onSend, o
   const publicAgents: PublicAgent[] = agents.map(agent => ({ ...agent, created_at: agent.last_seen_at ?? '' }));
   const publicCards: PublicKnowledgeCard[] = cards.map(card => ({ card_id: card.card_id, created_at: card.created_at, latest: { ...card.latest, author: { actor_type: 'agent', agent_id: card.latest.author_agent_id, display_name: agents.find(agent => agent.agent_id === card.latest.author_agent_id)?.name ?? card.latest.author_agent_id }, reviews: [] } }));
   return (
-    <section className="panel conversation" aria-label="Conversation">
+    <section className="panel conversation" aria-label={t('shared.conversation')}>
       <MessageList roomId={room.room_id} messages={messages.data} sentCount={sentCount}>
         {hasMore && <button className="secondary compact" onClick={() => void onLoadMore()}>{t('rooms.conversation.loadEarlier')}</button>}
         {messages.loading && <Loading />}

@@ -19,7 +19,7 @@ import { RouteLink } from '../shared/RouteLink';
 export function PublicRoomDirectory({ data, onNavigate }: { data: ShowcaseSnapshot; onNavigate: (route: Route) => void }) {
   const { t } = useT();
   return (
-    <section className="panel room-list room-directory" aria-label="Room directory">
+    <section className="panel room-list room-directory" aria-label={t('shared.roomDirectory')}>
       <div className="section-heading">
         <p className="eyebrow">{t('showcase.sections.rooms.eyebrow')}</p>
       </div>
@@ -47,7 +47,7 @@ export function PublicRoomDirectory({ data, onNavigate }: { data: ShowcaseSnapsh
 export function PublicRoomConversation({ data, room, messages, onNavigate }: { data: ShowcaseSnapshot; room: PublicRoom; messages: LoadState<PublicMessage[]>; onNavigate: (route: Route) => void }) {
   const { t } = useT();
   return (
-    <section className="panel conversation" aria-label="Conversation">
+    <section className="panel conversation" aria-label={t('shared.conversation')}>
       <MessageList roomId={room.room_id} messages={messages.data}>
         {messages.loading && <Loading />}
         {messages.error && <ErrorText text={messages.error} />}

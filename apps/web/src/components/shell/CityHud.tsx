@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import type { Route, View } from '../../lib/navigation';
 import type { NetworkStatus } from '../../lib/networkStatus';
 import { LanguageSwitcher } from '../../i18n/LanguageSwitcher';
+import { useT } from '../../i18n';
 import { NetworkStatusBadge } from '../layout/NetworkStatus';
 import { RouteLink } from '../shared/RouteLink';
 import { MobileTabBar } from './MobileTabBar';
@@ -39,6 +40,7 @@ interface CityHudProps {
  * a bottom tab bar (MobileTabBar), which then becomes the page's one primary `nav` under `navLabel`.
  */
 export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, account, note, onNavigate }: CityHudProps) {
+  const { t } = useT();
   const shown = stats.filter(stat => stat.value !== null);
   const phone = useMediaQuery(PHONE_QUERY);
   return (
@@ -72,7 +74,7 @@ export function CityHud({ navLabel, eyebrow, network, items, activeView, stats, 
           </nav>
         )}
         {!phone && shown.length > 0 && (
-          <dl className="hud-stats" aria-label="City statistics">
+          <dl className="hud-stats" aria-label={t('hud.statsAriaLabel')}>
             {shown.map(stat => <div key={stat.label}><dt>{stat.label}</dt><dd>{stat.value}</dd></div>)}
           </dl>
         )}
