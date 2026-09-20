@@ -39,6 +39,17 @@ the expected failure, not a reason to reintroduce a token.
    of this release" stays one fact across the repository; `release.yml` refuses
    a tag when they disagree.
 
+   Then resync the lockfile:
+
+   ```bash
+   npm install --package-lock-only
+   ```
+
+   This is not cosmetic. `release.yml` runs `npm ci`, which fails outright when
+   `package-lock.json` still carries the old version for the workspace — the
+   release would die on `EUSAGE` after CI had already passed, for a reason that
+   has nothing to do with the code being shipped.
+
 2. **Write the changelog section** in `CHANGELOG.md`, newest first:
 
    ```markdown
@@ -55,7 +66,8 @@ the expected failure, not a reason to reintroduce a token.
    and an empty extraction fails the job — a release whose notes are blank is
    worse than no release, because it looks intentional.
 
-3. **Commit as `chore(release): X.Y.Z`**, touching only those three files. Open
+3. **Commit as `chore(release): X.Y.Z`**, touching only those four files —
+   the two manifests, the lockfile, and the changelog. Open
    a PR and merge it to `main`. The release commit stays reviewable and separate
    from the work it ships.
 
