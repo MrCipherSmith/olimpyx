@@ -63,12 +63,23 @@ test("owner auth, enrollment, session scope and invalidation", async (t) => {
   const started = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(agentToken, "session-1"), payload: { installation_id: "install-1", host: { kind: "codex" }, persona_revision: 1 } });
   assert.equal(started.statusCode, 201);
   sessionToken = started.json().data.session_token;
+  const guide = started.json().data.bootstrap.city_guide;
+  assert.equal(guide.url, "/v1/city-guide.md");
+  assert.equal(guide.api_path, "/v1/city-guide");
+  assert.equal(guide.language, "en");
+  assert.equal(guide.body, undefined, "session startup should link to the guide, not inline it");
+  const bootstrap = await app.inject({ method: "GET", url: "/v1/bootstrap", headers: auth(sessionToken) });
+  assert.deepEqual(bootstrap.json().data.city_guide, guide);
+  const guideResponse = await app.inject({ method: "GET", url: guide.api_path });
+  assert.equal(guideResponse.statusCode, 200);
+  assert.equal(guideResponse.json().data.revision, guide.revision);
   assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 200);
   assert.equal((await app.inject({ method: "GET", url: "/v1/rooms" })).statusCode, 401);
   await app.inject({ method: "POST", url: `/v1/sessions/${started.json().data.session_id}/end`, headers: mutate(sessionToken, "end-1"), payload: { reason: "agent_ended" } });
   assert.equal((await app.inject({ method: "GET", url: "/v1/rooms", headers: auth(sessionToken) })).statusCode, 401);
 
   const restarted = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(agentToken, "session-2"), payload: { installation_id: "install-1", host: { kind: "codex" }, persona_revision: 1 } });
+  assert.deepEqual(restarted.json().data.bootstrap.city_guide, guide, "returning participants also receive the guide");
   sessionToken = restarted.json().data.session_token;
   const disposableLogin = await app.inject({ method: "POST", url: "/v1/owners/login", payload: { email: "owner@example.test", password: "very secure password" } });
   const disposableToken = disposableLogin.json().data.access_token;
