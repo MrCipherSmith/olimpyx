@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { idempotencyKey, type EnrollmentToken, type Escalation, type OlimpyxApi, type Profile } from '../../lib/api';
 import { ago } from '../../lib/format';
 import { empty } from '../../lib/loadState';
+import { useT } from '../../i18n';
 import { ErrorText } from '../shared/ErrorText';
 import { StateList } from '../shared/StateList';
 import { friendlyError } from './friendlyError';
 import { UsageCard } from './UsageCard';
 
 export function OwnerPanel({ api }: { api: OlimpyxApi }) {
+  const { t } = useT();
   const [agents, setAgents] = useState(empty<Profile[]>([]));
   const [escalations, setEscalations] = useState(empty<Escalation[]>([]));
   const [token, setToken] = useState<EnrollmentToken | null>(null);
@@ -56,7 +58,7 @@ export function OwnerPanel({ api }: { api: OlimpyxApi }) {
   /** Stop ends the agent's sessions without revoking it (PROMPT §6). The prompt doubles as the confirmation: Cancel keeps the sessions running. */
   const stop = (agent: Profile) => {
     if (pendingAgentIds.has(agent.agent_id)) return;
-    const reason = window.prompt(`Stop ${agent.name}'s active sessions? The agent keeps its access and may start a new session later. Add an optional reason, or cancel to keep the sessions running:`) ?? undefined;
+    const reason = window.prompt(t('owner.agents.stopConfirm', { name: agent.name })) ?? undefined;
     if (reason === undefined) return;
     // One idempotency key per confirmed intent: if the request is retried it lands as the same stop.
     const key = idempotencyKey();
@@ -64,7 +66,7 @@ export function OwnerPanel({ api }: { api: OlimpyxApi }) {
   };
   const revoke = (agent: Profile) => {
     if (pendingAgentIds.has(agent.agent_id)) return;
-    const reason = window.prompt(`Revoke ${agent.name}'s access? This is permanent and cannot be undone — the agent will need a new enrollment token to rejoin. Add an optional reason, or cancel to keep its access:`) ?? undefined;
+    const reason = window.prompt(t('owner.agents.revokeConfirm', { name: agent.name })) ?? undefined;
     if (reason === undefined) return;
     const key = idempotencyKey();
     void withPending(agent.agent_id, () => api.revokeAgent(agent.agent_id, reason, key));
@@ -81,63 +83,65 @@ export function OwnerPanel({ api }: { api: OlimpyxApi }) {
   const activeAgents = agents.data.filter(agent => !agent.revoked);
   const revokedAgents = agents.data.filter(agent => agent.revoked);
 
-  return <div className="owner-grid">
-    <section className="panel">
-      <p className="eyebrow">AGENT ENROLLMENT</p>
-      <h2>Create a one-time enrollment token</h2>
-      <p className="muted">Copy this secret into the local agent skill. It is never stored by this browser and disappears when closed.</p>
-      {token
-        ? <div className="token-box">
-            <code>{token.enrollment_token}</code>
-            <small>Expires {ago(token.expires_at)}</small>
-            <div>
-              <button className="secondary compact" onClick={copyToken}>Copy token</button>
-              <button className="text-button" onClick={() => setToken(null)}>Clear secret</button>
-              <span role="status" aria-live="polite" className="copy-feedback">{copied ? 'Copied' : ''}</span>
-            </div>
-          </div>
-        : <button className="primary" onClick={() => void api.enrollmentToken().then(setToken).catch(e => setError(friendlyError(e)))}>Generate enrollment token</button>}
-      {error && <ErrorText text={error} />}
-    </section>
-    <section className="panel">
-      <div className="section-heading"><div><p className="eyebrow">YOUR AGENTS</p><h2>Manage access</h2></div><button className="secondary compact" onClick={() => void load()}>Refresh</button></div>
-      {manageError && <ErrorText text={manageError} />}
-      <StateList state={agents} emptyTitle="No enrolled agents" emptyText="Generate a token, then use it in the local skill’s enrollment flow.">
-        {activeAgents.map(agent => (
-          <div className="managed-agent" key={agent.agent_id}>
-            <div><strong>{agent.name}</strong><small>{agent.role} · {agent.presence}</small></div>
-            <div className="managed-agent-actions">
-              <button className="secondary compact" disabled={pendingAgentIds.has(agent.agent_id)} onClick={() => stop(agent)}>Stop</button>
-              <button className="secondary compact" disabled={pendingAgentIds.has(agent.agent_id)} onClick={() => revoke(agent)}>Revoke</button>
-            </div>
-          </div>
-        ))}
-        {activeAgents.length === 0 && revokedAgents.length > 0 && <p className="muted">No active agents.</p>}
-        {revokedAgents.length > 0 && (
-          <div className="managed-agents-revoked">
-            <p className="eyebrow">REVOKED</p>
-            {revokedAgents.map(agent => (
-              <div className="managed-agent managed-agent-revoked" key={agent.agent_id}>
-                <div><strong>{agent.name}</strong><small>{agent.role} · access revoked</small></div>
-                <span className="status contested">Revoked</span>
+  return (
+    <div className="owner-grid">
+      <section className="panel">
+        <p className="eyebrow">{t('owner.enrollment.eyebrow')}</p>
+        <h2>{t('owner.enrollment.title')}</h2>
+        <p className="muted">{t('owner.enrollment.hint')}</p>
+        {token
+          ? <div className="token-box">
+              <code>{token.enrollment_token}</code>
+              <small>{t('owner.enrollment.expires', { ago: ago(token.expires_at) })}</small>
+              <div>
+                <button className="secondary compact" onClick={copyToken}>{t('owner.enrollment.copy')}</button>
+                <button className="text-button" onClick={() => setToken(null)}>{t('owner.enrollment.clear')}</button>
+                <span role="status" aria-live="polite" className="copy-feedback">{copied ? t('owner.enrollment.copied') : ''}</span>
               </div>
-            ))}
-          </div>
-        )}
-      </StateList>
-    </section>
-    <UsageCard api={api} />
-    <section className="panel owner-escalations">
-      <p className="eyebrow">MODERATION</p>
-      <h2>Owner escalations</h2>
-      <StateList state={escalations} emptyTitle="No escalations" emptyText="Restrictions and unresolved moderation events will appear here.">
-        {escalations.data.map(item => (
-          <div className="revision" key={item.incident_id}>
-            <span className="status contested">{item.status}</span>
-            <span><strong>{item.incident_id}</strong><small>{item.summary || 'No summary supplied'} · {ago(item.updated_at || item.created_at)}</small></span>
-          </div>
-        ))}
-      </StateList>
-    </section>
-  </div>;
+            </div>
+          : <button className="primary" onClick={() => void api.enrollmentToken().then(setToken).catch(e => setError(friendlyError(e)))}>{t('owner.enrollment.generate')}</button>}
+        {error && <ErrorText text={error} />}
+      </section>
+      <section className="panel">
+        <div className="section-heading"><div><p className="eyebrow">{t('owner.agents.eyebrow')}</p><h2>{t('owner.agents.title')}</h2></div><button className="secondary compact" onClick={() => void load()}>{t('owner.agents.refresh')}</button></div>
+        {manageError && <ErrorText text={manageError} />}
+        <StateList state={agents} emptyTitle={t('owner.agents.emptyTitle')} emptyText={t('owner.agents.emptyText')}>
+          {activeAgents.map(agent => (
+            <div className="managed-agent" key={agent.agent_id}>
+              <div><strong>{agent.name}</strong><small>{agent.role} · {t(`presence.${agent.presence}`)}</small></div>
+              <div className="managed-agent-actions">
+                <button className="secondary compact" disabled={pendingAgentIds.has(agent.agent_id)} onClick={() => stop(agent)}>{t('owner.agents.stop')}</button>
+                <button className="secondary compact" disabled={pendingAgentIds.has(agent.agent_id)} onClick={() => revoke(agent)}>{t('owner.agents.revoke')}</button>
+              </div>
+            </div>
+          ))}
+          {activeAgents.length === 0 && revokedAgents.length > 0 && <p className="muted">{t('owner.agents.noActiveAgents')}</p>}
+          {revokedAgents.length > 0 && (
+            <div className="managed-agents-revoked">
+              <p className="eyebrow">{t('owner.agents.revokedHeading')}</p>
+              {revokedAgents.map(agent => (
+                <div className="managed-agent managed-agent-revoked" key={agent.agent_id}>
+                  <div><strong>{agent.name}</strong><small>{agent.role} · {t('owner.agents.accessRevoked')}</small></div>
+                  <span className="status contested">{t('status.revoked')}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </StateList>
+      </section>
+      <UsageCard api={api} />
+      <section className="panel owner-escalations">
+        <p className="eyebrow">{t('owner.escalations.eyebrow')}</p>
+        <h2>{t('owner.escalations.title')}</h2>
+        <StateList state={escalations} emptyTitle={t('owner.escalations.emptyTitle')} emptyText={t('owner.escalations.emptyText')}>
+          {escalations.data.map(item => (
+            <div className="revision" key={item.incident_id}>
+              <span className="status contested">{item.status}</span>
+              <span><strong>{item.incident_id}</strong><small>{item.summary || t('owner.escalations.noSummary')} · {ago(item.updated_at || item.created_at)}</small></span>
+            </div>
+          ))}
+        </StateList>
+      </section>
+    </div>
+  );
 }

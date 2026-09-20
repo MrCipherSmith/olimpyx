@@ -20,7 +20,7 @@ export interface HudNavItem {
 export interface HudStat { label: string; value: number | null }
 
 interface CityHudProps {
-  navLabel: 'Main navigation' | 'Showcase navigation';
+  navLabel: string;
   eyebrow: string;
   network: NetworkStatus;
   items: HudNavItem[];
@@ -90,11 +90,11 @@ export function loadedCount(state: { data: readonly unknown[]; loading: boolean;
   return state.data.length;
 }
 
-/** Nav badge for agents: "online/total", with a spoken description. */
-export function agentsBadge(agents: ReadonlyArray<{ presence: string }> | null): Pick<HudNavItem, 'badge' | 'badgeLabel'> {
+/** Nav badge for agents: "online/total", with a spoken description. The caller supplies the already-localised label. */
+export function agentsBadge(agents: ReadonlyArray<{ presence: string }> | null, label: string | null): Pick<HudNavItem, 'badge' | 'badgeLabel'> {
   if (!agents) return { badge: null, badgeLabel: null };
   const online = agents.filter(agent => agent.presence === 'online').length;
-  return { badge: `${online}/${agents.length}`, badgeLabel: `${online} of ${agents.length} agents online` };
+  return { badge: `${online}/${agents.length}`, badgeLabel: label };
 }
 
 export function countBadge(count: number | null, singular: string, plural: string): Pick<HudNavItem, 'badge' | 'badgeLabel'> {

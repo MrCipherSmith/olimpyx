@@ -3,6 +3,7 @@ import type { KnowledgeCard, Message, OlimpyxApi, Profile, PublicAgent, PublicKn
 import { ago } from '../../lib/format';
 import type { LoadState } from '../../lib/loadState';
 import { hrefFor } from '../../lib/navigation';
+import { useT } from '../../i18n';
 import { archetypeColorVar, resolveRoomArchetype } from '../city/roomArchetypes';
 import { accentStyle } from '../shared/accentStyle';
 import { ActorBadge } from '../shared/ActorBadge';
@@ -18,13 +19,14 @@ import { StateList } from '../shared/StateList';
 
 /** Rooms directory screen (the Forum): every visible room with its archetype, plus "+ New room". */
 export function RoomDirectory({ state, onOpen, onCreate }: { state: LoadState<Room[]>; onOpen: (room: Room) => void; onCreate: () => void }) {
+  const { t } = useT();
   return (
     <section className="panel room-list room-directory" aria-label="Room directory">
       <div className="section-heading">
-        <p className="eyebrow">PUBLIC DISCUSSIONS</p>
-        <button className="primary compact" onClick={onCreate}>+ New room</button>
+        <p className="eyebrow">{t('rooms.directory.sectionEyebrow')}</p>
+        <button className="primary compact" onClick={onCreate}>{t('rooms.newRoom')}</button>
       </div>
-      <StateList state={state} emptyTitle="No rooms yet" emptyText="Create the first public discussion for registered participants.">
+      <StateList state={state} emptyTitle={t('rooms.noRoomsTitle')} emptyText={t('rooms.noRoomsText')}>
         <div className="room-grid">
           {state.data.map(room => {
             const { archetype, description } = resolveRoomArchetype(room);
@@ -46,13 +48,14 @@ export function RoomDirectory({ state, onOpen, onCreate }: { state: LoadState<Ro
 
 /** The room feed (MessageList, #18 behaviour), reports and the composer; the header lives in the screen layer. */
 export function RoomConversation({ api, agents, cards, room, messages, onSend, onLoadMore, hasMore }: { api: OlimpyxApi; agents: Profile[]; cards: KnowledgeCard[]; room: Room; messages: LoadState<Message[]>; onSend: (body: string) => Promise<void>; onLoadMore: () => Promise<void>; hasMore: boolean }) {
+  const { t } = useT();
   const [sentCount, setSentCount] = useState(0);
   const publicAgents: PublicAgent[] = agents.map(agent => ({ ...agent, created_at: agent.last_seen_at ?? '' }));
   const publicCards: PublicKnowledgeCard[] = cards.map(card => ({ card_id: card.card_id, created_at: card.created_at, latest: { ...card.latest, author: { actor_type: 'agent', agent_id: card.latest.author_agent_id, display_name: agents.find(agent => agent.agent_id === card.latest.author_agent_id)?.name ?? card.latest.author_agent_id }, reviews: [] } }));
   return (
     <section className="panel conversation" aria-label="Conversation">
       <MessageList roomId={room.room_id} messages={messages.data} sentCount={sentCount}>
-        {hasMore && <button className="secondary compact" onClick={() => void onLoadMore()}>Load earlier messages</button>}
+        {hasMore && <button className="secondary compact" onClick={() => void onLoadMore()}>{t('rooms.conversation.loadEarlier')}</button>}
         {messages.loading && <Loading />}
         {messages.error && <ErrorText text={messages.error} />}
         {!messages.loading && !messages.error && (messages.data.length ? messages.data.map(message => (
@@ -65,11 +68,11 @@ export function RoomConversation({ api, agents, cards, room, messages, onSend, o
                 <time>{ago(message.created_at)}</time>
               </div>
               <p>{linkedBody(message.body, publicAgents, publicCards, route => { window.history.pushState(null, '', hrefFor(route)); window.dispatchEvent(new PopStateEvent('popstate')); })}</p>
-              {message.reply_to_message_id && <a className="message-reference" href={`#message-${encodeURIComponent(message.reply_to_message_id)}`}>Reply to message {message.reply_to_message_id}</a>}
+              {message.reply_to_message_id && <a className="message-reference" href={`#message-${encodeURIComponent(message.reply_to_message_id)}`}>{t('shared.messageList.reply', { id: message.reply_to_message_id })}</a>}
               <ReportButton api={api} target={{ kind: 'message', id: message.message_id }} />
             </div>
           </article>
-        )) : <Empty title="No messages yet" text="Start the discussion as a human participant." />)}
+        )) : <Empty title={t('rooms.noMessagesTitle')} text={t('rooms.noMessagesText')} />)}
       </MessageList>
       <Composer onSend={async body => { await onSend(body); setSentCount(count => count + 1); }} />
     </section>

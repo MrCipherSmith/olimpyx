@@ -27,6 +27,7 @@ import { messageFrom } from './lib/format';
 import { empty, type LoadState } from './lib/loadState';
 import { hrefFor, screenFor } from './lib/navigation';
 import { initialNetworkStatus, nextNetworkStatus, nextPollNetworkStatus } from './lib/networkStatus';
+import { useT } from './i18n';
 
 const NO_ACTIVITY: InhabitantActivityInput[] = [];
 
@@ -68,6 +69,7 @@ interface ParticipantAppProps {
 
 /** The signed-in shell: the route and the participant's private data. */
 function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost }: ParticipantAppProps) {
+  const { t } = useT();
   const [rooms, setRooms] = useState(empty<Room[]>([]));
   // The participant's city (with the owner-only Praetorium): drawn by CityView and the dive targets.
   const scene = useMemo(() => buildCityScene(rooms.data, { includePraetorium: true }), [rooms.data]);
@@ -183,29 +185,34 @@ function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost
   const screen = screenFor(route);
   const roomCount = loadedCount(rooms);
   const knownAgents = loadedCount(agents) === null ? null : agents.data;
-  const refresh = <button className="secondary compact" onClick={() => void load()}>↻ Refresh</button>;
+  const refresh = <button className="secondary compact" onClick={() => void load()}>↻ {t('app.refresh')}</button>;
   const room = selectedRoom;
   // Until the selected room's first page is requested, `messages` may still hold the previous room.
   const roomMessages = messagesRoomId === selectedRoomId ? messages : { data: [], loading: true, error: null };
+  const agentsOnlineLabel = knownAgents ? t('hud.badge.agentsOnline', { online: knownAgents.filter(agent => agent.presence === 'online').length, total: knownAgents.length }) : null;
   const hud = <CityHud
-    navLabel="Main navigation"
-    eyebrow="Participant observatory"
+    navLabel={t('nav.main')}
+    eyebrow={t('hud.eyebrow.participant')}
     network={network}
     activeView={route.view}
     onNavigate={navigate}
     items={[
-      { view: 'overview', label: 'Overview', icon: '◫', badge: '3D', badgeLabel: 'The city map' },
-      { view: 'rooms', label: 'Rooms', icon: '#', ...countBadge(roomCount, 'room', 'rooms') },
-      { view: 'agents', label: 'Agents', icon: '⦾', ...agentsBadge(knownAgents) },
-      { view: 'knowledge', label: 'Knowledge', icon: '◈', ...countBadge(cardTotal, 'knowledge card', 'knowledge cards') },
-      { view: 'owner', label: 'Owner controls', icon: '⚿' },
+      { view: 'overview', label: t('hud.navItems.overview'), icon: '◫', badge: '3D', badgeLabel: t('hud.badge.map') },
+      { view: 'rooms', label: t('hud.navItems.rooms'), icon: '#', ...countBadge(roomCount, t('hud.badge.room'), t('hud.badge.rooms')) },
+      { view: 'agents', label: t('hud.navItems.agents'), icon: '⦾', ...agentsBadge(knownAgents, agentsOnlineLabel) },
+      { view: 'knowledge', label: t('hud.navItems.knowledge'), icon: '◈', ...countBadge(cardTotal, t('hud.badge.knowledgeCard'), t('hud.badge.knowledgeCards')) },
+      { view: 'owner', label: t('hud.navItems.owner'), icon: '⚿' },
     ]}
-    stats={[{ label: 'Rooms', value: roomCount }, { label: 'Avenues', value: roomCount === null ? null : avenues }, { label: 'Agents', value: knownAgents?.length ?? null }]}
+    stats={[
+      { label: t('hud.stats.rooms'), value: roomCount },
+      { label: t('hud.stats.avenues'), value: roomCount === null ? null : avenues },
+      { label: t('hud.stats.agents'), value: knownAgents?.length ?? null },
+    ]}
     account={<>
       <span className="owner-dot" aria-hidden="true">H</span>
-      <div><strong>{session.user.displayName}</strong><small>Human owner</small></div>
+      <div><strong>{session.user.displayName}</strong><small>{t('hud.account.humanOwner')}</small></div>
       {refresh}
-      <button className="icon-button" aria-label="Sign out" onClick={() => void logout()}>↪</button>
+      <button className="icon-button" aria-label={t('hud.account.signOut')} onClick={() => void logout()}>↪</button>
     </>}
   />;
 
@@ -213,23 +220,23 @@ function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost
     if (!screen) return null;
     const common = { kind: screen.kind, onBack: closeScreen };
     switch (screen.kind) {
-      case 'rooms': return <ScreenLayer {...common} eyebrow="Forum · room directory" title="Rooms" actions={refresh}>
+      case 'rooms': return <ScreenLayer {...common} eyebrow={t('rooms.directory.eyebrow')} title={t('rooms.title')} actions={refresh}>
         <RoomDirectory state={rooms} onOpen={openRoom} onCreate={() => setCreateRoomOpen(true)} />
       </ScreenLayer>;
-      case 'room': return <ScreenLayer {...common} eyebrow="Room" title={room?.title ?? 'Room'}
-        badges={room && <RoomBadges room={room} agents={knownAgents} access="Registered only" />}
+      case 'room': return <ScreenLayer {...common} eyebrow={t('rooms.roomEyebrow')} title={room?.title ?? t('rooms.roomEyebrow')}
+        badges={room && <RoomBadges room={room} agents={knownAgents} access="participant" />}
         subline={room && <RoomSubline room={room} />}
-        actions={<><RouteLink className="secondary compact" route={{ view: 'rooms' }} onNavigate={navigate}>All rooms</RouteLink>{refresh}</>}>
+        actions={<><RouteLink className="secondary compact" route={{ view: 'rooms' }} onNavigate={navigate}>{t('rooms.allRooms')}</RouteLink>{refresh}</>}>
         {room ? <RoomConversation api={api} agents={agents.data} cards={cards.data} room={room} messages={roomMessages} onLoadMore={loadEarlierMessages} hasMore={Boolean(messageCursor)} onSend={sendMessage} />
-          : rooms.loading ? <Loading /> : rooms.error ? <ErrorText text={rooms.error} /> : <Empty title="Room unavailable" text="This room is not visible to your account." />}
+          : rooms.loading ? <Loading /> : rooms.error ? <ErrorText text={rooms.error} /> : <Empty title={t('rooms.roomUnavailable')} text={t('rooms.roomUnavailableText')} />}
       </ScreenLayer>;
-      case 'knowledge': return <ScreenLayer {...common} eyebrow="Forum · Central Library" title="Central Library of Knowledge" actions={refresh}>
+      case 'knowledge': return <ScreenLayer {...common} eyebrow={t('knowledge.eyebrow')} title={t('knowledge.title')} actions={refresh}>
         <KnowledgePanel state={cards} api={api} agents={agents.data} selectedCardId={route.cardId} searchNotice={knowledgeSearchNotice} onSelectCard={cardId => navigate({ view: 'knowledge', cardId })} onSelectAgent={agentId => navigate({ view: 'agents', agentId })} onSearch={searchCards} />
       </ScreenLayer>;
-      case 'agents': return <ScreenLayer {...common} eyebrow="Forum · Pantheon" title="Pantheon of Agents" actions={refresh}>
+      case 'agents': return <ScreenLayer {...common} eyebrow={t('agents.eyebrow')} title={t('agents.title')} actions={refresh}>
         <AgentsPanel api={api} state={agents} selectedId={route.agentId} onSelect={agentId => navigate({ view: 'agents', agentId })} />
       </ScreenLayer>;
-      case 'owner': return <ScreenLayer {...common} eyebrow="Praetorium" title="Owner controls">
+      case 'owner': return <ScreenLayer {...common} eyebrow={t('owner.eyebrow')} title={t('owner.title')}>
         <OwnerPanel api={api} />
       </ScreenLayer>;
     }
