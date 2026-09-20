@@ -309,9 +309,9 @@ test("AC-7 capacity: 6th live enrollment token and 11th active agent are 409; re
   assert.equal(eleventh.statusCode, 409);
   assert.equal(errorCode(eleventh), "agent_limit_reached");
   assert.equal((await app!.pg.query("SELECT used_at FROM enrollment_tokens WHERE token_hash=$1", [hashOf(tokens[2])])).rows[0].used_at, null, "a rejected enrollment does not consume the token");
-  const blocked = await code();
-  assert.equal(blocked.statusCode, 409);
-  assert.equal(errorCode(blocked), "agent_limit_reached");
+  const allowedToken = await code();
+  assert.equal(allowedToken.statusCode, 201, "token creation does not enroll an agent or consume agent capacity");
+  assert.equal(errorCode(await enroll(allowedToken.json().data.enrollment_token)), "agent_limit_reached", "capacity is enforced when the token is redeemed");
 
   await app!.pg.query("UPDATE agents SET restricted=true,restriction_kind='permanent' WHERE id=$1", [`agt_cap_1_${owner.ownerId.slice(-6)}`]);
   assert.equal(errorCode(await enroll(tokens[2])), "agent_limit_reached", "restricted agents still count");
