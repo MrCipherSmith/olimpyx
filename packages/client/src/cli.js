@@ -6,6 +6,10 @@ import { OlimpyxClient } from './client.js';
 import { LocalState } from './state.js';
 import { ParticipationSession } from './session.js';
 import { loadBudget, saveBudget, enforceSendBudget, recordSend, checkSessionBudget, checkSessionBeginBudget, recordSessionEnd, OlimpyxBudgetExceededError } from './budget.js';
+import { addAgentFromCatalog, readOwnerStatus } from './init-apply.js';
+import { runInit } from './init.js';
+import { searchCharacters } from './characters.js';
+import { ownerHome, readVault } from './vault.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -46,9 +50,18 @@ async function mutation(client, method, path, body, explicitKey) {
   await state.completeMutation(pending.fingerprint);
   return result;
 }
+async function loadVaultOwnerToken() {
+  try { return (await readVault()).owner?.access_token ?? null; } catch { return null; }
+}
 async function tryLoadOwnerToken() {
   if (process.env.OLIMPYX_OWNER_TOKEN) return process.env.OLIMPYX_OWNER_TOKEN;
-  try { return await state.loadOwnerCredential(); } catch { return null; }
+  try { return await state.loadOwnerCredential(); } catch { /* fall through to vault */ }
+  return loadVaultOwnerToken();
+}
+async function ownerServerUrl() {
+  const local = await state.loadConfig();
+  if (local.serverUrl) return local.serverUrl;
+  try { return JSON.parse(await readFile(join(ownerHome(), 'config.json'), 'utf8')).serverUrl; } catch { return null; }
 }
 // Resolves this agent's own owner id for the local budget's owner-scoping (budget.js
 // isOwnTaskRoom/evaluateHelpPolicy, PRD §3.4): `enroll`/`owner-login` normally already
@@ -72,10 +85,11 @@ async function resolveOwnerId(config) {
   }
 }
 async function requireOwnerClient() {
-  const ownerToken = process.env.OLIMPYX_OWNER_TOKEN || await state.loadOwnerCredential();
-  const config = await state.loadConfig();
-  if (!config.serverUrl) throw new Error('Not configured. Run: olimpyx configure --server URL');
-  return new OlimpyxClient({ serverUrl: config.serverUrl, token: ownerToken });
+  const ownerToken = await tryLoadOwnerToken();
+  const serverUrl = await ownerServerUrl();
+  if (!serverUrl) throw new Error('Not configured. Run: olimpyx init');
+  if (!ownerToken) throw new Error('No owner credential. Run olimpyx init or owner-login.');
+  return new OlimpyxClient({ serverUrl, token: ownerToken });
 }
 // Best-effort so the server can prune acknowledged inbox events (PRD §3.3); a failure
 // here must never interrupt the caller, which has already persisted the cursor locally.
@@ -115,6 +129,18 @@ async function parseJsonOrList(value) {
 }
 
 async function main() {
+  if (command === 'init') {
+    await runInit();
+    return;
+  }
+  if (command === 'status') {
+    output(await readOwnerStatus());
+    return;
+  }
+  if (command === 'skill') {
+    process.stdout.write(await readFile(join(ownerHome(), 'skill.md'), 'utf8'));
+    return;
+  }
   if (command === 'configure') {
     const serverUrl = option('server'); if (!serverUrl) throw new Error('--server URL is required');
     const current = await state.loadConfig(); output(await state.saveConfig({ ...current, serverUrl })); return;
@@ -1017,6 +1043,18 @@ async function main() {
   }
   if (command === 'agent') {
     const action = args.shift();
+    if (action === 'add') {
+      const query = option('search');
+      if (query && query !== true) {
+        output(searchCharacters(query).map(({ id, name, cluster, role, tags }) => ({ id, name, cluster, role, tags })));
+        return;
+      }
+      const id = args.shift();
+      if (!id) throw new Error('agent add <id> or agent add --search QUERY');
+      const enrolled = await addAgentFromCatalog(id);
+      output({ id: enrolled.id, agent_id: enrolled.agent_id, home: enrolled.home });
+      return;
+    }
     if (action === 'stop') {
       const agentId = args.shift();
       if (!agentId) throw new Error('agent stop requires <agentId>');
@@ -1026,7 +1064,7 @@ async function main() {
       output(await client.stopAgent(agentId, { reason }, explicitKey));
       return;
     }
-    throw new Error('agent actions: stop <agentId> [--reason TEXT]');
+    throw new Error('agent actions: add <id> | add --search QUERY | stop <agentId> [--reason TEXT]');
   }
   if (command === 'usage') {
     const callerId = option('caller-id');
@@ -1096,7 +1134,7 @@ async function main() {
     }
     throw new Error('task actions: decline <taskId> --reason TEXT');
   }
-  process.stdout.write('Usage: olimpyx configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task\n');
+  process.stdout.write('Usage: olimpyx init|status|skill|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

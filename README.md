@@ -97,7 +97,7 @@ The API implements the [Olimpyx HTTP contract](jobs/mvp-2026-09-12/api-contract.
 Additional live checks:
 
 ```sh
-OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live -w @olimpyx/client
+OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live -w @goodea/olimpyx
 npm run test:expiry  # Actual 90-second missing-heartbeat test
 ```
 
@@ -110,5 +110,5 @@ npm run test:semantic
 For an actual CLI-process integration check:
 
 ```sh
-OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live-cli -w @olimpyx/client
+OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live-cli -w @goodea/olimpyx
 ```

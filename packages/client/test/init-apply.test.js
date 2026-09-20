@@ -1,0 +1,123 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { applyInit, friendlyInitError, readOwnerStatus, summarizePlan } from '../src/init-apply.js';
+import { readVault } from '../src/vault.js';
+
+function mockFetch() {
+  let enrolls = 0;
+  return async (url, opts) => {
+    const u = String(url);
+    const headers = { 'content-type': 'application/json' };
+    if (u.endsWith('/v1/owners/register') || u.endsWith('/v1/owners/login')) {
+      const body = JSON.parse(opts.body);
+      return new Response(JSON.stringify({
+        data: {
+          owner: { owner_id: 'own_1', email: body.email, display_name: body.display_name || 'Owner' },
+          access_token: 'owner-access-token-secret',
+          expires_at: '2099-01-01T00:00:00Z'
+        }
+      }), { status: u.endsWith('register') ? 201 : 200, headers });
+    }
+    if (u.includes('/v1/owners/me/enrollment-tokens')) {
+      return new Response(JSON.stringify({ data: { enrollment_token: 'one-use-enrollment-secret', expires_at: '2099-01-01T00:00:00Z' } }), { status: 201, headers });
+    }
+    if (u.endsWith('/v1/agents/enroll')) {
+      enrolls += 1;
+      return new Response(JSON.stringify({
+        data: {
+          agent: { agent_id: `agt_${enrolls}`, profile_revision: 1 },
+          agent_token: `agent-token-secret-${enrolls}`,
+          created_at: '2026-09-20T00:00:00Z'
+        }
+      }), { status: 201, headers });
+    }
+    return new Response(JSON.stringify({ error: { message: 'missing' } }), { status: 404, headers });
+  };
+}
+
+test('friendly errors stay human and do not echo secrets', () => {
+  assert.match(friendlyInitError({ status: 409 }), /уже зарегистрирован/);
+  assert.match(friendlyInitError({ status: 401 }), /пароль/);
+  assert.equal(friendlyInitError({ status: 401, message: 'owner-access-token-secret' }).includes('owner-access-token-secret'), false);
+});
+
+test('summary lists path and selected characters without the password', () => {
+  const text = summarizePlan({
+    serverUrl: 'https://olimpyx.mrciphersmith.com',
+    mode: 'register',
+    email: 'owner@example.test',
+    password: 'twelvecharsxx',
+    displayName: 'Ada',
+    skillScope: 'local',
+    projectPath: '/tmp/city',
+    hosts: ['claude'],
+    characterIds: ['prometheus', 'themis']
+  });
+  assert.match(text, /\/tmp\/city/);
+  assert.match(text, /Prometheus/);
+  assert.match(text, /Themis/);
+  assert.equal(text.includes('twelvecharsxx'), false);
+});
+
+test('applyInit writes an encrypted vault, catalog, thin skill and enrolled agents', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'olimpyx-home-'));
+  const project = await mkdtemp(join(tmpdir(), 'olimpyx-proj-'));
+  const env = { HOME: home };
+  const result = await applyInit({
+    serverUrl: 'https://mock.test',
+    mode: 'register',
+    email: 'owner@example.test',
+    password: 'twelvecharsxx',
+    displayName: 'Ada Lovelace',
+    skillScope: 'local',
+    projectPath: project,
+    hosts: ['claude', 'codex'],
+    characterIds: ['prometheus', 'themis']
+  }, { env, fetchImpl: mockFetch() });
+
+  const vault = await readVault(env);
+  assert.equal(vault.owner.password, 'twelvecharsxx');
+  assert.equal(vault.owner.access_token, 'owner-access-token-secret');
+  assert.equal(vault.agents.prometheus.agent_id, 'agt_1');
+  const configText = await readFile(join(home, '.olimpyx', 'config.json'), 'utf8');
+  assert.equal(configText.includes('twelvecharsxx'), false);
+  assert.equal(configText.includes('owner-access-token-secret'), false);
+  assert.equal((await readFile(join(home, '.olimpyx', 'vault.enc'), 'utf8')).includes('twelvecharsxx'), false);
+
+  assert.match(await readFile(join(home, '.olimpyx', 'characters', 'INDEX.md'), 'utf8'), /prometheus/);
+  assert.match(await readFile(join(project, '.olimpyx', 'characters', 'INDEX.md'), 'utf8'), /themis/);
+  assert.match(await readFile(join(home, '.olimpyx', 'skill.md'), 'utf8'), /olimpyx listen/);
+  const starter = await readFile(join(project, '.claude/skills/olimpyx-participant/SKILL.md'), 'utf8');
+  assert.match(starter, /olimpyx status/);
+  assert.equal(starter.includes('node scripts/client/cli.js'), false);
+  await readFile(join(project, '.agents/skills/olimpyx-participant/SKILL.md'), 'utf8');
+
+  const cred = join(result.enrolled[0].home, 'credential');
+  assert.equal((await stat(cred)).mode & 0o777, 0o600);
+  assert.equal(await readFile(cred, 'utf8'), 'agent-token-secret-1');
+
+  const status = await readOwnerStatus(env);
+  assert.equal(status.initialized, true);
+  assert.equal(status.email, 'owner@example.test');
+  assert.equal(status.agents.length, 2);
+});
+
+test('global skill scope installs under HOME and skips the project catalog', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'olimpyx-home-'));
+  const env = { HOME: home };
+  await applyInit({
+    serverUrl: 'https://mock.test',
+    mode: 'login',
+    email: 'owner@example.test',
+    password: 'twelvecharsxx',
+    skillScope: 'global',
+    projectPath: '/tmp/unused',
+    hosts: ['claude'],
+    characterIds: []
+  }, { env, fetchImpl: mockFetch() });
+  await readFile(join(home, '.claude/skills/olimpyx-participant/SKILL.md'), 'utf8');
+  await readFile(join(home, '.olimpyx', 'characters', 'INDEX.md'), 'utf8');
+});

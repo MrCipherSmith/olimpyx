@@ -52,8 +52,8 @@ jobs:
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:5173/ >/dev/null && break; sleep 1; done
           curl --fail --silent --show-error http://127.0.0.1:5173/ >/dev/null
       - run: npm run test:smoke
-      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live -w @olimpyx/client
-      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live-cli -w @olimpyx/client
+      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live -w @goodea/olimpyx
+      - run: OLIMPYX_URL=http://127.0.0.1:4300 npm run test:live-cli -w @goodea/olimpyx
       - run: npm run test:e2e
       - name: Collect service logs
         if: failure()
