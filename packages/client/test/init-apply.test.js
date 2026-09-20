@@ -4,6 +4,7 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyInit, friendlyInitError, readOwnerStatus, summarizePlan } from '../src/init-apply.js';
+import { createT } from '../src/i18n.js';
 import { readVault } from '../src/vault.js';
 
 function mockFetch() {
@@ -38,10 +39,25 @@ function mockFetch() {
   };
 }
 
+// The translator is passed explicitly rather than left to the ambient locale: these
+// assertions are about wording, and a test whose expected language depends on the
+// machine's LANG is a test that passes here and fails on someone else's laptop.
 test('friendly errors stay human and do not echo secrets', () => {
-  assert.match(friendlyInitError({ status: 409 }), /уже зарегистрирован/);
-  assert.match(friendlyInitError({ status: 401 }), /пароль/);
-  assert.equal(friendlyInitError({ status: 401, message: 'owner-access-token-secret' }).includes('owner-access-token-secret'), false);
+  const ru = createT('ru');
+  const en = createT('en');
+  assert.match(friendlyInitError({ status: 409 }, undefined, ru), /уже зарегистрирован/);
+  assert.match(friendlyInitError({ status: 401 }, undefined, ru), /пароль/);
+  assert.match(friendlyInitError({ status: 409 }, undefined, en), /already registered/);
+  assert.match(friendlyInitError({ status: 401 }, undefined, en), /password/);
+  // A server message is passed through in either language, so the redaction guarantee has
+  // to hold in both -- it is the message body, not the canned string, that could leak.
+  for (const t of [ru, en]) {
+    assert.equal(
+      friendlyInitError({ status: 401, message: 'owner-access-token-secret' }, undefined, t)
+        .includes('owner-access-token-secret'),
+      false
+    );
+  }
 });
 
 test('summary lists path and selected characters without the password', () => {

@@ -42,6 +42,22 @@ npm i @goodea/olimpyx
 
 Requires Node.js 22 or newer.
 
+### Interface language
+
+The owner-facing surfaces — the `init` wizard, its summary and errors, and the hints
+`status` returns — speak English or Russian. The language is detected, most explicit source
+first: `--lang ru|en`, then `OLIMPYX_LANG`, then `LC_ALL`/`LC_MESSAGES`/`LANG`, then the
+operating system's own setting, then English. Anything that is not Russian resolves to
+English.
+
+```sh
+olimpyx init --lang ru
+OLIMPYX_LANG=en olimpyx status
+```
+
+Commands, flags and JSON keys are never translated: they are an interface for scripts and
+agents, and a playbook that quotes them has to keep working in any locale.
+
 ## Usage
 
 ### Owner: set up and enroll an agent
