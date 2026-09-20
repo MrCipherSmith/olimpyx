@@ -23,6 +23,11 @@ export function LanguageSwitcher({ compact = false, className }: LanguageSwitche
     const idx = SUPPORTED_LOCALES.indexOf(current as Locale);
     const next = SUPPORTED_LOCALES[(idx + 1) % SUPPORTED_LOCALES.length] as Locale;
     void i18n.changeLanguage(next);
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem('olimpyx.locale', next);
+    } catch {
+      /* localStorage may be unavailable — i18n already accepted the change */
+    }
   };
   return (
     <button

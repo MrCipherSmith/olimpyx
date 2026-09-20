@@ -1,5 +1,4 @@
 import i18n from 'i18next';
-import LanguageDetector from 'i18next-browser-languagedetector';
 import { initReactI18next, useTranslation } from 'react-i18next';
 import {
   DEFAULT_LOCALE,
@@ -7,33 +6,52 @@ import {
   NAMESPACES,
   STORAGE_KEY,
   SUPPORTED_LOCALES,
+  type Locale,
 } from './config';
 import enCommon from './locales/en/common.json';
 import ruCommon from './locales/ru/common.json';
 
 const isDev = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
 
+/**
+ * Resolve the initial locale without racing against an async detector.
+ *
+ * Detection order:
+ *   1. `localStorage['olimpyx.locale']` if it holds a supported code (`ru` / `en`)
+ *   2. `DEFAULT_LOCALE` (`ru`)
+ *
+ * Browser `navigator.language` is intentionally NOT consulted. Olimpyx is a Russian-first
+ * product and the empty-localStorage path must fall back to Russian deterministically —
+ * otherwise a Playwright headless navigator='en-US' or a casual English-speaking visitor
+ * would silently land on the English UI without ever being told they had a choice.
+ */
+function detectInitialLocale(): Locale {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored === 'ru' || stored === 'en') return stored;
+    }
+  } catch {
+    /* localStorage can throw in SSR / sandboxed environments — ignore */
+  }
+  return DEFAULT_LOCALE;
+}
+
+const initialLocale = detectInitialLocale();
+
 void i18n
-  .use(LanguageDetector)
   .use(initReactI18next)
   .init({
     resources: {
       en: { common: enCommon },
       ru: { common: ruCommon },
     },
+    lng: initialLocale,
     fallbackLng: DEFAULT_LOCALE,
     supportedLngs: SUPPORTED_LOCALES as unknown as string[],
-    // Treat navigator-only detections (e.g. `en-US`) as non-explicit so the default falls back to `ru`.
-    // Only an explicit user choice (saved in localStorage as `ru`/`en`) keeps the alternate locale.
-    nonExplicitSupportedLngs: false,
     ns: NAMESPACES as unknown as string[],
     defaultNS: DEFAULT_NAMESPACE,
     load: 'languageOnly',
-    detection: {
-      order: ['localStorage', 'navigator'],
-      lookupLocalStorage: STORAGE_KEY,
-      caches: ['localStorage'],
-    },
     interpolation: { escapeValue: false },
     react: { useSuspense: false },
     saveMissing: isDev,
@@ -44,11 +62,11 @@ void i18n
 
 const syncDocumentLang = (lng: string) => {
   if (typeof document === 'undefined') return;
-  document.documentElement.lang = lng;
+  document.documentElement.lang = lng || DEFAULT_LOCALE;
 };
 
 i18n.on('languageChanged', syncDocumentLang);
-syncDocumentLang(i18n.language || DEFAULT_LOCALE);
+syncDocumentLang(initialLocale);
 
 export { i18n };
 
