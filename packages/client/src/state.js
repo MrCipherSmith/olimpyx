@@ -13,11 +13,31 @@ async function atomicJson(path, value, mode = 0o600) {
   await rename(temp, path);
 }
 
+// Sanitise caller-id for use as a directory segment. A caller-id is generated
+// by the participant as e.g. `caller-helios-<pid>-<unix>`, so it normally
+// contains only [a-z0-9-]. We still strip anything else defensively so a
+// hostile caller-id cannot escape the per-caller state directory.
+function safeCallerId(callerId) {
+  if (typeof callerId !== 'string' || !callerId.trim()) return null;
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(callerId)) return null;
+  return callerId;
+}
+
 export class LocalState {
   constructor(root) { this.root = root; }
   async init() {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await mkdir(join(this.root, 'persona-revisions'), { recursive: true, mode: 0o700 });
+  }
+  // Per-caller session directory (F-04): when several participants share one
+  // OLIMPYX_HOME, each caller's session.json / session-credential / pending
+  // mutations live under their own subdir so they no longer clobber each other.
+  async callerDir(callerId) {
+    const id = safeCallerId(callerId);
+    if (!id) return this.root;
+    const dir = join(this.root, 'calls', id);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    return dir;
   }
   async loadConfig() { return readJson(join(this.root, 'config.json'), {}); }
   async saveConfig(config) { await this.init(); await atomicJson(join(this.root, 'config.json'), config); return config; }
@@ -34,46 +54,52 @@ export class LocalState {
     await this.init(); const path = join(this.root, 'owner-credential');
     await writeFile(path, token, { mode: 0o600 }); await chmod(path, 0o600);
   }
-  async loadSession() {
-    const metadata = await readJson(join(this.root, 'session.json'), null);
+  async loadSession(callerId) {
+    const dir = await this.callerDir(callerId);
+    const metadata = await readJson(join(dir, 'session.json'), null);
     if (!metadata) return null;
-    return { ...metadata, token: (await readFile(join(this.root, 'session-credential'), 'utf8')).trim() };
+    return { ...metadata, token: (await readFile(join(dir, 'session-credential'), 'utf8')).trim() };
   }
   async saveSession(session, callerId, callerLeaseMs = 75_000) {
     if (!session?.session_id || !session?.session_token || !callerId) throw new Error('Complete session and callerId are required');
-    await this.init();
-    const credentialPath = join(this.root, 'session-credential');
+    const dir = await this.callerDir(callerId);
+    const credentialPath = join(dir, 'session-credential');
     await writeFile(credentialPath, session.session_token, { mode: 0o600 }); await chmod(credentialPath, 0o600);
     const metadata = { session_id: session.session_id, expires_at: session.expires_at, caller_id: callerId, caller_deadline: new Date(Date.now() + Math.min(callerLeaseMs, 85_000)).toISOString(), inbox_cursor: session.inbox_cursor ?? null };
-    await atomicJson(join(this.root, 'session.json'), metadata); return metadata;
+    await atomicJson(join(dir, 'session.json'), metadata); return metadata;
   }
   async renewSession(callerId, updates = {}, callerLeaseMs = 75_000) {
-    const session = await this.loadSession();
+    const session = await this.loadSession(callerId);
     if (!session) throw new Error('No local session. Run session begin first.');
     if (session.caller_id !== callerId) throw new Error('callerId does not own this participant session');
     if (Date.parse(session.caller_deadline) <= Date.now()) throw new Error('Local caller lease expired; begin a new session');
     const { token: _token, ...metadata } = session;
     const next = { ...metadata, ...updates, caller_deadline: new Date(Date.now() + Math.min(callerLeaseMs, 85_000)).toISOString() };
-    await atomicJson(join(this.root, 'session.json'), next); return next;
+    const dir = await this.callerDir(callerId);
+    await atomicJson(join(dir, 'session.json'), next); return next;
   }
-  async clearSession() { await Promise.all([rm(join(this.root, 'session.json'), { force: true }), rm(join(this.root, 'session-credential'), { force: true })]); }
-  async beginMutation(method, path, body, explicitKey) {
+  async clearSession(callerId) {
+    const dir = await this.callerDir(callerId);
+    await Promise.all([rm(join(dir, 'session.json'), { force: true }), rm(join(dir, 'session-credential'), { force: true })]);
+  }
+  async beginMutation(method, path, body, explicitKey, callerId) {
     if (explicitKey !== undefined) {
       if (typeof explicitKey !== 'string' || !explicitKey.trim()) throw new Error('--idempotency-key must be a non-empty value');
       return { fingerprint: null, key: explicitKey };
     }
-    await this.init();
+    const dir = await this.callerDir(callerId);
     const fingerprint = createHash('sha256').update(JSON.stringify({ method: method.toUpperCase(), path, body: body ?? null })).digest('hex');
-    const pending = await readJson(join(this.root, 'pending-mutations.json'), {});
+    const pending = await readJson(join(dir, 'pending-mutations.json'), {});
     if (!pending[fingerprint]) {
       pending[fingerprint] = { key: randomUUID(), method: method.toUpperCase(), path, created_at: new Date().toISOString() };
-      await atomicJson(join(this.root, 'pending-mutations.json'), pending);
+      await atomicJson(join(dir, 'pending-mutations.json'), pending);
     }
     return { fingerprint, key: pending[fingerprint].key };
   }
-  async completeMutation(fingerprint) {
+  async completeMutation(fingerprint, callerId) {
     if (!fingerprint) return;
-    const path = join(this.root, 'pending-mutations.json');
+    const dir = await this.callerDir(callerId);
+    const path = join(dir, 'pending-mutations.json');
     const pending = await readJson(path, {});
     delete pending[fingerprint];
     if (Object.keys(pending).length === 0) await rm(path, { force: true });

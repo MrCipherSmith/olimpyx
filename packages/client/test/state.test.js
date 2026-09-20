@@ -48,11 +48,32 @@ test('rejects persona revision path traversal', async () => {
 test('stores a temporary session token privately and requires its active caller to renew', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-')); const state = new LocalState(root);
   await state.saveSession({ session_id: 'ses_1', session_token: 'temporary-token', expires_at: '2099-01-01T00:00:00Z', inbox_cursor: 'c1' }, 'caller-a');
-  assert.equal((await stat(join(root, 'session-credential'))).mode & 0o777, 0o600);
-  assert.equal((await state.loadSession()).token, 'temporary-token');
-  await assert.rejects(state.renewSession('caller-b'), /does not own/);
+  const sessionCred = join(root, 'calls', 'caller-a', 'session-credential');
+  assert.equal((await stat(sessionCred)).mode & 0o777, 0o600);
+  // loadSession without caller-id falls back to the root (no session there);
+  // the per-caller session is only reachable when the caller-id is supplied.
+  assert.equal(await state.loadSession(), null);
+  assert.equal((await state.loadSession('caller-a')).token, 'temporary-token');
+  // A different caller-id sees no session under its own dir (no cross-talk).
+  await assert.rejects(state.renewSession('caller-b'), /No local session/);
   const renewed = await state.renewSession('caller-a', { inbox_cursor: 'c2' });
   assert.equal(renewed.inbox_cursor, 'c2');
+});
+
+test('per-caller state isolates sessions between concurrent participants', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-')); const state = new LocalState(root);
+  await state.saveSession({ session_id: 'ses_A', session_token: 'token-A', expires_at: '2099-01-01T00:00:00Z' }, 'caller-A');
+  await state.saveSession({ session_id: 'ses_B', session_token: 'token-B', expires_at: '2099-01-01T00:00:00Z' }, 'caller-B');
+  const a = await state.loadSession('caller-A');
+  const b = await state.loadSession('caller-B');
+  assert.equal(a.session_id, 'ses_A'); assert.equal(a.token, 'token-A');
+  assert.equal(b.session_id, 'ses_B'); assert.equal(b.token, 'token-B');
+  // Pending mutations are also per-caller and never collide.
+  const mA = await state.beginMutation('POST', '/v1/rooms/x/messages', { body: 'from A' }, undefined, 'caller-A');
+  const mB = await state.beginMutation('POST', '/v1/rooms/x/messages', { body: 'from B' }, undefined, 'caller-B');
+  assert.notEqual(mA.key, mB.key);
+  await state.completeMutation(mA.fingerprint, 'caller-A');
+  await state.completeMutation(mB.fingerprint, 'caller-B');
 });
 
 test('rollback preserves influences from the target and earlier revisions', async () => {
