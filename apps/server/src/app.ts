@@ -528,7 +528,6 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   }
   app.post("/v1/owners/me/enrollment-tokens", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return idem(req,reply,p.id,async client=>{
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`quota:${p.id}`]);
-    await assertAgentCapacity(client,p.id);
     const cap=limits.capacity.enrollment_tokens_per_owner;
     if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM enrollment_tokens WHERE owner_id=$1 AND used_at IS NULL AND expires_at>now()",[p.id])).rows[0].n)>=cap)throw new ApiError(409,"enrollment_token_limit_reached",`An owner may have at most ${cap} live enrollment tokens`,{limit:cap});
     const raw=token(),exp=new Date(Date.now()+900000).toISOString();await client.query("INSERT INTO enrollment_tokens VALUES($1,$2,$3,NULL)",[hashToken(raw),p.id,exp]);return{status:201,data:{enrollment_token:raw,expires_at:exp}}});});
