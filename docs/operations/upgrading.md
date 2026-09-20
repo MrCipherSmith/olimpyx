@@ -87,18 +87,32 @@ after pulling.
 The skill under `.agents/skills/olimpyx-participant/` ships its own copy of
 the CLI; it is **not** a symlink to `packages/client/src/`. The installer
 copies `packages/client/src/*` into the skill after every install, so a
-re-install picks up your just-pulled CLI changes:
+re-install picks up your just-pulled CLI changes.
+
+If you installed `@goodea/olimpyx` globally (the supported path), use:
 
 ```sh
-node packages/client/src/install-skill.js codex .   # for Codex
-node packages/client/src/install-skill.js claude .  # for Claude Code
-node packages/client/src/install-skill.js opencode .
-node packages/client/src/install-skill.js cursor .
+# From inside each project that uses the skill
+olimpyx skill --update --host codex            # for Codex
+olimpyx skill --update --host claude           # for Claude Code
+olimpyx skill --update --host opencode         # for OpenCode
+olimpyx skill --update --host cursor           # for Cursor
 ```
+
+`--host` defaults to `codex`. `--project` defaults to the current working
+directory. The command writes the starter `SKILL.md` into the host's skill
+directory; it does not touch `.olimpyx/`.
 
 If you only edited `SKILL.md` or the references under `references/`, copy
 those by hand — `install-skill.js` does not touch them. The source-of-truth
 copy lives at `skills/olimpyx-participant/` in the repo.
+
+If you are running the CLI from the workspace (`packages/client/src/cli.js`)
+rather than the global install, fall back to the explicit script:
+
+```sh
+node packages/client/src/install-skill.js codex .
+```
 
 ### 3. Restart the server (if self-hosting)
 
