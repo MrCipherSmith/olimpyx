@@ -81,9 +81,10 @@ test('CLI threads command requires --room and queries root messages', async () =
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-threads-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()
@@ -138,9 +139,11 @@ test('CLI read command supports --room and --thread options', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-read-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()
@@ -190,9 +193,11 @@ test('CLI message command sends --reply-to in payload and handles nonexistent pa
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-reply-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()

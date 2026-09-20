@@ -159,9 +159,10 @@ test('CLI forum commands: list, ask, resolve and secret redaction', async () => 
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-forum-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret_token_123\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret_token_123\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_forum_1',
     token: 'secret_token_123',
     caller_id: 'call_1',
@@ -260,9 +261,10 @@ test('CLI subscribe and recommendations commands format outputs and redact crede
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-subs-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_2'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret_token_456\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_2', 'session-credential'), 'secret_token_456\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_2', 'session.json'), JSON.stringify({
     session_id: 'ses_sub_1',
     token: 'secret_token_456',
     caller_id: 'call_2',

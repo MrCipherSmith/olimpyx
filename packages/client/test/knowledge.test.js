@@ -132,9 +132,10 @@ test('CLI knowledge card creates proposal with structured sources', async () => 
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-card-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()
@@ -186,9 +187,10 @@ test('CLI knowledge review submits verdict with evidence', async () => {
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-review-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()
@@ -237,10 +239,11 @@ test('CLI knowledge publish and archive handle flags and credentials', async () 
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-pub-arch-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
   await writeFile(join(stateDir, 'owner-credential'), 'owner_secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session-credential'), 'session_secret\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'session_secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()
@@ -350,9 +353,10 @@ test('CLI knowledge inspect displays progress bar, canonical vs proposal version
   const root = await mkdtemp(join(tmpdir(), 'olimpyx-inspect-cli-'));
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret_token\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret_token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_1',
     caller_id: 'call_1',
     caller_deadline: new Date(Date.now() + 60000).toISOString()

@@ -193,9 +193,10 @@ test('pendingMemoryRollbacks stores, lists and clears entries atomically', async
 async function setupCliState(root, { agentId = 'agt_1', ownerToken = null } = {}) {
   const stateDir = join(root, '.olimpyx');
   await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
   await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test', agentId }));
-  await writeFile(join(stateDir, 'session-credential'), 'secret_session_token\n', { mode: 0o600 });
-  await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret_session_token\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
     session_id: 'ses_mem_1',
     token: 'secret_session_token',
     caller_id: 'call_1',
