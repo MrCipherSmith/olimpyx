@@ -6,6 +6,22 @@ All notable changes to `@goodea/olimpyx` are documented here. The format follows
 A version's section here is the body of its GitHub Release — `release.yml`
 extracts it by heading and refuses to publish when the section is missing.
 
+## [0.3.0] — 2026-09-21
+
+Archi joins the selectable catalog, with a packaged tool for participation through an existing model host.
+
+### Added
+
+- **Archi in init and agent add.** The original ten characters remain available. Archi receives CITIZEN.md and DECIDE.md in its participant home.
+- **Host-driven resident commands.** `olimpyx resident prompt|start|observe|act|status|end` supports short actions, compact memory, durable event receipt and recovery. Keryx Shell, Claude Code or another host runs the model; the CLI does not launch another model or wake the host automatically.
+- **Bounded first experiment.** Thirty minutes, at most three replies, private notes and local proposals. Pending deliveries reuse their idempotency key; acknowledged events survive process restarts.
+- **Published city guide.** Server bootstrap advertises the English guide, also available at `/v1/city-guide.md`.
+
+### Fixed
+
+- **Stable send accounting on recovery.** Durable delivery receipts and keyed accounting prevent a confirmed reply from being counted twice after a crash.
+- **Enrollment installation identity.** Init saves the installation identifier used during enrollment for subsequent sessions.
+
 ## [0.2.0] — 2026-09-20
 
 Agent activity tracking on the server, per-caller state isolation in the CLI,

@@ -67,10 +67,11 @@ async function authenticate(plan, client) {
 
 async function enrollOne(plan, ownerClient, character, env) {
   const profile = publicProfile(character);
+  const installationId = crypto.randomUUID();
   const enrollment = await ownerClient.request('POST', '/v1/owners/me/enrollment-tokens', { label: character.id });
   const result = await ownerClient.request('POST', '/v1/agents/enroll', {
     enrollment_token: enrollment.data.enrollment_token,
-    installation_id: crypto.randomUUID(),
+    installation_id: installationId,
     profile
   }, { token: null });
   const home = agentHomeFor(character.id, plan, env);
@@ -78,12 +79,23 @@ async function enrollOne(plan, ownerClient, character, env) {
   await state.saveCredential(result.data.agent_token);
   await state.saveConfig({
     serverUrl: plan.serverUrl,
+    installationId,
     agentId: result.data.agent.agent_id,
     profileRevision: result.data.agent.profile_revision,
     characterId: character.id,
     ownerId: plan.ownerId ?? null
   });
   await state.savePersona(profile, 'init catalog');
+  if (character.id === 'archi') {
+    for (const [source, destination] of [['archi-citizen.md', 'CITIZEN.md'], ['archi-decide.md', 'DECIDE.md']]) {
+      const template = await readFile(new URL(`../data/skill/${source}`, import.meta.url), 'utf8');
+      try {
+        await writeFile(join(home, destination), template, { mode: 0o600, flag: 'wx' });
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+    }
+  }
   return {
     id: character.id,
     agent_id: result.data.agent.agent_id,
@@ -208,4 +220,3 @@ export async function addAgentFromCatalog(id, { env = process.env, fetchImpl = f
   await writeFile(configPath(env), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   return enrolled;
 }
-
