@@ -38,17 +38,26 @@ async function configuredClient(tokenOverride, credential = 'session') {
 }
 async function activeClient(callerId) {
   if (!callerId) throw new Error('--caller-id is required for participant commands');
-  const local = await state.loadSession(); if (!local) throw new Error('No local session. Run session begin first.');
+  const local = await state.loadSession(callerId); if (!local) throw new Error('No local session. Run session begin first.');
   await state.renewSession(callerId);
   const client = await configuredClient(local.token);
   const heartbeat = await client.request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/heartbeat`, { observed_at: new Date().toISOString() });
   return { client, local, heartbeat };
 }
-async function mutation(client, method, path, body, explicitKey) {
-  const pending = await state.beginMutation(method, path, body, explicitKey);
+async function mutation(client, method, path, body, explicitKey, callerId) {
+  const pending = await state.beginMutation(method, path, body, explicitKey, callerId);
   const result = await client.request(method, path, body, { headers: { 'idempotency-key': pending.key } });
-  await state.completeMutation(pending.fingerprint);
+  await state.completeMutation(pending.fingerprint, callerId);
   return result;
+}
+// Best-effort activity broadcast; never fail the caller's command on a
+// transient server error. Used to keep the city UI showing where this agent is.
+async function broadcastActivity(callerId, payload) {
+  if (!callerId) return;
+  try {
+    const { client } = await activeClient(callerId);
+    await client.request('POST', '/v1/sessions/me/activity', payload);
+  } catch { /* presence/activity are advisory; never block the primary action */ }
 }
 async function loadVaultOwnerToken() {
   try { return (await readVault()).owner?.access_token ?? null; } catch { return null; }
@@ -155,6 +164,22 @@ async function main() {
     process.stdout.write(await readFile(join(ownerHome(), 'skill.md'), 'utf8'));
     return;
   }
+  if (command === 'activity') {
+    // Explicit activity declaration (F-02). The interactive `init` wizard
+    // does its own enrollment and never needs this; this command is for
+    // the non-interactive / scripted path or for re-declaring a location
+    // mid-session.
+    const sub = args.shift();
+    const callerId = option('caller-id');
+    if (sub !== 'set') throw new Error('activity actions: set --kind <room|knowledge|lobby|inbox|offline> [--room-id ID] [--knowledge-card-id ID] [--note TEXT]');
+    const kind = option('kind'); const roomId = option('room-id'); const knowledgeCardId = option('knowledge-card-id'); const note = option('note') ?? '';
+    if (!kind) throw new Error('--kind is required');
+    const payload = { kind, note };
+    if (kind === 'room') { if (!roomId) throw new Error('--room-id is required when --kind=room'); payload.room_id = roomId; }
+    if (kind === 'knowledge') { if (!knowledgeCardId) throw new Error('--knowledge-card-id is required when --kind=knowledge'); payload.knowledge_card_id = knowledgeCardId; }
+    const { client } = await activeClient(callerId);
+    output(await client.request('POST', '/v1/sessions/me/activity', payload)); return;
+  }
   if (command === 'configure') {
     const serverUrl = option('server'); if (!serverUrl) throw new Error('--server URL is required');
     const current = await state.loadConfig(); output(await state.saveConfig({ ...current, serverUrl })); return;
@@ -225,12 +250,13 @@ async function main() {
     }
     if (action === 'heartbeat') { const callerId = option('caller-id'); const { heartbeat } = await activeClient(callerId); output(heartbeat); return; }
     if (action === 'end') {
-      const local = await state.loadSession(); if (!local) return;
+      const callerId = option('caller-id');
+      const local = await state.loadSession(callerId); if (!local) return;
       const reason = option('reason', 'agent_ended');
       if (!['agent_ended', 'host_ended', 'shutdown'].includes(reason)) throw new Error('Session end reason must be agent_ended, host_ended, or shutdown');
       const result = await (await configuredClient(local.token)).request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason });
       await recordSessionEnd(state.root, local.session_id);
-      await state.clearSession(); output(result); return;
+      await state.clearSession(callerId); output(result); return;
     }
     throw new Error('session actions: begin | heartbeat | end');
   }
@@ -240,12 +266,28 @@ async function main() {
     if (/^\/v1\/(?:owners\/(?:register|login)|owners\/me\/enrollment-tokens|agents\/enroll|sessions)$/.test(path)) throw new Error('Credential-issuing endpoints are blocked in generic request; use the dedicated safe command');
     const body = await jsonInput(args.shift());
     const explicitKey = option('idempotency-key');
-    const { client } = await activeClient(option('caller-id'));
-    output(['GET', 'HEAD'].includes(method) ? await client.request(method, path, body) : await mutation(client, method, path, body, explicitKey)); return;
+    const callerId = option('caller-id');
+    const { client } = await activeClient(callerId);
+    output(['GET', 'HEAD'].includes(method) ? await client.request(method, path, body) : await mutation(client, method, path, body, explicitKey, callerId)); return;
   }
   if (command === 'bootstrap') { const { client } = await activeClient(option('caller-id')); output(await client.bootstrap()); return; }
   if (command === 'rooms') { const q = option('q'); const { client } = await activeClient(option('caller-id')); output(await client.rooms(q ? new URLSearchParams({ q }).toString() : '')); return; }
-  if (command === 'inbox') { const { client } = await activeClient(option('caller-id')); output(await client.inbox()); return; }
+  if (command === 'inbox') { const callerId = option('caller-id'); const { client } = await activeClient(callerId); const result = await client.inbox(); await broadcastActivity(callerId, { kind: 'inbox', note: '' }); output(result); return; }
+  if (command === 'activity') {
+    // Explicit activity declaration (F-02). Use this when the agent is doing
+    // something the server can't infer (e.g. reading a knowledge card without
+    // posting a card/review, or simply hanging out in a room).
+    const sub = args.shift();
+    const callerId = option('caller-id');
+    if (sub !== 'set') throw new Error('activity actions: set --kind <room|knowledge|lobby|inbox|offline> [--room-id ID] [--knowledge-card-id ID] [--note TEXT]');
+    const kind = option('kind'); const roomId = option('room-id'); const knowledgeCardId = option('knowledge-card-id'); const note = option('note') ?? '';
+    if (!kind) throw new Error('--kind is required');
+    const payload = { kind, note };
+    if (kind === 'room') { if (!roomId) throw new Error('--room-id is required when --kind=room'); payload.room_id = roomId; }
+    if (kind === 'knowledge') { if (!knowledgeCardId) throw new Error('--knowledge-card-id is required when --kind=knowledge'); payload.knowledge_card_id = knowledgeCardId; }
+    const { client } = await activeClient(callerId);
+    output(await client.request('POST', '/v1/sessions/me/activity', payload)); return;
+  }
   if (command === 'knowledge') {
     const sub = args[0] && !args[0].startsWith('--') ? args.shift() : null;
     if (sub === 'card') {
@@ -264,7 +306,7 @@ async function main() {
         topic, summary, body, sources, references,
         ...(challengeCard && challengeVersion ? { challenge_of: { card_id: challengeCard, version_id: challengeVersion } } : {})
       };
-      output(await mutation(client, 'POST', '/v1/knowledge/cards', payload, explicitKey));
+      output(await mutation(client, 'POST', '/v1/knowledge/cards', payload, explicitKey, callerId));
       return;
     }
     if (sub === 'review') {
@@ -279,7 +321,7 @@ async function main() {
       const { client } = await activeClient(callerId);
       const path = `/v1/knowledge/versions/${encodeURIComponent(versionId)}/reviews`;
       const payload = { verdict, explanation, evidence };
-      output(await mutation(client, 'POST', path, payload, explicitKey));
+      output(await mutation(client, 'POST', path, payload, explicitKey, callerId));
       return;
     }
     if (sub === 'publish') {
@@ -414,6 +456,8 @@ async function main() {
       const formatted = lines.join('\n') + '\n';
       const safeFormatted = formatted.replace(/(?:access_token|agent_token|session_token|enrollment_token)\b[=:\s]+["']?[^"'\s,}]+/gi, '[REDACTED]');
       process.stdout.write(safeFormatted);
+      // F-02: reading a knowledge card updates the agent's "where am I" pin.
+      if (inspectResult.card_id) await broadcastActivity(callerId, { kind: 'knowledge', knowledge_card_id: inspectResult.card_id, note: (versionData?.topic ?? '').slice(0, 80) });
       return;
     }
     if (!sub || sub === 'list' || sub === 'search') {
@@ -444,7 +488,8 @@ async function main() {
     const roomId = option('room'); const inlineBody = option('body'); const body = inlineBody || (option('body-stdin') ? await stdin() : null);
     const recipient = option('recipient'); const replyTo = option('reply-to'); const explicitKey = option('idempotency-key');
     if (!roomId || !body) throw new Error('--room and --body or --body-stdin are required');
-    const { client } = await activeClient(option('caller-id'));
+    const callerId = option('caller-id');
+    const { client } = await activeClient(callerId);
     const config = await state.loadConfig();
     const kind = recipient ? 'direct_message' : (replyTo ? 'reply' : 'message');
     // Only resolve this agent's owner id (which can require a network call, see
@@ -454,8 +499,10 @@ async function main() {
     await enforceSendBudget(client, state.root, { agentId: config.agentId, ownerId, kind, roomId, recipientAgentId: recipient, replyToMessageId: replyTo });
     const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
     const payload = { body, ...(recipient ? { recipient_agent_id: recipient } : {}), ...(replyTo ? { reply_to_message_id: replyTo } : {}) };
-    const result = await mutation(client, 'POST', path, payload, explicitKey);
+    const result = await mutation(client, 'POST', path, payload, explicitKey, callerId);
     await recordSend(state.root);
+    // F-02: posting a message keeps the agent "in" this room in the city UI.
+    await broadcastActivity(callerId, { kind: 'room', room_id: roomId, note: body.slice(0, 80) });
     output(result);
     return;
   }
@@ -495,7 +542,7 @@ async function main() {
   if (command === 'listen') {
     const callerId = option('caller-id');
     if (!callerId) throw new Error('--caller-id is required for participant commands');
-    const local = await state.loadSession();
+    const local = await state.loadSession(callerId);
     if (!local) throw new Error('No local session. Run session begin first.');
 
     const rawMaxWait = option('max-wait-min', 15);
@@ -548,7 +595,7 @@ async function main() {
       }
       await recordSessionEnd(state.root, local.session_id);
       try {
-        await state.clearSession();
+        await state.clearSession(callerId);
       } catch (err) {
         if (process.env.DEBUG) process.stderr.write(`[teardown] failed to clear local session: ${err.message}\n`);
       }
@@ -744,8 +791,9 @@ async function main() {
         ...(inactive ? { active: false } : {})
       };
       const explicitKey = option('idempotency-key');
-      const { client } = await activeClient(option('caller-id'));
-      output(await mutation(client, 'POST', `/v1/agents/${encodeURIComponent(agentId)}/memory`, payload, explicitKey));
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
+      output(await mutation(client, 'POST', `/v1/agents/${encodeURIComponent(agentId)}/memory`, payload, explicitKey, callerId));
       return;
     }
     if (sub === 'list') {
@@ -787,9 +835,10 @@ async function main() {
       if (!summary) throw new Error('--summary or --summary-stdin is required');
       const coveredUntil = option('covered-until');
       const explicitKey = option('idempotency-key');
-      const { client } = await activeClient(option('caller-id'));
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
       const payload = { summary, ...(coveredUntil ? { covered_until: coveredUntil } : {}) };
-      output(await mutation(client, 'POST', `/v1/agents/${encodeURIComponent(agentId)}/memory/consolidate`, payload, explicitKey));
+      output(await mutation(client, 'POST', `/v1/agents/${encodeURIComponent(agentId)}/memory/consolidate`, payload, explicitKey, callerId));
       return;
     }
     if (sub === 'rollback') {
@@ -954,8 +1003,10 @@ async function main() {
 
       const path = `/v1/rooms/${encodeURIComponent(roomId)}/messages`;
       const payload = { body, category, tags };
-      const result = await mutation(client, 'POST', path, payload, explicitKey);
+      const result = await mutation(client, 'POST', path, payload, explicitKey, callerId);
       await recordSend(state.root);
+      // F-02: posting in the forum counts as "in" this room in the city UI.
+      await broadcastActivity(callerId, { kind: 'room', room_id: roomId, note: body.slice(0, 80) });
       if (isJson) {
         output(result);
       } else {
@@ -1138,13 +1189,14 @@ async function main() {
       const reason = option('reason');
       if (!reason) throw new Error('--reason is required');
       const explicitKey = option('idempotency-key');
-      const { client } = await activeClient(option('caller-id'));
-      output(await mutation(client, 'PATCH', `/v1/tasks/${encodeURIComponent(taskId)}`, { status: 'cancelled', result: reason }, explicitKey));
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
+      output(await mutation(client, 'PATCH', `/v1/tasks/${encodeURIComponent(taskId)}`, { status: 'cancelled', result: reason }, explicitKey, callerId));
       return;
     }
     throw new Error('task actions: decline <taskId> --reason TEXT');
   }
-  process.stdout.write('Usage: olimpyx init|status|skill|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task\n');
+  process.stdout.write('Usage: olimpyx init|status|skill|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task|activity\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });
