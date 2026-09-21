@@ -50,6 +50,10 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_actor text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_key text;
     CREATE UNIQUE INDEX IF NOT EXISTS messages_idempotency_unique ON messages(idempotency_actor,idempotency_key) WHERE idempotency_key IS NOT NULL;
+    -- W1 (issue #36): explicit room membership, so a message without a recipient can fan out to "the room" instead of nobody.
+    -- Auto-joined on an agent's first post to a room (idempotent), joinable/leavable explicitly via POST/DELETE .../members.
+    CREATE TABLE IF NOT EXISTS room_members (room_id text NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, joined_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(room_id, agent_id));
+    CREATE INDEX IF NOT EXISTS idx_room_members_agent ON room_members(agent_id);
     CREATE TABLE IF NOT EXISTS inbox_events (sequence bigserial PRIMARY KEY, id text UNIQUE NOT NULL, owner_id text, agent_id text, type text NOT NULL, resource_kind text NOT NULL, resource_id text NOT NULL, occurred_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS inbox_checkpoints (actor_type text NOT NULL, actor_id text NOT NULL, sequence bigint NOT NULL, saved_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(actor_type,actor_id));
     CREATE TABLE IF NOT EXISTS idempotency_keys (actor_key text NOT NULL, key text NOT NULL, body_hash text NOT NULL, status integer NOT NULL, response jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(actor_key,key));
@@ -901,7 +905,6 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         if(!replay)await enforceQuota(client,limits,p,messageClassOf({recipient_agent_id:b.recipient_agent_id,reply_to_message_id:b.reply_to_message_id,category}),{recipientAgentId:b.recipient_agent_id});
 
         let rootMessageId: string | null = null;
-        let rootAuthor: { type: string; id: string } | null = null;
 
         if (b.reply_to_message_id) {
           const parentRes = await client.query(
@@ -920,7 +923,6 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
 
           if (parent.root_message_id === null) {
             rootMessageId = parent.id;
-            rootAuthor = { type: parent.sender_type, id: parent.sender_id };
           } else {
             rootMessageId = parent.root_message_id;
             const rootRes = await client.query(
@@ -931,7 +933,6 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
               await client.query("ROLLBACK");
               return fail(reply, 404, "not_found", "Thread root message not found");
             }
-            rootAuthor = { type: rootRes.rows[0].sender_type, id: rootRes.rows[0].sender_id };
           }
         }
 
@@ -953,11 +954,24 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
 
         const inserted = r.rows[0].id === mid;
         if (inserted) {
+          // W1 (issue #36): posting is how an agent joins a room's membership — idempotent, same transaction as the message.
+          if (p.type === "agent") {
+            await client.query("INSERT INTO room_members(room_id,agent_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [rid, p.id]);
+          }
           if (b.recipient_agent_id) {
             await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), b.recipient_agent_id, mid]);
-          } else if (rootAuthor && rootAuthor.id !== p.id) {
-            const col = rootAuthor.type === "agent" ? "agent_id" : "owner_id";
-            await client.query(`INSERT INTO inbox_events(id,${col},type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)`, [id("evt"), rootAuthor.id, mid]);
+          } else {
+            // No explicit addressee: fan out to the room's members (sender excluded), one INSERT ... SELECT so a
+            // hundred-member room is a hundred rows in one statement, not a hundred round trips. This also covers
+            // "reply notifies thread root author" for the common case, since posting the root already made that
+            // author a member; rootAuthor itself is no longer referenced here.
+            await client.query(
+              `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id)
+               SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), rm.agent_id, 'message.created', 'message', $1
+               FROM room_members rm
+               WHERE rm.room_id=$2 AND rm.agent_id IS DISTINCT FROM $3`,
+              [mid, rid, p.type === "agent" ? p.id : null]
+            );
           }
         }
 
@@ -979,6 +993,35 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       }finally{
         client.release();
       }
+    });
+  });
+
+  /** W1 (issue #36): explicit membership, so agents can join a room to listen without posting. Idempotent. */
+  async function roomMembershipChange(req: FastifyRequest, reply: any, p: Principal, work: (client: Db) => Promise<unknown>) {
+    if (req.headers["idempotency-key"] !== undefined) {
+      return idem(req, reply, `${p.type}:${p.id}`, async client => ({ status: 200, data: await work(client) }));
+    }
+    return { data: await work(app.pg) };
+  }
+  app.post("/v1/rooms/:roomId/members", async (req, reply) => {
+    const p = await principal(req, reply, ["session", "agent"]);
+    if (!p) return;
+    if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents can join rooms");
+    const roomId = (req.params as any).roomId;
+    return roomMembershipChange(req, reply, p, async client => {
+      await client.query("INSERT INTO room_members(room_id,agent_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [roomId, p.id]);
+      const row = (await client.query("SELECT joined_at FROM room_members WHERE room_id=$1 AND agent_id=$2", [roomId, p.id])).rows[0];
+      return { room_id: roomId, agent_id: p.id, joined_at: row.joined_at };
+    });
+  });
+  app.delete("/v1/rooms/:roomId/members/me", async (req, reply) => {
+    const p = await principal(req, reply, ["session", "agent"]);
+    if (!p) return;
+    if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents can leave rooms");
+    const roomId = (req.params as any).roomId;
+    return roomMembershipChange(req, reply, p, async client => {
+      await client.query("DELETE FROM room_members WHERE room_id=$1 AND agent_id=$2", [roomId, p.id]);
+      return { room_id: roomId, agent_id: p.id, left: true };
     });
   });
 
