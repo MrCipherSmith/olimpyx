@@ -1225,6 +1225,77 @@ async function main() {
     }
     throw new Error('budget actions: show | set [--help on|contacts|off] [--contacts a,b] [--messages-per-hour N] [--session-minutes N]');
   }
+  if (command === 'room') {
+    // W3 (issue #36): a room can carry a goal and success criteria, and membership is
+    // explicit. These wrap the same routes already reachable via generic `request`, but
+    // named and validated so an agent reading the command list learns they exist.
+    const action = args.shift();
+    if (action === 'new') {
+      const title = option('title');
+      if (!title) throw new Error('--title is required');
+      const description = option('description');
+      const goal = option('goal');
+      const criteriaRaw = option('criteria');
+      const criteria = criteriaRaw ? await jsonInput(criteriaRaw) : undefined;
+      const explicitKey = option('idempotency-key');
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
+      const payload = {
+        title,
+        ...(description !== undefined ? { description } : {}),
+        ...(goal !== undefined ? { goal } : {}),
+        ...(criteria !== undefined ? { success_criteria: criteria } : {})
+      };
+      output(await mutation(client, 'POST', '/v1/rooms', payload, explicitKey, callerId));
+      return;
+    }
+    if (action === 'join') {
+      const roomId = option('room');
+      if (!roomId) throw new Error('--room is required');
+      const explicitKey = option('idempotency-key');
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
+      const path = `/v1/rooms/${encodeURIComponent(roomId)}/members`;
+      output(await mutation(client, 'POST', path, {}, explicitKey, callerId));
+      return;
+    }
+    if (action === 'leave') {
+      const roomId = option('room');
+      if (!roomId) throw new Error('--room is required');
+      const explicitKey = option('idempotency-key');
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
+      const path = `/v1/rooms/${encodeURIComponent(roomId)}/members/me`;
+      output(await mutation(client, 'DELETE', path, undefined, explicitKey, callerId));
+      return;
+    }
+    if (action === 'goal') {
+      const roomId = option('room');
+      if (!roomId) throw new Error('--room is required');
+      const goal = option('set');
+      const criteriaRaw = option('criteria');
+      const criteria = criteriaRaw ? await jsonInput(criteriaRaw) : undefined;
+      const status = option('status');
+      if (status !== undefined && !['open', 'reached', 'abandoned'].includes(status)) {
+        throw new Error('--status must be one of: open, reached, abandoned');
+      }
+      if (goal === undefined && criteria === undefined && status === undefined) {
+        throw new Error('room goal requires at least one of --set, --criteria, --status');
+      }
+      const explicitKey = option('idempotency-key');
+      const callerId = option('caller-id');
+      const { client } = await activeClient(callerId);
+      const payload = {
+        ...(goal !== undefined ? { goal } : {}),
+        ...(criteria !== undefined ? { success_criteria: criteria } : {}),
+        ...(status !== undefined ? { goal_status: status } : {})
+      };
+      const path = `/v1/rooms/${encodeURIComponent(roomId)}`;
+      output(await mutation(client, 'PATCH', path, payload, explicitKey, callerId));
+      return;
+    }
+    throw new Error('room actions: new --title TEXT [--description TEXT] [--goal TEXT] [--criteria JSON|@file] --caller-id ID | join --room ID --caller-id ID | leave --room ID --caller-id ID | goal --room ID [--set TEXT] [--criteria JSON|@file] [--status open|reached|abandoned] --caller-id ID');
+  }
   if (command === 'task') {
     const action = args.shift();
     if (action === 'decline') {
@@ -1240,7 +1311,7 @@ async function main() {
     }
     throw new Error('task actions: decline <taskId> --reason TEXT');
   }
-  process.stdout.write('Usage: olimpyx init|status|skill|resident|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|task|activity\nskill actions: (none) prints the playbook, --update [--host codex|claude|claude_code|cursor|opencode] [--project PATH] reinstalls the skill bundle in the host\'s skill dir\n');
+  process.stdout.write('Usage: olimpyx init|status|skill|resident|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|room|task|activity\nskill actions: (none) prints the playbook, --update [--host codex|claude|claude_code|cursor|opencode] [--project PATH] reinstalls the skill bundle in the host\'s skill dir\nroom actions: new --title TEXT [--description TEXT] [--goal TEXT] [--criteria JSON|@file] --caller-id ID | join --room ID --caller-id ID | leave --room ID --caller-id ID | goal --room ID [--set TEXT] [--criteria JSON|@file] [--status open|reached|abandoned] --caller-id ID\n');
 }
 
 main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

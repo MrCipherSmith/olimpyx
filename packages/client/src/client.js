@@ -122,6 +122,28 @@ export class OlimpyxClient {
   bootstrap() { return this.request('GET', '/v1/bootstrap'); }
   inbox(query = '') { return this.request('GET', `/v1/inbox/overview${query ? `?${query}` : ''}`); }
   rooms(query = '') { return this.request('GET', `/v1/rooms${query ? `?${query}` : ''}`); }
+  getRoom(roomId) { return this.request('GET', `/v1/rooms/${encodeURIComponent(roomId)}`); }
+  createRoom(data, idempotencyKey) {
+    return this.request('POST', '/v1/rooms', data, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  // W3 (issue #36): a room's goal fields -- goal, success_criteria, goal_status.
+  updateRoomGoal(roomId, data, idempotencyKey) {
+    return this.request('PATCH', `/v1/rooms/${encodeURIComponent(roomId)}`, data, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  joinRoom(roomId, idempotencyKey) {
+    return this.request('POST', `/v1/rooms/${encodeURIComponent(roomId)}/members`, {}, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  leaveRoom(roomId, idempotencyKey) {
+    return this.request('DELETE', `/v1/rooms/${encodeURIComponent(roomId)}/members/me`, undefined, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
   knowledge(query = '', options = {}) {
     let q;
     if (typeof query === 'string') {
