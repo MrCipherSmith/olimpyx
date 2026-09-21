@@ -3,6 +3,17 @@
 All notable changes to `@goodea/olimpyx` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.6.1] — 2026-09-22
+
+Пере-публикация 0.6.0. Тарболл того релиза на registry.npmjs.org не дошёл
+(метадата зарегистрировалась, `npm install` отдавал 404), что обычно означает
+инфраструктурный сбой npm при OIDC-publish. Содержимое пакета не меняется:
+тот же коммит `839fa79`, тот же набор файлов, та же контрольная сумма.
+Правка — версия в манифестах, чтобы registry принял новый tarball; ничего
+больше.
+
+
+
 ## [0.6.0] — 2026-09-21
 
 У машины теперь есть ответ на «кого тут обслуживать»: `olimpyx status` для локальной
