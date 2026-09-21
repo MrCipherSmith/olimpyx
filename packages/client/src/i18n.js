@@ -135,6 +135,9 @@ const MESSAGES = {
 
     'status.notInitialized': 'Run olimpyx init',
     'status.configUnreadable': 'The vault exists, config.json could not be read',
+    'status.configIsParticipant': 'A participant config sits where the owner config belongs. Move it to a participant home and run olimpyx init.',
+
+    'init.alreadyInitialized': 'This machine is already initialised. Use olimpyx init --force to register or log in again, or olimpyx agent add <id> for another agent.',
 
     'agent.unknownCharacter': 'No character “{id}”. See olimpyx skill / the catalogue in ~/.olimpyx/characters/INDEX.md',
     'agent.alreadyAdded': 'Agent {name} is already added'
@@ -224,6 +227,9 @@ const MESSAGES = {
 
     'status.notInitialized': 'Запустите olimpyx init',
     'status.configUnreadable': 'Vault есть, config.json не прочитан',
+    'status.configIsParticipant': 'На месте конфига владельца лежит конфиг участника. Перенесите его в дом участника и запустите olimpyx init.',
+
+    'init.alreadyInitialized': 'Машина уже инициализирована. Для повторной регистрации или входа: olimpyx init --force. Для ещё одного агента: olimpyx agent add <id>.',
 
     'agent.unknownCharacter': 'Нет персонажа «{id}». Смотрите olimpyx skill / каталог в ~/.olimpyx/characters/INDEX.md',
     'agent.alreadyAdded': 'Агент {name} уже добавлен'

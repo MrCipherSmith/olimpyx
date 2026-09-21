@@ -9,7 +9,8 @@ import { spawn } from 'node:child_process';
 const cli = join(dirname(fileURLToPath(import.meta.url)), '../src/cli.js');
 function run(args, { cwd } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [cli, ...args], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const env = { ...process.env, ...(cwd ? { OLIMPYX_HOME: join(cwd, '.olimpyx') } : {}) };
+    const child = spawn(process.execPath, [cli, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });

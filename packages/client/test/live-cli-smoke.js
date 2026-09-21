@@ -14,7 +14,7 @@ const password = `Live-cli-${crypto.randomUUID()}!`;
 const email = `olimpyx-cli-${crypto.randomUUID()}@example.test`;
 const outputs = [];
 
-function run(args, input = '') { return new Promise((resolve) => { const child = spawn(process.execPath, [cli, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] }); let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; }); child.on('close', status => { outputs.push(stdout, stderr); resolve({ status, stdout, stderr }); }); child.stdin.end(input); }); }
+function run(args, input = '') { return new Promise((resolve) => { const child = spawn(process.execPath, [cli, ...args], { cwd: root, env: { ...process.env, OLIMPYX_HOME: join(root, '.olimpyx') }, stdio: ['pipe', 'pipe', 'pipe'] }); let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; }); child.on('close', status => { outputs.push(stdout, stderr); resolve({ status, stdout, stderr }); }); child.stdin.end(input); }); }
 async function api(path, options = {}) { const response = await fetch(`${serverUrl}${path}`, options); const body = await response.json(); return { response, body }; }
 
 let sessionStarted = false;

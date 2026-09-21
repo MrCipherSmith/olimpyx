@@ -6,10 +6,19 @@ import { configPath, ownerHome } from './vault.js';
 // WORKING DIRECTORY. The owner home is `$HOME/.olimpyx`. Run a participant command while
 // standing in $HOME and the two are the same directory, where an owner `config.json`
 // ({email, ownerId, skillScope, hosts, agents[]}) and a participant `config.json`
-// ({agentId, installationId}) overwrite each other. `resident/cli.mjs` already resolves a
+// ({agentId, installationId}) overwrite each other. `resident/cli.mjs` already resolved a
 // participant home the safe way -- by agent id, or an absolute path, never from the cwd --
-// and this brings the rest of the CLI onto the same rule.
-export const LEGACY_HOME_DIRNAME = '.olimpyx';
+// and this is the rest of the CLI on the same rule. There is no working-directory fallback:
+// a home that depends on where a host happened to be launched is the defect itself.
+
+function missingMessage() {
+  return [
+    'No participant home. Set one of:',
+    'OLIMPYX_PARTICIPANT=<agent-id> to use the home olimpyx init created for that agent,',
+    'or OLIMPYX_HOME=<absolute path> to use a directory you manage yourself.',
+    'Deriving it from the working directory is no longer supported.'
+  ].join(' ');
+}
 
 function collisionMessage(home, source) {
   return [
@@ -27,15 +36,6 @@ function relativeMessage(raw, cwd) {
     `OLIMPYX_HOME must be an absolute path; got "${raw}".`,
     'A relative value made an agent\'s home depend on where its host happened to be launched.',
     `Use: export OLIMPYX_HOME=${resolve(cwd, raw)}`
-  ].join(' ');
-}
-
-function legacyNotice(home) {
-  return [
-    'olimpyx: deriving the participant home from the working directory is deprecated',
-    `and will be refused in a future release (it resolved to ${home}).`,
-    `Set an absolute path with: export OLIMPYX_HOME=${home}`,
-    'or select an initialised agent with: export OLIMPYX_PARTICIPANT=<agent-id>'
   ].join(' ');
 }
 
@@ -58,29 +58,26 @@ function homeFromOwnerConfig(agentId, env, owner) {
   return home;
 }
 
-// Returns { home, notice, reason }.
+// Returns { home, reason }.
 //
-// `home` is null only for the legacy working-directory path when it lands on the owner home:
-// owner-scoped commands legitimately run from $HOME and must keep working, so that case is
-// reported rather than thrown, and `reason` carries the explanation for whoever actually needs
-// a participant home. Every other refusal throws, because the caller asked for it by name.
+// `home` is null when nothing selected one. That is reported rather than thrown because
+// owner-scoped commands (`init`, `status`, `agent`, `skill`, `usage`, `limits`) never needed a
+// participant home and must keep working from any directory; `reason` carries the explanation
+// for whoever actually reaches for participant state. A home that was named but is unusable
+// throws instead -- the caller asked for it by name and deserves to hear why it was refused.
 export function resolveParticipantHome({ env = process.env, cwd = process.cwd() } = {}) {
   const owner = resolve(ownerHome(env));
 
   const agentId = (env.OLIMPYX_PARTICIPANT || '').trim();
-  if (agentId) return { home: homeFromOwnerConfig(agentId, env, owner), notice: null, reason: null };
+  if (agentId) return { home: homeFromOwnerConfig(agentId, env, owner), reason: null };
 
   const configured = (env.OLIMPYX_HOME || '').trim();
   if (configured) {
     if (!isAbsolute(configured)) throw new Error(relativeMessage(configured, cwd));
     const home = resolve(configured);
     if (home === owner) throw new Error(collisionMessage(home, 'OLIMPYX_HOME'));
-    return { home, notice: null, reason: null };
+    return { home, reason: null };
   }
 
-  const legacy = resolve(cwd, LEGACY_HOME_DIRNAME);
-  if (legacy === owner) {
-    return { home: null, notice: null, reason: collisionMessage(legacy, `The working directory (${cwd})`) };
-  }
-  return { home: legacy, notice: legacyNotice(legacy), reason: null };
+  return { home: null, reason: missingMessage() };
 }

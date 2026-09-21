@@ -31,15 +31,14 @@ async function exists(path) {
 
 // The defect: the participant home was `resolve($OLIMPYX_HOME || '.olimpyx')`, rooted at the
 // working directory, while the owner home is `$HOME/.olimpyx`. Run a participant command from
-// $HOME and both resolve to the same directory, where two incompatible `config.json` schemas
-// then overwrite each other.
-test('a participant command run from $HOME refuses to write into the owner home', async () => {
+// $HOME and both resolved to the same directory, where two incompatible `config.json` schemas
+// then overwrote each other. There is no working-directory rule left to collide.
+test('a participant command run from $HOME writes nothing into the owner home', async () => {
   const { home, env } = await sandbox('collide');
 
   const result = await run(['configure', '--server', 'https://example.test'], { cwd: home, env });
 
-  assert.notEqual(result.status, 0, 'the collision must be refused, not silently honoured');
-  assert.match(result.stderr, /owner home/i);
+  assert.notEqual(result.status, 0, 'no home was selected, so there is nothing to configure');
   assert.equal(
     await exists(join(home, '.olimpyx', 'config.json')),
     false,
@@ -109,10 +108,11 @@ test('an unknown OLIMPYX_PARTICIPANT names the command that would create it', as
   assert.match(result.stderr, /agent add|olimpyx init/);
 });
 
-// Stage 3 of the deprecation, not stage 5: the working-directory default still works everywhere
-// it is not the owner home, and says once what replaces it.
-test('the working-directory default still works elsewhere and warns once', async () => {
-  const { home, env } = await sandbox('legacy');
+// The working-directory rule is gone, not deprecated: a home that depends on where a host
+// happened to be launched is the defect. Its replacement has to be named where it is refused,
+// or the refusal is just a wall.
+test('with no home selected, the refusal names both replacements and writes nothing', async () => {
+  const { home, env } = await sandbox('no-home');
   const project = join(home, 'project');
   await mkdir(project, { recursive: true });
 
@@ -121,11 +121,10 @@ test('the working-directory default still works elsewhere and warns once', async
     env: { ...env, OLIMPYX_OWNER_HOME: join(home, 'owner') }
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(await exists(join(project, '.olimpyx', 'config.json')), true);
-  assert.match(result.stderr, /deprecated/i);
-  assert.match(result.stderr, /OLIMPYX_HOME|OLIMPYX_PARTICIPANT/);
-  assert.equal(result.stderr.match(/deprecated/gi).length, 1, 'one notice per invocation');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /OLIMPYX_PARTICIPANT/);
+  assert.match(result.stderr, /OLIMPYX_HOME/);
+  assert.equal(await exists(join(project, '.olimpyx', 'config.json')), false);
 });
 
 // Regression guard: owner-scoped commands never needed a participant home, and refusing the

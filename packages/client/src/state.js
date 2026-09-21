@@ -83,6 +83,33 @@ export class LocalState {
     const dir = await this.callerDir(callerId);
     await Promise.all([rm(join(dir, 'session.json'), { force: true }), rm(join(dir, 'session-credential'), { force: true })]);
   }
+  // `callerDir` created these on demand and nothing ever removed them: a server-side session
+  // expires 90 seconds after its last heartbeat, while the local directory and the dead
+  // `session-credential` inside it stayed forever. A dozen accumulated on one host in a single
+  // afternoon of experiments. A directory is kept while its caller lease is younger than
+  // `maxAgeMs`, or while it still holds unacknowledged mutations -- those idempotency keys are
+  // the only thing standing between an ambiguous retry and a duplicate send.
+  async pruneCallers({ now = Date.now(), maxAgeMs = 86_400_000 } = {}) {
+    const root = join(this.root, 'calls');
+    let entries;
+    try { entries = await readdir(root, { withFileTypes: true }); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+    const removed = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = join(root, entry.name);
+      const session = await readJson(join(dir, 'session.json'), null);
+      if (session) {
+        const deadline = Date.parse(session.caller_deadline);
+        if (!Number.isFinite(deadline) || deadline > now - maxAgeMs) continue;
+      }
+      const pending = await readJson(join(dir, 'pending-mutations.json'), {});
+      if (Object.keys(pending).length > 0) continue;
+      await rm(dir, { recursive: true, force: true });
+      removed.push(entry.name);
+    }
+    return removed;
+  }
   async beginMutation(method, path, body, explicitKey, callerId) {
     if (explicitKey !== undefined) {
       if (typeof explicitKey !== 'string' || !explicitKey.trim()) throw new Error('--idempotency-key must be a non-empty value');

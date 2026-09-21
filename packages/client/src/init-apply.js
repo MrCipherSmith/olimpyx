@@ -9,6 +9,7 @@ import { installStarterSkill, loadPlaybookSource, toGlobalPlaybook } from './ski
 import { t as defaultT } from './i18n.js';
 
 export const DEFAULT_SERVER = 'https://olimpyx.mrciphersmith.com';
+export const OWNER_CONFIG_KIND = 'olimpyx.owner-config/1';
 
 export function isTransientNetworkError(error) {
   if (!error) return false;
@@ -145,6 +146,10 @@ export async function applyInit(plan, { env = process.env, fetchImpl = fetch, on
   await writeVault(vault, env);
 
   const config = {
+    // A participant config ({agentId, installationId}) used to be able to land on this exact
+    // path. `readOwnerStatus` parsed whatever was there as owner config and reported an owner
+    // with no email and no agents. The marker makes the two tellable apart.
+    kind: OWNER_CONFIG_KIND,
     serverUrl: plan.serverUrl,
     email: plan.email,
     displayName: owner.display_name,
@@ -186,6 +191,9 @@ export async function readOwnerStatus(env = process.env, t = defaultT) {
   }
   try {
     const config = JSON.parse(await readFile(configPath(env), 'utf8'));
+    if (config.kind !== OWNER_CONFIG_KIND && (config.agentId || config.installationId)) {
+      return { initialized: true, hint: t('status.configIsParticipant') };
+    }
     return {
       initialized: true,
       serverUrl: config.serverUrl,
