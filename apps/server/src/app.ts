@@ -340,18 +340,6 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   const limits: LimitsConfig = loadLimits(options.env ?? process.env);
   const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
   const app = Fastify({ logger: { redact: ["req.headers.authorization", "req.body.password", "req.body.enrollment_token"] }, bodyLimit: 262144 }) as unknown as OlimpyxApp;
-  // W3 (issue #36): validation.ts's global preValidation hook (installed next) re-parses
-  // POST /v1/rooms's body against a schema that doesn't know about goal/success_criteria and
-  // strips unrecognized keys — that's out of scope here (apps/server/src/validation.ts is not
-  // touched by this change). Registering this hook first means it runs before that one, so it
-  // can stash the original values for the room-creation handler to read and validate itself,
-  // the same way this file already hand-validates message category/tags inline.
-  app.addHook("preValidation", async (req) => {
-    if (req.method === "POST" && req.url.split("?")[0] === "/v1/rooms") {
-      const b = req.body as any;
-      (req as any).roomGoalInput = { goal: b?.goal, success_criteria: b?.success_criteria };
-    }
-  });
   installValidation(app);
   registerCityGuide(app);
   app.decorate("pg", new Pool({ connectionString: databaseUrl }));
@@ -447,29 +435,6 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     ? x.success_criteria
     : (typeof x.success_criteria === "string" ? JSON.parse(x.success_criteria) : (x.success_criteria ?? []));
   const roomGoalFields = (x: any) => ({ goal: x.goal ?? null, success_criteria: successCriteriaFrom(x), goal_status: x.goal_status ?? "open" });
-  // W3 (issue #36): hand-validated the same way this file already validates message category/tags
-  // inline (see POST /v1/rooms/:roomId/messages) rather than through validation.ts. ROOM_TEXT_MAX
-  // matches the limit validation.ts already applies to a room's own `title` — a goal is "one
-  // sentence" too, the same kind of field on the same row.
-  const ROOM_TEXT_MAX = 120;
-  const ROOM_GOAL_STATUSES = ["open", "reached", "abandoned"];
-  function goalError(v: unknown): string | null {
-    if (v === undefined) return null;
-    if (typeof v !== "string" || v.trim().length < 1 || v.trim().length > ROOM_TEXT_MAX) {
-      return `goal must be a string of 1-${ROOM_TEXT_MAX} characters`;
-    }
-    return null;
-  }
-  function criteriaError(v: unknown): string | null {
-    if (v === undefined) return null;
-    if (!Array.isArray(v) || v.length > 30) return "success_criteria must be an array of at most 30 strings";
-    for (const item of v) {
-      if (typeof item !== "string" || item.trim().length < 1 || item.trim().length > ROOM_TEXT_MAX) {
-        return `each success_criteria item must be a non-empty string of at most ${ROOM_TEXT_MAX} characters`;
-      }
-    }
-    return null;
-  }
   type Db = Pool | PoolClient;
   /** Typed agent signal (stop, revoke, restriction) with structured `payload`, exposed as `data` on inbox events. */
   async function agentEvent(db: Db, agentId: string, type: string, payload: Record<string, unknown>) {
@@ -792,26 +757,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:201,data:await consolidate(c,a.p,a.aid,req.body as any)}))});
   app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:200,data:await rollbackInfluences(c,a.p,a.aid,req.body as any)}))});
 
-  app.post("/v1/rooms",async(req,reply)=>{
-    const p=await principal(req,reply);if(!p)return;
-    // W3 (issue #36): captured pre-strip by the hook registered ahead of installValidation.
-    const goalInput=(req as any).roomGoalInput ?? {};
-    const gErr=goalError(goalInput.goal);
-    if(gErr) return fail(reply,400,"invalid_goal",gErr);
-    const cErr=criteriaError(goalInput.success_criteria);
-    if(cErr) return fail(reply,400,"invalid_success_criteria",cErr);
-    return idem(req,reply,`${p.type}:${p.id}`,async client=>{
-      const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;
-      await enforceQuota(client,limits,p,"room_create");
-      const goal=goalInput.goal!==undefined?String(goalInput.goal).trim():null;
-      const successCriteria=Array.isArray(goalInput.success_criteria)?goalInput.success_criteria.map((s:string)=>s.trim()):[];
-      const r=await client.query(
-        "WITH t AS (SELECT clock_timestamp() c) INSERT INTO rooms(id,slug,title,description,creator_type,creator_id,created_at,updated_at,goal,success_criteria) SELECT $1,$2,$3,$4,$5,$6,t.c,t.c,$7,$8::jsonb FROM t RETURNING *",
-        [rid,slug,b.title,b.description??"",p.type,p.id,goal,JSON.stringify(successCriteria)]
-      );
-      return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at,...roomGoalFields(r.rows[0])}}
-    })
-  });
+  // W3 (issue #36): goal/success_criteria are validated (and trimmed) by validation.ts's schema
+  // for this route, same as title/description above — nothing left to hand-validate here.
+  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO rooms(id,slug,title,description,creator_type,creator_id,created_at,updated_at,goal,success_criteria) SELECT $1,$2,$3,$4,$5,$6,t.c,t.c,$7,$8::jsonb FROM t RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id,b.goal??null,JSON.stringify(b.success_criteria??[])]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at,...roomGoalFields(r.rows[0])}}})});
   app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
   app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}}});
   // W3 (issue #36): only the room's creator (or, when the creator is an agent, that agent's own
@@ -823,20 +771,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const p = await principal(req, reply, ["owner", "session", "agent"]);
     if (!p) return;
     const roomId = (req.params as any).roomId;
-    // No validation.ts entry for this path (out of this change's scope), so req.body is the raw,
-    // unstripped client payload here — validated by hand, same as goal/success_criteria on
-    // POST /v1/rooms above.
+    // Shape, per-field limits, the goal_status enum and "at least one field present" are all
+    // enforced by validation.ts's schema for this route; req.body is already validated and
+    // trimmed by the time it gets here.
     const b = req.body as any;
-    if (b.goal === undefined && b.success_criteria === undefined && b.goal_status === undefined) {
-      return fail(reply, 400, "bad_request", "At least one of goal, success_criteria, goal_status is required");
-    }
-    const gErr = goalError(b.goal);
-    if (gErr) return fail(reply, 400, "invalid_goal", gErr);
-    const cErr = criteriaError(b.success_criteria);
-    if (cErr) return fail(reply, 400, "invalid_success_criteria", cErr);
-    if (b.goal_status !== undefined && !ROOM_GOAL_STATUSES.includes(b.goal_status)) {
-      return fail(reply, 400, "invalid_goal_status", `goal_status must be one of ${ROOM_GOAL_STATUSES.join(", ")}`);
-    }
 
     const roomRes = await app.pg.query(
       `SELECT r.*, ca.owner_id AS creator_agent_owner_id
@@ -853,8 +791,8 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       (room.creator_type === "agent" && (room.creator_id === p.id || room.creator_agent_owner_id === p.ownerId));
     if (!isCreator) return fail(reply, 403, "forbidden", "Only the room creator can change its goal");
 
-    const nextGoal = b.goal !== undefined ? String(b.goal).trim() : room.goal;
-    const nextCriteria = b.success_criteria !== undefined ? b.success_criteria.map((s: string) => s.trim()) : successCriteriaFrom(room);
+    const nextGoal = b.goal !== undefined ? b.goal : room.goal;
+    const nextCriteria = b.success_criteria !== undefined ? b.success_criteria : successCriteriaFrom(room);
     const nextStatus = b.goal_status !== undefined ? b.goal_status : room.goal_status;
     const previousStatus = room.goal_status;
 

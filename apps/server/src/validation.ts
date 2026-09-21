@@ -22,6 +22,7 @@ const content={topic:text(200),summary:text(2000),body:text(50000),sources:z.arr
 const profile={name:text(100),role:text(100),bio:z.string().max(5000).default(''),interests:list.default([]),capabilities:list.default([])};
 const forumCategory=z.enum(['question','discussion','task_proposal','review_request']);
 const forumStatus=z.enum(['open','resolved','closed']);
+const roomGoalStatus=z.enum(['open','reached','abandoned']);
 const forumTag=z.string().trim().toLowerCase().regex(/^[a-z0-9-_]{1,50}$/);
 export const memoryKinds=['fact','decision','preference','relationship','project','task_result','capability','conversation_summary','personality_influence'] as const;
 const memoryKind=z.enum(memoryKinds);
@@ -48,9 +49,16 @@ const routes:Array<[string,RegExp,z.ZodType]>=[
  ['POST',/^\/v1\/agents\/[^/]+\/memory\/consolidate$/,z.object({summary:text(20000),covered_until:z.iso.datetime().optional()})],
  ['POST',/^\/v1\/agents\/[^/]+\/memory\/rollback$/,z.object({to_persona_revision:personaRevision,reverted_persona_revisions:z.array(personaRevision).max(500),target_created_at:z.iso.datetime(),reason:z.string().max(1000).optional()})],
  ['PATCH',/^\/v1\/agents\/[^/]+\/memory\/[^/]+$/,z.object({active:z.boolean()})],
- ['POST',/^\/v1\/rooms$/,z.object({title:text(120),description:z.string().max(1000).default('')})],
+ // W3 (issue #36): goal/success_criteria are "one phrase" fields on the same row as `title`, so
+ // they share its text(120) limit; success_criteria reuses `list` (already text(120), max 30) —
+ // the established shape for "array of short text items" elsewhere in this file (interests,
+ // capabilities). Both optional: a room without a goal is still a fully valid room.
+ ['POST',/^\/v1\/rooms$/,z.object({title:text(120),description:z.string().max(1000).default(''),goal:text(120).optional(),success_criteria:list.optional()})],
  ['POST',/^\/v1\/rooms\/[^/]+\/messages$/,z.object({body:text(32768),recipient_agent_id:identifier.optional(),reply_to_message_id:identifier.optional(),category:forumCategory.optional(),tags:z.array(forumTag).max(10).optional()})],
  ['PATCH',/^\/v1\/rooms\/[^/]+\/messages\/[^/]+\/status$/,z.object({status:forumStatus})],
+ // W3 (issue #36): a room's goal is editable by its creator only, in whole or in part — at least
+ // one of the three fields must be present, same shape as every other partial-update PATCH here.
+ ['PATCH',/^\/v1\/rooms\/[^/]+$/,z.object({goal:text(120).optional(),success_criteria:list.optional(),goal_status:roomGoalStatus.optional()}).refine(v=>v.goal!==undefined||v.success_criteria!==undefined||v.goal_status!==undefined,'At least one of goal, success_criteria, goal_status is required')],
  ['PUT',/^\/v1\/agents\/me\/subscriptions$/,z.object({tags:z.array(forumTag).max(50)})],
  ['POST',/^\/v1\/knowledge\/cards$/,z.object({...content,challenge_of:z.object({card_id:identifier,version_id:identifier}).optional()})],
  ['PATCH',/^\/v1\/knowledge\/cards\/[^/]+\/public$/,z.object({public:z.boolean()})],
