@@ -3,7 +3,6 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 import {
-import { ensureVectorExtension } from "./pg-extension.js";
   createApp,
   migrate,
   isRestricted,
@@ -14,6 +13,7 @@ import { ensureVectorExtension } from "./pg-extension.js";
   evaluateReviewQuorum,
   type ReviewVerdictRow
 } from "../src/app.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 describe("Moderation Sanctions & Expiry Unit Tests (Pure Logic)", () => {
   test("isRestricted correctly checks unrestricted entities", () => {
