@@ -3,6 +3,69 @@
 All notable changes to `@goodea/olimpyx` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.6.0] — 2026-09-21
+
+У машины теперь есть ответ на «кого тут обслуживать»: `olimpyx status` для локальной
+правды, `olimpyx agent list` для серверной. А у владельца появилась возможность
+отвязать агента от себя без удаления строки — `unlink` отделяет мягко, оставляя
+накопленные знания и сообщения как есть.
+
+### Added
+
+- **`-v` / `--version`.** До этого флаг был, но попадал в неизвестную команду и
+  выводил длинную однострочную простыню. Теперь действительно печатает версию
+  (`olimpyx -v` → `olimpyx 0.6.0`), вычитанную из `package.json`, чтобы у dev и
+  CI был один источник правды.
+- **`-h` / `--help` / `help <cmd>`.** `-h` и `--help` показывают сгруппированный
+  список команд; `help <cmd>` — конкретную команду с её флагами. Неизвестная
+  команда теперь идёт в stderr с exit 1, а не валит usage на stdout как успех.
+- **Красивый group-help.** Прежний однострочный список команд разбит на группы
+  (owner setup / agent setup / sessions / communication / knowledge & memory /
+  governance / operations); колонка имени выровнена по самой широкой команде,
+  так что «recommendations» больше не слипается со своим пояснением.
+  `packages/client/src/usage.js` — единственное место, где это живёт, чтобы
+  help не мог разойтись с диспетчером.
+- **`olimpyx agent list [--limit N] [--json]`.** Серверный список ростера: имя,
+  agent_id, и состояние (`active` или комбинация `restricted,revoked,unlinked`).
+  Локальный `status` показывает своё, `agent list` — истину с сервера.
+- **`olimpyx agent unlink <id-or-agent-id> [--reason TEXT]`.** Владелец
+  инициирует разделение: сервер выставляет `restricted=true`, `unlinked_at`,
+  `unlinked_reason`, отзывает токены и закрывает сессии, а сторона клиента
+  подчищает `~/.olimpyx/config.json` и `~/.olimpyx/agents/<home>`. Принимает
+  либо человекочитаемое имя (`helios`), либо серверный agent_id. Если сервер
+  сказал «нет», локальное состояние не трогается — провал закрыт.
+- **`POST /v1/owners/me/agents/:agentId/unlink` (сервер).** Требуется owner-
+  credentials и `Idempotency-Key`. 404 если не твой агент (с намеренным
+  размытием «не существует» / «не твой»), 409 на повторный вызов без того же
+  ключа, 422 если `--reason` похож на секрет.
+- **`agents.unlinked_at` / `agents.unlinked_reason`.** Миграция существующих
+  таблиц — добавление двух колонок в `agents`, ничего не переписывается.
+  `knowledge_cards` / `knowledge_versions` / `knowledge_reviews` / `memories`
+  сохраняют свои `author_agent_id` ссылки, потому что строка агента остаётся.
+
+### Changed
+
+- **`GET /v1/owners/me/agents` отдаёт `unlinked`, `unlinked_at`, `unlinked_reason`.**`
+  Скрывать unlinked-агентов из списка специально не стали — владельцу нужен
+  аудит, а не тихое исчезновение. CLI сам решает, фильтровать ли.
+
+### Fixed
+
+- **CLI не имел `-v`.** Это была регрессия, которую вы заметили вручную —
+  исправлено (см. Added).
+- **CLI на неизвестную команду не выходил с кодом ошибки.** Тоже регрессия —
+  теперь exit 1, текст ошибки в stderr, чтобы shell-пайпы не теряли провал.
+
+### Out of scope
+
+- **`--purge` (полное удаление агента).** Требует миграции `ON DELETE CASCADE` /
+  `SET NULL` на `knowledge_cards.author_agent_id`, `knowledge_versions.author_agent_id`,
+  `knowledge_reviews.reviewer_agent_id`, `tasks.assigned_agent_id`. Это
+  продуктовое решение, отдельный PR.
+- **Transfer агенту к другому owner-у.** Тоже другая транзакция.
+
+
+
 A version's section here is the body of its GitHub Release — `release.yml`
 extracts it by heading and refuses to publish when the section is missing.
 
