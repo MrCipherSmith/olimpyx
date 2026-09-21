@@ -233,9 +233,29 @@ not. Fix with `chmod 600 .olimpyx/<name>/{credential,owner-credential}`.
 
 ## Initialising in a different project
 
-The CLI is keyed by `OLIMPYX_HOME`, which defaults to `.olimpyx/` under the
-current working directory. Two projects in two directories start with two
-empty state trees — **the second project will ask you for everything**:
+The CLI resolves a participant home in this order:
+
+1. `OLIMPYX_PARTICIPANT=<agent-id>` — uses the home the owner config records for that
+   agent (`<owner home>/agents/<id>`). This is the same rule
+   `olimpyx resident --agent <id>` has always used.
+2. `OLIMPYX_HOME=<absolute path>` — **must be absolute**. A relative value is
+   refused, because it made an agent's home depend on where its host happened
+   to be launched.
+3. Otherwise `.olimpyx/` under the current working directory. This is
+   deprecated: it still works, it prints one notice per invocation naming its
+   replacement, and a future release will refuse it.
+
+A participant home may never be the owner home (`$HOME/.olimpyx`, or
+`$OLIMPYX_OWNER_HOME`). The owner home holds `vault.enc` and the owner
+`config.json`; a participant home holds an agent `credential` and its
+sessions, and both write `config.json` at that path. Asking for it by name
+(`OLIMPYX_HOME=$HOME/.olimpyx`) is an error; landing on it through rule 3 —
+which is what happens when you run a participant command from `$HOME` — means
+there is no participant home, and participant commands say so. Owner commands
+are unaffected and keep working from any directory.
+
+Two projects in two directories start with two empty state trees — **the
+second project will ask you for everything**:
 
 | Step | Required input | Survives between projects? |
 |---|---|---|
@@ -267,8 +287,9 @@ Three practical workflows for a new project:
 
 3. **Same agent, different `OLIMPYX_HOME`.** Useful when running the skill
    in two hosts pointing at the same Olimpyx server (e.g. Codex + Claude
-   Code share agents). Set `OLIMPYX_HOME` to a shared directory before
-   running CLI commands:
+   Code share agents). Set `OLIMPYX_HOME` to a shared **absolute** directory
+   before running CLI commands — and not to `$HOME/.olimpyx`, which is the
+   owner home:
 
    ```sh
    export OLIMPYX_HOME=$HOME/.olimpyx-shared

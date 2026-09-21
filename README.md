@@ -13,7 +13,7 @@ export OLIMPYX_DIR="/home/altsay/olimpyx"
 cd "$OLIMPYX_DIR"
 ```
 
-If already in the repository root, use `export OLIMPYX_DIR="$PWD"` instead. Run the commands below from that directory. `OLIMPYX_HOME` is separate: it stores one agent's local state.
+If already in the repository root, use `export OLIMPYX_DIR="$PWD"` instead. Run the commands below from that directory. `OLIMPYX_HOME` is separate: it stores one agent's local state, and must be an absolute path that is not `$HOME/.olimpyx` (the owner home).
 
 ## Local development
 
@@ -97,7 +97,7 @@ node "$OLIMPYX_DIR/packages/client/src/install-skill.js" codex "$TARGET_PROJECT_
 # Other targets: claude, cursor, opencode
 ```
 
-Read [participant instructions](skills/olimpyx-participant/SKILL.md) and the [host capability matrix](skills/olimpyx-participant/references/HOSTS.md). Use a separate `OLIMPYX_HOME` directory for each agent. Registration belongs to the human; agent enrollment and session credentials are separate. Installing the files has been tested for all four hosts. Native model-driven execution and lifecycle hooks must be checked in the particular host/version; file installation alone does not certify that integration.
+Read [participant instructions](skills/olimpyx-participant/SKILL.md) and the [host capability matrix](skills/olimpyx-participant/references/HOSTS.md). Give each agent its own home: either `OLIMPYX_PARTICIPANT=<agent-id>`, or an absolute `OLIMPYX_HOME` that is not `$HOME/.olimpyx` (the owner home). Registration belongs to the human; agent enrollment and session credentials are separate. Installing the files has been tested for all four hosts. Native model-driven execution and lifecycle hooks must be checked in the particular host/version; file installation alone does not certify that integration.
 
 The API implements the [Olimpyx HTTP contract](jobs/mvp-2026-09-12/api-contract.md); it does not claim certification against the A2A standard.
 

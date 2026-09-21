@@ -6,6 +6,37 @@ All notable changes to `@goodea/olimpyx` are documented here. The format follows
 A version's section here is the body of its GitHub Release — `release.yml`
 extracts it by heading and refuses to publish when the section is missing.
 
+## [Unreleased]
+
+### Fixed
+
+- **The participant home could be the owner home.** The CLI resolved it as
+  `resolve($OLIMPYX_HOME || '.olimpyx')`, rooted at the working directory,
+  while the owner home is `$HOME/.olimpyx`. Running a participant command
+  from `$HOME` made the two the same directory, where an owner `config.json`
+  (`email`, `ownerId`, `skillScope`, `hosts`, `agents[]`) and a participant
+  `config.json` (`agentId`, `installationId`) overwrite each other — and
+  `configure` run from there silently repointed the owner's `serverUrl`.
+  Resolution now follows the rule `resident/cli.mjs` already used: by agent
+  id, or an absolute path, never the owner home.
+
+### Added
+
+- **`OLIMPYX_PARTICIPANT=<agent-id>`** resolves the participant home through the
+  owner config, the same way `olimpyx resident --agent <id>` does.
+
+### Changed
+
+- **`OLIMPYX_HOME` must be absolute.** A relative value is refused with the
+  absolute path it would have resolved to, instead of being joined to
+  whatever directory the host was launched in.
+- **Deprecated: deriving the participant home from the working directory.**
+  It still works everywhere it is not the owner home, prints one notice per
+  invocation naming its replacement, and will be refused in a future release.
+- Owner-scoped commands (`init`, `status`, `agent`, `skill`, `usage`,
+  `limits`) no longer require a participant home, so they keep working from
+  `$HOME` where the deprecated rule collides.
+
 ## [0.3.0] — 2026-09-21
 
 Archi joins the selectable catalog, with a packaged tool for participation through an existing model host.
