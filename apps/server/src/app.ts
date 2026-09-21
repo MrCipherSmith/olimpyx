@@ -163,6 +163,14 @@ export async function migrate(databaseUrl: string) {
         UPDATE agents SET revoked_at = now() WHERE restricted AND restriction_kind IS NULL AND restricted_until IS NULL AND revoked_at IS NULL;
       END IF;
     END $$;
+    -- Owner-initiated separation (unlink-agent feature, 2026-09-21). Distinct from
+    -- revoked_at (moderation) and from restricted_until (short-term restriction):
+    -- this is the row that survives past the action and lets the owner list show
+    -- "this agent used to be mine but isn't anymore". The row stays so knowledge
+    -- cards and memories preserve their author references without an ON DELETE
+    -- migration on every dependent table.
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS unlinked_at timestamptz;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS unlinked_reason text;
     ALTER TABLE sessions ADD COLUMN IF NOT EXISTS end_reason text;
     ALTER TABLE inbox_events ADD COLUMN IF NOT EXISTS payload jsonb;
     CREATE TABLE IF NOT EXISTS quota_events (id bigserial PRIMARY KEY, action text NOT NULL, actor_type text NOT NULL, actor_id text NOT NULL, owner_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
@@ -633,7 +641,15 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const cap=limits.capacity.enrollment_tokens_per_owner;
     if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM enrollment_tokens WHERE owner_id=$1 AND used_at IS NULL AND expires_at>now()",[p.id])).rows[0].n)>=cap)throw new ApiError(409,"enrollment_token_limit_reached",`An owner may have at most ${cap} live enrollment tokens`,{limit:cap});
     const raw=token(),exp=new Date(Date.now()+900000).toISOString();await client.query("INSERT INTO enrollment_tokens VALUES($1,$2,$3,NULL)",[hashToken(raw),p.id,exp]);return{status:201,data:{enrollment_token:raw,expires_at:exp}}});});
-  app.get("/v1/owners/me/agents", async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const r=await app.pg.query(`${profileSql} WHERE a.owner_id=$1 ORDER BY a.created_at LIMIT $2`,[p.id,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(x=>({...profileFrom(x),revoked:x.revoked_at!==null})),page:{next_cursor:null}}});
+  app.get("/v1/owners/me/agents", async(req,reply)=>{
+    const p=await principal(req,reply,["owner"]);
+    if(!p)return;
+    const r=await app.pg.query(`${profileSql} WHERE a.owner_id=$1 ORDER BY a.created_at LIMIT $2`,[p.id,boundedLimit((req.query as any).limit)]);
+    // Show unlinked rows too, with `unlinked` set, so an owner auditing their roster can see
+    // "this one isn't mine anymore" rather than silently losing them. Filter is the caller's job
+    // (e.g. CLI `agent list --active-only`); here we are the source of truth.
+    return{data:r.rows.map(x=>({...profileFrom(x),revoked:x.revoked_at!==null,unlinked:x.unlinked_at!==null,unlinked_at:x.unlinked_at,unlinked_reason:x.unlinked_reason})),page:{next_cursor:null}}
+  });
   /** Revoke: revoked_at, the agent's auth tokens and its sessions change in one transaction (PRD §3.2.3). */
   app.post("/v1/owners/me/agents/:agentId/revoke",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId;const client=await app.pg.connect();
     try{
@@ -657,6 +673,27 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const sessionIds=await endAgentSessions(client,aid,"owner_stop");
     await agentEvent(client,aid,"agent.stop_requested",{reason,session_ids:sessionIds});
     return{status:200,data:{agent_id:aid,session_ids:sessionIds,stopped_at:now()}};
+  })});
+  /** Owner-initiated separation. Distinct from `revoke` (moderation) and `stop` (transient): unlink
+   * is the owner choosing to let go of an agent. It marks the row restricted, records who/when/why on
+   * the row itself (`unlinked_at`, `unlinked_reason`), and tears down live state (tokens, sessions,
+   * subscriptions). The row stays so knowledge cards, memory rows, and incidents preserve their
+   * `author_agent_id` references without an ON DELETE migration on every dependent table. Re-adoption
+   * is intentionally NOT in this PR: that needs a different transaction shape (would block on
+   * existing references). After this call, owner reads should treat the agent as gone; see
+   * docs/operations/unlink-agent.md. */
+  app.post("/v1/owners/me/agents/:agentId/unlink",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;const aid=(req.params as any).agentId,reason=(req.body as any)?.reason??null;return idem(req,reply,`unlink:${p.id}:${aid}`,async client=>{
+    assertNoSecret([reason]);
+    const existing=(await client.query("SELECT id, owner_id, unlinked_at FROM agents WHERE id=$1",[aid])).rows[0];
+    if(!existing||existing.owner_id!==p.id)throw new ApiError(404,"not_found","Agent not found");
+    if(existing.unlinked_at!==null)throw new ApiError(409,"already_unlinked","Agent is already unlinked from this owner",{agent_id:aid,unlinked_at:existing.unlinked_at});
+    const r=await client.query("UPDATE agents SET restricted=true, unlinked_at=coalesce(unlinked_at,now()), unlinked_reason=$2 WHERE id=$1 AND owner_id=$3 RETURNING unlinked_at, unlinked_reason",[aid,reason,p.id]);
+    if(!r.rowCount)throw new ApiError(404,"not_found","Agent not found");
+    await client.query("UPDATE auth_tokens SET revoked_at=now() WHERE actor_type='agent' AND actor_id=$1 AND revoked_at IS NULL",[aid]);
+    await endAgentSessions(client,aid,"owner_unlinked");
+    await client.query("DELETE FROM agent_subscriptions WHERE agent_id=$1",[aid]);
+    if(!(await client.query("SELECT 1 FROM inbox_events WHERE agent_id=$1 AND type='agent.unlinked'",[aid])).rowCount)await agentEvent(client,aid,"agent.unlinked",{reason});
+    return{status:200,data:{agent_id:aid,unlinked_at:r.rows[0].unlinked_at,unlinked_reason:r.rows[0].unlinked_reason}};
   })});
   async function listOwnerIncidents(p: Principal, q: any) {
     const limit = boundedLimit(q.limit);

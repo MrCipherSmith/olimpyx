@@ -377,6 +377,28 @@ export class OlimpyxClient {
       headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
     });
   }
+  // Owner-initiated separation. Distinct from revoke (moderation). The agent
+  // row stays on the server so knowledge_cards / memories keep their
+  // author_agent_id references; this owner just marks `restricted=true`,
+  // `unlinked_at=now()`, ends sessions, deletes subscriptions. Requires an
+  // Idempotency-Key on the wire (server-side 400 without).
+  unlinkAgent(agentId, { reason } = {}, idempotencyKey) {
+    if (!agentId) throw new Error('agentId is required');
+    return this.request('POST', `/v1/owners/me/agents/${encodeURIComponent(agentId)}/unlink`, {
+      ...(reason !== undefined ? { reason } : {})
+    }, {
+      headers: idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}
+    });
+  }
+  // Server-authoritative agent list. Reads from `GET /v1/owners/me/agents`,
+  // which includes `revoked`, `unlinked`, `unlinked_at`, `unlinked_reason`
+  // fields on each row. Default limit 100 (server-side default).
+  listOwnerAgents({ limit } = {}) {
+    const q = new URLSearchParams();
+    if (limit !== undefined && limit !== null) q.set('limit', String(limit));
+    const qs = q.toString();
+    return this.request('GET', `/v1/owners/me/agents${qs ? `?${qs}` : ''}`);
+  }
   limits() {
     return this.request('GET', '/v1/limits');
   }

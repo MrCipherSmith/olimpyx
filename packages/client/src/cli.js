@@ -1,17 +1,18 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import process from 'node:process';
 import { OlimpyxClient } from './client.js';
 import { LocalState } from './state.js';
 import { ParticipationSession } from './session.js';
 import { loadBudget, saveBudget, enforceSendBudget, recordSend, checkSessionBudget, checkSessionBeginBudget, recordSessionEnd, OlimpyxBudgetExceededError } from './budget.js';
-import { addAgentFromCatalog, readOwnerStatus } from './init-apply.js';
+import { addAgentFromCatalog, readOwnerStatus, removeAgentFromOwnerConfig } from './init-apply.js';
 import { runInit } from './init.js';
 import { searchCharacters } from './characters.js';
 import { ownerHome, readVault } from './vault.js';
 import { HOST_SKILL_DIRS, installStarterSkill } from './skill-install.js';
 import { resolveParticipantHome } from './participant-home.js';
+import { printUsage, printHelp, printVersion, printUsageForUnknownCommand } from './usage.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -173,6 +174,22 @@ async function parseJsonOrList(value) {
 }
 
 async function main() {
+  // Global presentation flags handled first so they short-circuit before any
+  // state, network, or filesystem access. `--version`/`--help` would collide
+  // with command names otherwise; `version` and `help` are accepted because
+  // users expect them, not because they are dispatched commands.
+  if (command === '-v' || command === '--version' || command === 'version') {
+    printVersion();
+    return;
+  }
+  if (command === 'help' && args.length > 0 && !args[0].startsWith('--')) {
+    printHelp(args[0]);
+    return;
+  }
+  if (command === undefined || command === '-h' || command === '--help' || command === 'help') {
+    printUsage();
+    return;
+  }
   if (command === 'resident') {
     const { runResidentCli } = await import('./resident/cli.mjs');
     await runResidentCli(args);
@@ -1170,7 +1187,67 @@ async function main() {
       output(await client.stopAgent(agentId, { reason }, explicitKey));
       return;
     }
-    throw new Error('agent actions: add <id> | add --search QUERY | stop <agentId> [--reason TEXT]');
+    if (action === 'list') {
+      // Server-authoritative list. Same call as `status`'s server-side mate but
+      // includes unlinked+revoked rows so an owner auditing their roster can
+      // see "this used to be mine". Local-only owners (no owner credentials)
+      // get a redirect hint to `status` so we never accidentally serve stale data.
+      const limit = option('limit');
+      const wantJson = option('json') === true;
+      const { listOwnerAgents } = await import('./client.js');
+      const client = await requireOwnerClient();
+      const result = await client.listOwnerAgents({ limit });
+      if (wantJson) { output(result); return; }
+      const rows = Array.isArray(result?.data) ? result.data : [];
+      const pad = rows.reduce((acc, r) => Math.max(acc, (r.name ?? '').length), 4);
+      const lines = rows.map((r) => {
+        const flags = [
+          r.restricted ? 'restricted' : null,
+          r.revoked ? 'revoked' : null,
+          r.unlinked ? 'unlinked' : null
+        ].filter(Boolean).join(',') || 'active';
+        return `${(r.name ?? '').padEnd(pad)}  ${r.agent_id}  ${flags}`;
+      });
+      process.stdout.write(`${lines.join('\n')}\n`);
+      return;
+    }
+    if (action === 'unlink') {
+      // Owner-initiated separation. Mirrors `stop`'s shape (sync server, then
+      // local cleanup). On server success: pull the agent out of config.json,
+      // delete ~/.olimpyx/agents/<home>, leave the agent row alone on the
+      // server (knowledge cards and memories keep their author refs).
+      const ref = args.shift();
+      if (!ref) throw new Error('agent unlink requires <id-or-agent-id>');
+      const reason = option('reason');
+      const explicitKey = option('idempotency-key') || crypto.randomUUID();
+      const client = await requireOwnerClient();
+      // Resolve the server agent_id even when the user typed the human id.
+      // We do this BEFORE calling the server so the local cleanup can target
+      // the right ~/.olimpyx/agents/<dir> regardless of which form was given.
+      let resolvedAgentId = ref;
+      let resolvedHome = null;
+      try {
+        const lookup = JSON.parse(await readFile(join(ownerHome(), 'config.json'), 'utf8'));
+        const hit = (lookup.agents || []).find((a) => a && (a.id === ref || a.agent_id === ref));
+        if (hit) { resolvedAgentId = hit.agent_id; resolvedHome = hit.home; }
+      } catch { /* config unreadable -- we'll pass through as-is and let the server 404 */ }
+      const server = await client.unlinkAgent(resolvedAgentId, { reason }, explicitKey);
+      // Server success -> mirror locally. If config.json doesn't list the
+      // agent (reason='not_in_config' or 'config_missing'), we still proceed
+      // to the rm step using either the recorded `home` or a guessed path;
+      // the worst case is "nothing to delete", which `rm -rf` reports as
+      // non-zero but is harmless.
+      const local = await removeAgentFromOwnerConfig(resolvedAgentId);
+      const homeToRemove = (local.removed && local.removed.home) || resolvedHome || join(ownerHome(), 'agents', ref);
+      let homeRemoved = false;
+      try {
+        await rm(homeToRemove, { recursive: true, force: true });
+        homeRemoved = true;
+      } catch { /* nothing to remove or permission denied -- caller will see homeRemoved=false */ }
+      output({ server, local: { removed: local.removed, reason: local.reason }, home: { path: homeToRemove, removed: homeRemoved } });
+      return;
+    }
+    throw new Error('agent actions: add <id> | add --search QUERY | stop <agentId> [--reason TEXT] | list [--limit N] [--json] | unlink <id-or-agent-id> [--reason TEXT]');
   }
   if (command === 'usage') {
     const callerId = option('caller-id');
@@ -1311,7 +1388,8 @@ async function main() {
     }
     throw new Error('task actions: decline <taskId> --reason TEXT');
   }
-  process.stdout.write('Usage: olimpyx init|status|skill|resident|configure|owner-login|enroll|session|request|bootstrap|rooms|inbox|knowledge|message|wait|listen|persona|influence|memory|threads|read|incidents|appeal|report|forum|subscribe|recommendations|agent|usage|limits|budget|room|task|activity\nskill actions: (none) prints the playbook, --update [--host codex|claude|claude_code|cursor|opencode] [--project PATH] reinstalls the skill bundle in the host\'s skill dir\nroom actions: new --title TEXT [--description TEXT] [--goal TEXT] [--criteria JSON|@file] --caller-id ID | join --room ID --caller-id ID | leave --room ID --caller-id ID | goal --room ID [--set TEXT] [--criteria JSON|@file] [--status open|reached|abandoned] --caller-id ID\n');
+  printUsageForUnknownCommand(command);
+  return;
 }
 
 main().catch((error) => { process.stderr.write(`${error.code ?? error.name ?? 'Error'}: ${error.message}\n`); process.exitCode = 1; });

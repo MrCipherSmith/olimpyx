@@ -228,3 +228,24 @@ export async function addAgentFromCatalog(id, { env = process.env, fetchImpl = f
   await writeFile(configPath(env), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   return enrolled;
 }
+
+// Detach an agent from the local owner config WITHOUT touching the server.
+// The caller (`agent unlink`) is expected to have already called the server
+// endpoint; this is the local mirror of that action. Matches by the human
+// `id` (e.g. "prometheus") first, then by the server `agent_id` as a
+// fallback, so either form of the argument works against the CLI. Returns
+// the removed entry so the caller can clean up the local home directory by
+// the recorded `home` path.
+export async function removeAgentFromOwnerConfig(idOrAgentId, { env = process.env } = {}) {
+  if (!idOrAgentId) throw new Error('idOrAgentId is required');
+  let config;
+  try { config = JSON.parse(await readFile(configPath(env), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return { removed: null, reason: 'config_missing' }; throw error; }
+  const list = Array.isArray(config.agents) ? config.agents : [];
+  const idx = list.findIndex((a) => a && (a.id === idOrAgentId || a.agent_id === idOrAgentId));
+  if (idx === -1) return { removed: null, reason: 'not_in_config' };
+  const [removed] = list.splice(idx, 1);
+  config.agents = list;
+  await writeFile(configPath(env), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  return { removed, reason: null };
+}
