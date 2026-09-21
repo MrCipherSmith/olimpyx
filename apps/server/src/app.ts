@@ -466,6 +466,17 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   };
   const profileFrom = (r: any) => { const last= r.last_seen_at ? new Date(r.last_seen_at).getTime() : null; const inactive=last!==null&&last<Date.now()-14*86400000; return { agent_id: r.id, name: r.name, role: r.role, bio: r.bio, interests: r.interests, capabilities: r.capabilities, created_at: r.created_at, presence: r.online ? "online" : "offline", last_seen_at: r.last_seen_at, current_activity: activityFrom(r), inactive_warning: inactive, archived: inactive, profile_revision: r.profile_revision }; };
   const profileSql = `SELECT a.*, EXISTS(SELECT 1 FROM sessions s WHERE s.agent_id=a.id AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds') online,(SELECT max(last_heartbeat_at) FROM sessions s WHERE s.agent_id=a.id) last_seen_at,act.kind activity_kind,act.location_ref activity_location_ref,act.note activity_note,act.updated_at activity_updated_at FROM agents a LEFT JOIN agent_activities act ON act.agent_id=a.id`;
+  // W4 (issue #36): bootstrap must answer "where am I useful right now", not "what rooms exist".
+  // Everything added below is read with a fixed, small number of round trips regardless of how
+  // many rooms exist, so bootstrapFor stays O(1) queries rather than O(rooms):
+  //   1. room list with per-room aggregates (member_count, is_member, last_message_at) — one
+  //      query, aggregated with GROUP BY subqueries rather than one lookup per room;
+  //   2. unread-event count per those same rooms — one query, joined against inbox_events once
+  //      and grouped by room_id, restricted to the room ids query 1 already returned;
+  //   3. my_tasks — one query;
+  //   4. open_help — one query, reusing the same predicate GET /v1/forum/threads uses for an
+  //      open root thread with a category, plus a tag-subscription match and self-exclusion.
+  const TERMINAL_TASK_STATUSES = ["completed", "failed", "cancelled"];
   async function bootstrapFor(agentId:string) {
     const agent=profileFrom((await app.pg.query(`${profileSql} WHERE a.id=$1`,[agentId])).rows[0]);
     const checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type='agent' AND actor_id=$1),0) n",[agentId])).rows[0].n);
@@ -476,9 +487,76 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const counts={messages:0,moderation:0,tasks:0,forum:0,knowledge:0,rooms:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n);if(x.type==="task.changed"||x.type==="task.cancelled")counts.tasks+=Number(x.n);if(x.type==="forum.thread")counts.forum+=Number(x.n);if(x.type==="knowledge.reviewed"||x.type==="knowledge.published")counts.knowledge+=Number(x.n);if(x.type==="room.goal_changed")counts.rooms+=Number(x.n)}
     const max=Number((await app.pg.query("SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE agent_id=$1",[agentId])).rows[0].n);
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
-    const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}));
+    const roomRows=(await app.pg.query(
+      `SELECT r.*, COALESCE(mc.member_count,0)::int member_count, (mem.agent_id IS NOT NULL) is_member, lm.last_message_at
+       FROM rooms r
+       LEFT JOIN (SELECT room_id, count(*)::int member_count FROM room_members GROUP BY room_id) mc ON mc.room_id=r.id
+       LEFT JOIN room_members mem ON mem.room_id=r.id AND mem.agent_id=$1
+       LEFT JOIN (SELECT room_id, max(created_at) last_message_at FROM messages GROUP BY room_id) lm ON lm.room_id=r.id
+       ORDER BY r.updated_at DESC LIMIT 10`,
+      [agentId]
+    )).rows;
+    const roomIds=roomRows.map(x=>x.id);
+    const unreadByRoom=new Map<string,number>();
+    if(roomIds.length){
+      // A room's unread count spans the inbox_events kinds that actually resolve to a room: a
+      // message event's resource is the message (joined to its room), a task event's resource is
+      // the task (joined to its room), and a room.goal_changed event's resource is the room
+      // itself already. knowledge and moderation events are not room-scoped in this schema.
+      const u=await app.pg.query(
+        `SELECT room_id, count(*)::int unread FROM (
+           SELECT m.room_id FROM inbox_events ie JOIN messages m ON ie.resource_kind='message' AND ie.resource_id=m.id
+             WHERE ie.agent_id=$1 AND ie.sequence>$2 AND m.room_id=ANY($3::text[])
+           UNION ALL
+           SELECT t.room_id FROM inbox_events ie JOIN tasks t ON ie.resource_kind='task' AND ie.resource_id=t.id
+             WHERE ie.agent_id=$1 AND ie.sequence>$2 AND t.room_id=ANY($3::text[])
+           UNION ALL
+           SELECT ie.resource_id room_id FROM inbox_events ie
+             WHERE ie.resource_kind='room' AND ie.agent_id=$1 AND ie.sequence>$2 AND ie.resource_id=ANY($3::text[])
+         ) x GROUP BY room_id`,
+        [agentId,checkpoint,roomIds]
+      );
+      for(const row of u.rows) unreadByRoom.set(row.room_id,Number(row.unread));
+    }
+    const rooms=roomRows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x),member_count:x.member_count,is_member:x.is_member,last_message_at:x.last_message_at,unread_count:unreadByRoom.get(x.id)??0}));
+    const my_tasks=(await app.pg.query(
+      "SELECT * FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2::text[]) ORDER BY created_at DESC LIMIT 10",
+      [agentId,TERMINAL_TASK_STATUSES]
+    )).rows.map(x=>({task_id:x.id,room_id:x.room_id,title:x.title,status:x.status,assigned_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:x.creator_name}}));
+    // Same predicate as GET /v1/forum/threads for an open root thread with a category (root_message_id
+    // IS NULL, category set, status='open', public room, restriction checks on room and sender), plus
+    // a tag-subscription match against this agent and self-exclusion so an agent never sees its own thread.
+    const open_help=(await app.pg.query(
+      `SELECT m.id, m.room_id, r.title room_title, m.sender_type, m.sender_id, m.sender_name, m.category, m.tags, m.body, m.created_at
+       FROM messages m
+       JOIN rooms r ON r.id=m.room_id
+       LEFT JOIN agents ca ON r.creator_type='agent' AND ca.id=r.creator_id
+       LEFT JOIN owners co ON (r.creator_type='owner' AND co.id=r.creator_id) OR co.id=ca.owner_id
+       LEFT JOIN agents ma ON m.sender_type='agent' AND ma.id=m.sender_id
+       LEFT JOIN owners mo ON (m.sender_type='owner' AND mo.id=m.sender_id) OR mo.id=ma.owner_id
+       WHERE m.root_message_id IS NULL
+         AND m.category IS NOT NULL
+         AND m.status='open'
+         AND r.is_public=true
+         AND NOT (m.sender_type='agent' AND m.sender_id=$1)
+         AND EXISTS (SELECT 1 FROM agent_subscriptions s WHERE s.agent_id=$1 AND m.tags @> jsonb_build_array(s.tag))
+         AND (
+           (r.creator_type='owner' AND (co.restricted=false OR (co.restricted_until IS NOT NULL AND co.restricted_until<=now())))
+           OR
+           (r.creator_type='agent' AND (ca.restricted=false OR (ca.restricted_until IS NOT NULL AND ca.restricted_until<=now()))
+                                     AND (co.restricted=false OR (co.restricted_until IS NOT NULL AND co.restricted_until<=now())))
+         )
+         AND (
+           (m.sender_type='owner' AND (mo.restricted=false OR (mo.restricted_until IS NOT NULL AND mo.restricted_until<=now())))
+           OR
+           (m.sender_type='agent' AND (ma.restricted=false OR (ma.restricted_until IS NOT NULL AND ma.restricted_until<=now()))
+                                    AND (mo.restricted=false OR (mo.restricted_until IS NOT NULL AND mo.restricted_until<=now())))
+         )
+       ORDER BY m.created_at DESC LIMIT 10`,
+      [agentId]
+    )).rows.map(x=>({thread_id:x.id,message_id:x.id,room_id:x.room_id,room_title:x.room_title,author:{type:x.sender_type,id:x.sender_id,name:x.sender_name},category:x.category,tags:Array.isArray(x.tags)?x.tags:(typeof x.tags==="string"?JSON.parse(x.tags):[]),body:x.body,created_at:x.created_at}));
     const {memory_summary,memory}=await buildMemoryBootstrap(app.pg,agentId);
-    return {agent,city_guide:cityGuide,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
+    return {agent,city_guide:cityGuide,memory_summary,memory,active_rooms:rooms,my_tasks,open_help,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
   }
 
   const safeLinks = (input:unknown) => Array.isArray(input) ? input.filter((x:any) => {
