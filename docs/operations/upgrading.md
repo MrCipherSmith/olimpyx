@@ -11,10 +11,9 @@ It supersedes ad-hoc upgrade notes scattered across the repo.
 2. `git pull` and re-run `node packages/client/src/install-skill.js codex .`
    (or your host).
 3. Restart the server. The `migrate()` step adds any new tables automatically.
-4. Run `olimpyx init` — it is fully idempotent, so it will simply verify your
-   existing install and exit with `result: already_initialized` if everything
-   is healthy. Use `init --new-agent` only when you actually want a fresh
-   agent under a new `installationId`.
+4. Run `olimpyx init` — with a vault already present it exits
+   `result: already_initialized` without touching it. Use `init --force` only
+   when you actually want to register or log in again.
 5. Re-run `session begin --caller-id X` to refresh the per-caller state layout.
 6. Smoke-test with `rooms --caller-id X`.
 
@@ -34,6 +33,39 @@ Server and client can be upgraded in either order — they are decoupled.
 | `pending-mutations.json` | same dir as session | transient | recreated on the next mutation |
 | agent row, sessions, `agent_activities` | server Postgres | server lifetime | yes (DB) |
 | memories, knowledge_cards, messages, rooms | server Postgres | server lifetime | yes (DB) |
+
+## The owner's vault and its key
+
+`olimpyx init` writes two files, and they are only useful together:
+
+| File | What it is |
+|---|---|
+| `<owner home>/vault.enc` | AES-256-GCM envelope holding the owner's email and password, the owner access token, and every enrolled agent's credential. |
+| `~/.config/olimpyx/master.key` (or `$OLIMPYX_MASTER_KEY`) | The 32-byte key that opens it. Mode `0600`. |
+
+**Losing the key destroys the vault.** There is no recovery, no passphrase
+fallback and no server-side copy — the owner password and every agent
+credential inside it are gone. Back the two up together or not at all;
+a snapshot of `~/.olimpyx` without `~/.config/olimpyx` restores nothing.
+
+Only a write creates a key. A read of a vault that does not exist fails and
+leaves nothing behind, so a `master.key` with no `vault.enc` next to it is an
+artefact of an older client and can be deleted.
+
+To reset an install: remove `<owner home>` and the key, then run
+`olimpyx init`. The agents enrolled by the old vault stay on the server until
+the owner revokes them from the dashboard.
+
+## Collecting per-caller state
+
+`calls/<caller-id>/` directories are created on demand and hold a
+`session-credential` that dies with its server-side session after 90 seconds.
+`session begin` and `session end` now collect the stale ones, and
+`olimpyx session prune [--max-age-hours N]` does it on request, reporting what
+it removed. A directory is kept while its caller lease is younger than the
+cutoff, or while it still holds unacknowledged mutations — those idempotency
+keys are the only thing standing between an ambiguous retry and a duplicate
+send.
 
 The only way to lose data is to delete `.olimpyx/<name>/credential` or
 `.olimpyx/<name>/owner-credential` by hand. Everything else is either
@@ -241,18 +273,18 @@ The CLI resolves a participant home in this order:
 2. `OLIMPYX_HOME=<absolute path>` — **must be absolute**. A relative value is
    refused, because it made an agent's home depend on where its host happened
    to be launched.
-3. Otherwise `.olimpyx/` under the current working directory. This is
-   deprecated: it still works, it prints one notice per invocation naming its
-   replacement, and a future release will refuse it.
+There is no third rule. Deriving the home from the working directory is gone:
+a home that depends on where a host happened to be launched is what produced
+the collision below, and every caller that relied on it has to name the home it
+meant. A command that reaches for participant state with neither variable set
+fails with both replacements spelled out.
 
 A participant home may never be the owner home (`$HOME/.olimpyx`, or
 `$OLIMPYX_OWNER_HOME`). The owner home holds `vault.enc` and the owner
 `config.json`; a participant home holds an agent `credential` and its
 sessions, and both write `config.json` at that path. Asking for it by name
-(`OLIMPYX_HOME=$HOME/.olimpyx`) is an error; landing on it through rule 3 —
-which is what happens when you run a participant command from `$HOME` — means
-there is no participant home, and participant commands say so. Owner commands
-are unaffected and keep working from any directory.
+(`OLIMPYX_HOME=$HOME/.olimpyx`) is an error. Owner commands never needed a
+participant home and keep working from any directory with neither variable set.
 
 Two projects in two directories start with two empty state trees — **the
 second project will ask you for everything**:
@@ -263,16 +295,14 @@ second project will ask you for everything**:
 | `owner-login --email EMAIL --password-stdin` | owner email + password | only via a copy of `.olimpyx/owner-credential` (24 h TTL) |
 | `enroll --profile @profile.json` | the profile JSON | only via a copy of `.olimpyx/credential` + matching `installationId` in `config.json` |
 
-`init` runs the three steps in order and probes the server before each
-mutation. Default behaviour:
+`init` is the guided wizard. Default behaviour:
 
 | Situation | What `init` does |
 |---|---|
-| Empty state tree (no `config.json`) | Asks for `--server`, `--email`/`--password-stdin`, `--profile`. Sets up everything. Exits `result: initialized`. |
-| `config.json` has `agentId` and the server still has that agent | No-op. Returns `result: already_initialized`. Does **not** re-issue a credential, **does not** re-issue an enrollment token, **does not** touch the persona history. |
-| `config.json` has `agentId` but `GET /v1/agents/<id>` fails (e.g. revoked or token expired) | Tries `enroll` with the same `installationId`. If the server returns `409 agent_already_enrolled` (F-01), `init` adopts the existing row pointed at by the 409's `details.agent_id` and refreshes the local `config.json`. If the server returns a brand-new 201, the credential rotates. |
-| `init --new-agent` | Always rotates `installationId`, calls `enroll`. If an agent with the previous id is still on the server, the warning lists it. The old row stays on the server until the owner revokes it. |
-| `init --force` | Refreshes the owner token even when the cached one works, and re-enrolls even when the existing agent is healthy. Use sparingly. |
+| No `vault.enc` in the owner home | Runs the wizard: server, register or log in, skill scope, hosts, characters. Needs a real terminal. |
+| `vault.enc` present | No-op. Prints `result: already_initialized` with the server, the owner email and the agent ids, and exits 0. Does **not** re-register, **does not** re-enroll, **does not** rewrite the vault or the owner config. |
+| `init --force` | Runs the wizard anyway. `applyInit` **overwrites** `vault.enc` and the owner config; it does not merge. Use when you actually mean to register or log in again. |
+| another agent on the existing owner | `olimpyx agent add <id>` — not `init`. |
 
 Three practical workflows for a new project:
 

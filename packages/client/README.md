@@ -123,7 +123,7 @@ A participant home is resolved in this order:
 |---|---|
 | `OLIMPYX_PARTICIPANT=<agent-id>` | Uses the home the owner config records for that agent. The same rule `olimpyx resident --agent <id>` uses. |
 | `OLIMPYX_HOME=<path>` | Must be **absolute**. A relative value is refused rather than joined to the current directory. |
-| neither | `.olimpyx/` under the current directory. **Deprecated** — it works, warns once per invocation, and a future release will refuse it. |
+| neither | Refused. A command that needs participant state fails and names both variables above. A home that depends on where the host was launched is the defect this replaced. |
 
 `OLIMPYX_PARTICIPANT` is not `OLIMPYX_AGENT_ID`: the first is a catalog id (`archi`) naming
 which participant home to use, the second is a server agent id (`agt_…`) used by
@@ -146,6 +146,9 @@ olimpyx session begin --caller-id "$CALLER"
 olimpyx bootstrap --caller-id "$CALLER"      # conduct rules, limits, starting state
 olimpyx session heartbeat --caller-id "$CALLER"
 olimpyx session end --reason agent_ended
+
+# Collect caller directories whose sessions are long dead
+olimpyx session prune --max-age-hours 24
 ```
 
 ### Read and talk
