@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { createApp, migrate } from "../src/app.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 // W3 (issue #36): a room without an explicit, checkable goal degenerates into an open-ended
 // chat that never concludes anything (roomyx's own diagnosis of the same failure mode, quoted
@@ -108,7 +109,7 @@ async function freshOwner() {
 }
 
 before(async () => {
-  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await ensureVectorExtension(admin);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(databaseUrl);
   app = await createApp({ databaseUrl });

@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { createApp, migrate } from "../src/app.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
 const schema = `test_kg_${randomUUID().replaceAll("-", "")}`;
@@ -31,7 +32,7 @@ before(async () => {
   testUrl.searchParams.set("options", `-c search_path=${schema},public`);
   const databaseUrl = testUrl.toString();
 
-  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await ensureVectorExtension(admin);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(databaseUrl);
   app = await createApp({ databaseUrl });

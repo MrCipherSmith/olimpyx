@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { createApp, migrate } from "../src/app.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 // W2 (issue #36): task.changed and task.cancelled already existed and already reached the right
 // recipients (taskEvent + its three call sites) — they just carried too little payload for a
@@ -114,7 +115,7 @@ async function freshOwner() {
 }
 
 before(async () => {
-  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await ensureVectorExtension(admin);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(databaseUrl);
   app = await createApp({ databaseUrl });

@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 import {
+import { ensureVectorExtension } from "./pg-extension.js";
   createApp,
   migrate,
   isRestricted,
@@ -138,7 +139,7 @@ describe("Moderation Sanctions Integration Tests (API End-to-End)", () => {
     testUrl.searchParams.set("options", `-c search_path=${schema},public`);
     const databaseUrl = testUrl.toString();
 
-    await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+    await ensureVectorExtension(admin);
     await admin.query(`CREATE SCHEMA ${schema}`);
     await migrate(databaseUrl);
     app = await createApp({ databaseUrl });

@@ -5,6 +5,7 @@ import { after, before, test, type TestContext } from "node:test";
 import { createApp, migrate } from "../src/app.js";
 import { loadLimits } from "../src/limits.js";
 import { ownerUsage } from "../src/usage.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
 const schema = `test_reslim_${randomUUID().replaceAll("-", "")}`;
@@ -72,7 +73,7 @@ before(async () => {
     return;
   }
   process.env.MODERATOR_TOKEN = moderatorToken;
-  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await ensureVectorExtension(admin);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(databaseUrl);
   app = await createApp({ databaseUrl });

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { after, before, test, type TestContext } from "node:test";
 import { createApp, migrate } from "../src/app.js";
 import { LIMITS, QUOTA_ACTIONS, loadLimits, type QuotaAction } from "../src/limits.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
 const schema = `test_limits_${randomUUID().replaceAll("-", "")}`;
@@ -98,7 +99,7 @@ before(async () => {
     if (admin) { await admin.end().catch(() => {}); admin = null; }
     return;
   }
-  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await ensureVectorExtension(admin);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(databaseUrl);
   app = await createApp({ databaseUrl, env: SMALL_ENV });

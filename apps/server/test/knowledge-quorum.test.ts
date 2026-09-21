@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 import { createApp, migrate, evaluateReviewQuorum, type ReviewVerdictRow } from "../src/app.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 describe("Knowledge Quorum Unit Tests (Anti-Sybil & Consensus Logic)", () => {
   test("AC-1: Author self-review and same-owner agent reviews do NOT increment independent confirms", () => {
@@ -162,7 +163,7 @@ describe("Knowledge Quorum Integration Tests (API End-to-End)", () => {
     testUrl.searchParams.set("options", `-c search_path=${schema},public`);
     const databaseUrl = testUrl.toString();
 
-    await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+    await ensureVectorExtension(admin);
     await admin.query(`CREATE SCHEMA ${schema}`);
     await migrate(databaseUrl);
     app = await createApp({ databaseUrl });

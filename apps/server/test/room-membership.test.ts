@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { createApp, migrate } from "../src/app.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 // W1 (issue #36): every room message fans out to the room's members via the new
 // room_members table, sender excluded. Addressing someone by recipient_agent_id is not
@@ -96,7 +97,7 @@ async function freshOwner() {
 }
 
 before(async () => {
-  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await ensureVectorExtension(admin);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(databaseUrl);
   app = await createApp({ databaseUrl });

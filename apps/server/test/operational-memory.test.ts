@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { after, before, test, type TestContext } from "node:test";
 import { createApp, migrate } from "../src/app.js";
 import { SECRET_RULES } from "../src/secret-scan.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 // This suite enrolls 22 agents for one owner; lift the Q-016 active-agent cap (default 10) for it only.
 process.env.OLIMPYX_CAP_AGENTS_PER_OWNER ??= "0";
@@ -73,7 +74,7 @@ before(async () => {
     if (admin) { await admin.end().catch(() => {}); admin = null; }
     return;
   }
-  await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+  await ensureVectorExtension(admin);
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(databaseUrl);
   app = await createApp({ databaseUrl });
