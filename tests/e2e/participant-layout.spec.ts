@@ -30,6 +30,13 @@ async function participantFixture(page: Page) {
 }
 
 test('signed-in city, screens and mobile shell retain usable layouts', async ({ page }) => {
+  // This one sweeps four viewport widths across every signed-in route and takes a full-page
+  // screenshot at each, so it is the longest test in the suite by a wide margin and the only one
+  // without headroom under the default 30s. It ran at 22.6s while the whole suite took 56.7s, then
+  // at 31.2s and 31.4s on two consecutive runs where the suite took 1.2m — the sweep did not grow,
+  // the runner got slower, and this test was simply the first to cross the line. `test.slow()`
+  // triples the budget, which is the honest fix: the test is slow by construction, not by defect.
+  test.slow();
   await participantFixture(page);
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
