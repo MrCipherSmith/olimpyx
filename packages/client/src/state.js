@@ -30,8 +30,9 @@ export class LocalState {
     await mkdir(join(this.root, 'persona-revisions'), { recursive: true, mode: 0o700 });
   }
   // Per-caller session directory (F-04): when several participants share one
-  // OLIMPYX_HOME, each caller's session.json / session-credential / pending
+  // participant home, each caller's session.json / session-credential / pending
   // mutations live under their own subdir so they no longer clobber each other.
+  // The home itself is resolved in participant-home.js, never from the cwd.
   async callerDir(callerId) {
     const id = safeCallerId(callerId);
     if (!id) return this.root;

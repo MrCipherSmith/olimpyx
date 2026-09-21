@@ -11,10 +11,30 @@ import { runInit } from './init.js';
 import { searchCharacters } from './characters.js';
 import { ownerHome, readVault } from './vault.js';
 import { HOST_SKILL_DIRS, installStarterSkill } from './skill-install.js';
+import { resolveParticipantHome } from './participant-home.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
-const state = new LocalState(resolve(process.env.OLIMPYX_HOME || '.olimpyx'));
+
+// The participant home is resolved on first use, not at startup: owner-scoped commands
+// (`init`, `status`, `agent add`, `skill`) are routinely run from $HOME, where the legacy
+// working-directory rule lands on the owner home. They must keep working; only a command that
+// actually reaches for participant state gets the refusal. See participant-home.js.
+let participantState = null;
+let legacyNoticeShown = false;
+function participantHome() {
+  const { home, notice, reason } = resolveParticipantHome();
+  if (!home) throw new Error(reason);
+  if (notice && !legacyNoticeShown) { legacyNoticeShown = true; process.stderr.write(`${notice}\n`); }
+  return home;
+}
+const state = new Proxy({}, {
+  get(_target, property) {
+    participantState ??= new LocalState(participantHome());
+    const value = Reflect.get(participantState, property);
+    return typeof value === 'function' ? value.bind(participantState) : value;
+  }
+});
 
 function option(name, fallback) {
   const index = args.indexOf(`--${name}`);
@@ -69,7 +89,11 @@ async function tryLoadOwnerToken() {
   return loadVaultOwnerToken();
 }
 async function ownerServerUrl() {
-  const local = await state.loadConfig();
+  // A participant home may be unavailable here (an owner command run from $HOME, where the
+  // legacy rule collides with the owner home). That is not this function's problem: it only
+  // means there is no project-local config to prefer, so fall through to the owner home.
+  let local = {};
+  try { local = await state.loadConfig(); } catch { /* no participant home; owner config below */ }
   if (local.serverUrl) return local.serverUrl;
   try { return JSON.parse(await readFile(join(ownerHome(), 'config.json'), 'utf8')).serverUrl; } catch { return null; }
 }
