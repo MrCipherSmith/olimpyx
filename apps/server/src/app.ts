@@ -453,7 +453,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const agent=profileFrom((await app.pg.query(`${profileSql} WHERE a.id=$1`,[agentId])).rows[0]);
     const checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type='agent' AND actor_id=$1),0) n",[agentId])).rows[0].n);
     const pending=await app.pg.query("SELECT type,count(*) n FROM inbox_events WHERE agent_id=$1 AND sequence>$2 GROUP BY type",[agentId,checkpoint]);
-    const counts={messages:0,moderation:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n)}
+    // W2 (issue #36): task/forum/knowledge events are new inbox types; without a bucket here
+    // an agent's bootstrap still reports zero for everything but messages and moderation.
+    const counts={messages:0,moderation:0,tasks:0,forum:0,knowledge:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n);if(x.type==="task.assigned"||x.type==="task.updated")counts.tasks+=Number(x.n);if(x.type==="forum.question")counts.forum+=Number(x.n);if(x.type==="knowledge.reviewed"||x.type==="knowledge.published")counts.knowledge+=Number(x.n)}
     const max=Number((await app.pg.query("SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE agent_id=$1",[agentId])).rows[0].n);
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
     const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at}));
@@ -980,6 +982,30 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
           // Thread root author who is an owner: never a room member, so not reachable by the fan-out above.
           if (rootOwnerAuthorId && rootOwnerAuthorId !== p.id) {
             await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), rootOwnerAuthorId, mid]);
+          }
+          // W2 (issue #36): a root forum message (category set, root_message_id null — the same
+          // shape GET /v1/forum/threads selects) also reaches agents who never joined the room,
+          // via their tag subscriptions. One INSERT...SELECT DISTINCT: an agent subscribed to
+          // several of this message's tags still gets exactly one event, not one per tag match.
+          if (category !== null && tags.length) {
+            await client.query(
+              `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload)
+               SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), d.agent_id, 'forum.question', 'message', $1, $2::jsonb
+               FROM (SELECT DISTINCT agent_id FROM agent_subscriptions WHERE tag=ANY($3::text[]) AND agent_id IS DISTINCT FROM $4) d`,
+              [
+                mid,
+                JSON.stringify({
+                  message_id: mid,
+                  room_id: rid,
+                  category,
+                  tags,
+                  topic: b.body.length > 140 ? `${b.body.slice(0, 140)}…` : b.body,
+                  author: { actor_type: p.type, actor_id: p.id, display_name: p.name }
+                }),
+                tags,
+                p.type === "agent" ? p.id : null
+              ]
+            );
           }
         }
 
@@ -1543,11 +1569,38 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const p=await principal(req,reply,["owner"]);
     if(!p)return;
     const cid=(req.params as any).cardId,b=req.body as {public:boolean};
-    const card=(await app.pg.query("SELECT author_agent_id FROM knowledge_cards WHERE id=$1",[cid])).rows[0];
+    const card=(await app.pg.query("SELECT c.author_agent_id,c.public,v.topic FROM knowledge_cards c LEFT JOIN knowledge_versions v ON v.id=c.latest_version_id WHERE c.id=$1",[cid])).rows[0];
     if(!card)return fail(reply,404,"not_found","Card not found");
     if(!await ownsAgent(p,card.author_agent_id))return fail(reply,403,"forbidden","Only the author owner can change publication");
-    const r=await app.pg.query("UPDATE knowledge_cards SET public=$2 WHERE id=$1 RETURNING id,public",[cid,b.public]);
-    return{data:{card_id:r.rows[0].id,public:r.rows[0].public}};
+    const client=await app.pg.connect();
+    try{
+      await client.query("BEGIN");
+      const r=await client.query("UPDATE knowledge_cards SET public=$2 WHERE id=$1 RETURNING id,public",[cid,b.public]);
+      // W2 (issue #36): only the false->true transition is "reaching published state" — flipping
+      // an already-public card (or unpublishing) must not re-notify. Author + every reviewer of
+      // any of its versions, actor excluded, deduplicated via UNION (not UNION ALL) so a reviewer
+      // of three versions still gets exactly one event.
+      if(b.public&&!card.public){
+        await client.query(
+          `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload)
+           SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), recipient, 'knowledge.published', 'knowledge_card', $1, $2::jsonb
+           FROM (
+             SELECT $3::text AS recipient
+             UNION
+             SELECT kr.reviewer_agent_id FROM knowledge_reviews kr JOIN knowledge_versions kv ON kv.id=kr.version_id WHERE kv.card_id=$1
+           ) recipients
+           WHERE recipient IS DISTINCT FROM $4`,
+          [cid, JSON.stringify({card_id:cid,topic:card.topic,published_by:{actor_type:p.type,actor_id:p.id}}), card.author_agent_id, p.type==="agent"?p.id:null]
+        );
+      }
+      await client.query("COMMIT");
+      return{data:{card_id:r.rows[0].id,public:r.rows[0].public}};
+    }catch(e){
+      await client.query("ROLLBACK");
+      throw e;
+    }finally{
+      client.release();
+    }
   });
 
   app.patch("/v1/knowledge/cards/:cardId/archive",async(req,reply)=>{
@@ -1672,7 +1725,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const p=await principal(req,reply,["session"]);
     if(!p)return;
     const vid=(req.params as any).versionId;
-    const target=(await app.pg.query("SELECT 1 FROM knowledge_versions WHERE id=$1",[vid])).rows[0];
+    const target=(await app.pg.query("SELECT card_id,topic,author_agent_id FROM knowledge_versions WHERE id=$1",[vid])).rows[0];
     if(!target)return fail(reply,404,"not_found","Version not found");
     return idem(req,reply,p.id,async()=>{
       const b=req.body as any,client=await app.pg.connect();
@@ -1687,6 +1740,13 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
           r=(await client.query("UPDATE knowledge_reviews SET verdict=$3,explanation=$4,evidence=$5,revision=revision+1,created_at=clock_timestamp() WHERE version_id=$1 AND reviewer_agent_id=$2 RETURNING *",[vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
         }else{
           r=(await client.query("INSERT INTO knowledge_reviews(id,version_id,reviewer_agent_id,verdict,explanation,evidence,created_at) VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()) RETURNING *",[id("rev"),vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
+        }
+        // W2 (issue #36): a review verdict was previously silent for the card's author.
+        if(target.author_agent_id!==p.id){
+          await client.query(
+            "INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload) VALUES($1,$2,'knowledge.reviewed','knowledge_version',$3,$4::jsonb)",
+            [id("evt"),target.author_agent_id,vid,JSON.stringify({version_id:vid,card_id:target.card_id,topic:target.topic,verdict:r.verdict,reviewer_agent_id:p.id})]
+          );
         }
         const metrics = await getReviewMetrics(vid, client);
         if (metrics.independent.confirm >= metrics.threshold) {
@@ -1720,6 +1780,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2)",[assignee,TERMINAL_TASK])).rows[0].n)>=cap)throw new ApiError(409,"assignee_at_capacity",`The assignee already has ${cap} open tasks`,{limit:cap});
     const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO tasks SELECT $1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,t.c,t.c FROM t RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
     await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed"});
+    // W2 (issue #36): assigning a task is otherwise silent for the assignee beyond the generic
+    // task.changed signal above; skip only when the creator assigned it to themselves.
+    if(!(p.type==="agent"&&p.id===assignee))await taskEvent(client,{type:"agent",id:assignee},"task.assigned",tid,{task_id:tid,room_id:(req.params as any).roomId,title:b.title,status:"proposed",assigned_by:byOf(p)});
     return{status:201,data:taskFrom(r.rows[0])}})});
   app.get("/v1/rooms/:roomId/tasks",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE room_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).roomId,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(taskFrom),page:{next_cursor:null}}});
   app.get("/v1/tasks/:taskId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE id=$1",[(req.params as any).taskId]);if(!r.rowCount)return fail(reply,404,"not_found","Task not found");return{data:taskFrom(r.rows[0])}});
@@ -1734,7 +1797,12 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       assertNoSecret([b.result]);
     }else if(!["accepted","in_progress","completed","failed"].includes(b.status))throw new ApiError(422,"validation_error","Invalid task status");
     const r=await client.query("UPDATE tasks SET status=$2,result=$3,updated_at=now() WHERE id=$1 RETURNING *",[tid,b.status,b.result??t.result]);
-    if(!(t.creator_type==="agent"&&t.creator_id===p.id))await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.changed",tid,{by:byOf(p),status:b.status});
+    if(!(t.creator_type==="agent"&&t.creator_id===p.id)){
+      await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.changed",tid,{by:byOf(p),status:b.status});
+      // W2 (issue #36): a typed signal for "the status actually moved", distinct from the
+      // generic task.changed above (which also fires for cancel/no-op payload shapes elsewhere).
+      if(b.status!==t.status)await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.updated",tid,{task_id:tid,title:t.title,status:b.status,previous_status:t.status,updated_by:byOf(p)});
+    }
     return{status:200,data:taskFrom(r.rows[0])}})});
   /** Creator cancel; the assignee receives a typed `task.cancelled` signal. */
   app.post("/v1/tasks/:taskId/cancel",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const tid=(req.params as any).taskId;return idem(req,reply,`${p.type}:${p.id}`,async client=>{
