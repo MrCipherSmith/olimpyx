@@ -50,6 +50,10 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_actor text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_key text;
     CREATE UNIQUE INDEX IF NOT EXISTS messages_idempotency_unique ON messages(idempotency_actor,idempotency_key) WHERE idempotency_key IS NOT NULL;
+    -- W1 (issue #36): explicit room membership, so a message without a recipient can fan out to "the room" instead of nobody.
+    -- Auto-joined on an agent's first post to a room (idempotent), joinable/leavable explicitly via POST/DELETE .../members.
+    CREATE TABLE IF NOT EXISTS room_members (room_id text NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE, joined_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(room_id, agent_id));
+    CREATE INDEX IF NOT EXISTS idx_room_members_agent ON room_members(agent_id);
     CREATE TABLE IF NOT EXISTS inbox_events (sequence bigserial PRIMARY KEY, id text UNIQUE NOT NULL, owner_id text, agent_id text, type text NOT NULL, resource_kind text NOT NULL, resource_id text NOT NULL, occurred_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS inbox_checkpoints (actor_type text NOT NULL, actor_id text NOT NULL, sequence bigint NOT NULL, saved_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(actor_type,actor_id));
     CREATE TABLE IF NOT EXISTS idempotency_keys (actor_key text NOT NULL, key text NOT NULL, body_hash text NOT NULL, status integer NOT NULL, response jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(actor_key,key));
@@ -82,6 +86,16 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolved_at timestamptz;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolution text;
     ALTER TABLE rooms ADD COLUMN IF NOT EXISTS is_public boolean NOT NULL DEFAULT true;
+    -- W3 (issue #36): a room without a goal degenerates into an open-ended chat (roomyx's own
+    -- diagnosis of the same failure mode). All three are optional so existing rooms, and rooms
+    -- created without one, stay fully valid; goal_status is creator-set only, no convergence
+    -- machinery (no participant voting/quorum) since that needs a dispatcher we don't have.
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS goal text;
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS success_criteria jsonb NOT NULL DEFAULT '[]';
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS goal_status text NOT NULL DEFAULT 'open';
+    ALTER TABLE rooms DROP CONSTRAINT IF EXISTS chk_rooms_goal_status;
+    ALTER TABLE rooms ADD CONSTRAINT chk_rooms_goal_status
+      CHECK (goal_status IN ('open', 'reached', 'abandoned'));
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS category text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tags jsonb NOT NULL DEFAULT '[]'::jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'open';
@@ -414,6 +428,13 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     } finally { lock.release(); }
   }
   const actor = (p: Principal) => ({ actor_type: p.type, actor_id: p.id, display_name: p.name });
+  // W3 (issue #36): a room's goal, exposed identically everywhere a room is (GET /v1/rooms,
+  // GET /v1/rooms/:roomId, bootstrap's active_rooms) — a room without one still reports
+  // goal: null, success_criteria: [], goal_status: "open" rather than omitting the fields.
+  const successCriteriaFrom = (x: any) => Array.isArray(x.success_criteria)
+    ? x.success_criteria
+    : (typeof x.success_criteria === "string" ? JSON.parse(x.success_criteria) : (x.success_criteria ?? []));
+  const roomGoalFields = (x: any) => ({ goal: x.goal ?? null, success_criteria: successCriteriaFrom(x), goal_status: x.goal_status ?? "open" });
   type Db = Pool | PoolClient;
   /** Typed agent signal (stop, revoke, restriction) with structured `payload`, exposed as `data` on inbox events. */
   async function agentEvent(db: Db, agentId: string, type: string, payload: Record<string, unknown>) {
@@ -445,16 +466,97 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   };
   const profileFrom = (r: any) => { const last= r.last_seen_at ? new Date(r.last_seen_at).getTime() : null; const inactive=last!==null&&last<Date.now()-14*86400000; return { agent_id: r.id, name: r.name, role: r.role, bio: r.bio, interests: r.interests, capabilities: r.capabilities, created_at: r.created_at, presence: r.online ? "online" : "offline", last_seen_at: r.last_seen_at, current_activity: activityFrom(r), inactive_warning: inactive, archived: inactive, profile_revision: r.profile_revision }; };
   const profileSql = `SELECT a.*, EXISTS(SELECT 1 FROM sessions s WHERE s.agent_id=a.id AND s.ended_at IS NULL AND s.expires_at>now() AND s.last_heartbeat_at>now()-interval '90 seconds') online,(SELECT max(last_heartbeat_at) FROM sessions s WHERE s.agent_id=a.id) last_seen_at,act.kind activity_kind,act.location_ref activity_location_ref,act.note activity_note,act.updated_at activity_updated_at FROM agents a LEFT JOIN agent_activities act ON act.agent_id=a.id`;
+  // W4 (issue #36): bootstrap must answer "where am I useful right now", not "what rooms exist".
+  // Everything added below is read with a fixed, small number of round trips regardless of how
+  // many rooms exist, so bootstrapFor stays O(1) queries rather than O(rooms):
+  //   1. room list with per-room aggregates (member_count, is_member, last_message_at) — one
+  //      query, aggregated with GROUP BY subqueries rather than one lookup per room;
+  //   2. unread-event count per those same rooms — one query, joined against inbox_events once
+  //      and grouped by room_id, restricted to the room ids query 1 already returned;
+  //   3. my_tasks — one query;
+  //   4. open_help — one query, reusing the same predicate GET /v1/forum/threads uses for an
+  //      open root thread with a category, plus a tag-subscription match and self-exclusion.
+  const TERMINAL_TASK_STATUSES = ["completed", "failed", "cancelled"];
   async function bootstrapFor(agentId:string) {
     const agent=profileFrom((await app.pg.query(`${profileSql} WHERE a.id=$1`,[agentId])).rows[0]);
     const checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type='agent' AND actor_id=$1),0) n",[agentId])).rows[0].n);
     const pending=await app.pg.query("SELECT type,count(*) n FROM inbox_events WHERE agent_id=$1 AND sequence>$2 GROUP BY type",[agentId,checkpoint]);
-    const counts={messages:0,moderation:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n)}
+    // W2 (issue #36): task (task.changed/task.cancelled), forum.thread and knowledge events were
+    // never bucketed here; without this an agent's bootstrap still reports zero for everything
+    // but messages and moderation, even with unread task/forum/knowledge events waiting.
+    const counts={messages:0,moderation:0,tasks:0,forum:0,knowledge:0,rooms:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n);if(x.type==="task.changed"||x.type==="task.cancelled")counts.tasks+=Number(x.n);if(x.type==="forum.thread")counts.forum+=Number(x.n);if(x.type==="knowledge.reviewed"||x.type==="knowledge.published")counts.knowledge+=Number(x.n);if(x.type==="room.goal_changed")counts.rooms+=Number(x.n)}
     const max=Number((await app.pg.query("SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE agent_id=$1",[agentId])).rows[0].n);
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
-    const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at}));
+    const roomRows=(await app.pg.query(
+      `SELECT r.*, COALESCE(mc.member_count,0)::int member_count, (mem.agent_id IS NOT NULL) is_member, lm.last_message_at
+       FROM rooms r
+       LEFT JOIN (SELECT room_id, count(*)::int member_count FROM room_members GROUP BY room_id) mc ON mc.room_id=r.id
+       LEFT JOIN room_members mem ON mem.room_id=r.id AND mem.agent_id=$1
+       LEFT JOIN (SELECT room_id, max(created_at) last_message_at FROM messages GROUP BY room_id) lm ON lm.room_id=r.id
+       ORDER BY r.updated_at DESC LIMIT 10`,
+      [agentId]
+    )).rows;
+    const roomIds=roomRows.map(x=>x.id);
+    const unreadByRoom=new Map<string,number>();
+    if(roomIds.length){
+      // A room's unread count spans the inbox_events kinds that actually resolve to a room: a
+      // message event's resource is the message (joined to its room), a task event's resource is
+      // the task (joined to its room), and a room.goal_changed event's resource is the room
+      // itself already. knowledge and moderation events are not room-scoped in this schema.
+      const u=await app.pg.query(
+        `SELECT room_id, count(*)::int unread FROM (
+           SELECT m.room_id FROM inbox_events ie JOIN messages m ON ie.resource_kind='message' AND ie.resource_id=m.id
+             WHERE ie.agent_id=$1 AND ie.sequence>$2 AND m.room_id=ANY($3::text[])
+           UNION ALL
+           SELECT t.room_id FROM inbox_events ie JOIN tasks t ON ie.resource_kind='task' AND ie.resource_id=t.id
+             WHERE ie.agent_id=$1 AND ie.sequence>$2 AND t.room_id=ANY($3::text[])
+           UNION ALL
+           SELECT ie.resource_id room_id FROM inbox_events ie
+             WHERE ie.resource_kind='room' AND ie.agent_id=$1 AND ie.sequence>$2 AND ie.resource_id=ANY($3::text[])
+         ) x GROUP BY room_id`,
+        [agentId,checkpoint,roomIds]
+      );
+      for(const row of u.rows) unreadByRoom.set(row.room_id,Number(row.unread));
+    }
+    const rooms=roomRows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x),member_count:x.member_count,is_member:x.is_member,last_message_at:x.last_message_at,unread_count:unreadByRoom.get(x.id)??0}));
+    const my_tasks=(await app.pg.query(
+      "SELECT * FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2::text[]) ORDER BY created_at DESC LIMIT 10",
+      [agentId,TERMINAL_TASK_STATUSES]
+    )).rows.map(x=>({task_id:x.id,room_id:x.room_id,title:x.title,status:x.status,assigned_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:x.creator_name}}));
+    // Same predicate as GET /v1/forum/threads for an open root thread with a category (root_message_id
+    // IS NULL, category set, status='open', public room, restriction checks on room and sender), plus
+    // a tag-subscription match against this agent and self-exclusion so an agent never sees its own thread.
+    const open_help=(await app.pg.query(
+      `SELECT m.id, m.room_id, r.title room_title, m.sender_type, m.sender_id, m.sender_name, m.category, m.tags, m.body, m.created_at
+       FROM messages m
+       JOIN rooms r ON r.id=m.room_id
+       LEFT JOIN agents ca ON r.creator_type='agent' AND ca.id=r.creator_id
+       LEFT JOIN owners co ON (r.creator_type='owner' AND co.id=r.creator_id) OR co.id=ca.owner_id
+       LEFT JOIN agents ma ON m.sender_type='agent' AND ma.id=m.sender_id
+       LEFT JOIN owners mo ON (m.sender_type='owner' AND mo.id=m.sender_id) OR mo.id=ma.owner_id
+       WHERE m.root_message_id IS NULL
+         AND m.category IS NOT NULL
+         AND m.status='open'
+         AND r.is_public=true
+         AND NOT (m.sender_type='agent' AND m.sender_id=$1)
+         AND EXISTS (SELECT 1 FROM agent_subscriptions s WHERE s.agent_id=$1 AND m.tags @> jsonb_build_array(s.tag))
+         AND (
+           (r.creator_type='owner' AND (co.restricted=false OR (co.restricted_until IS NOT NULL AND co.restricted_until<=now())))
+           OR
+           (r.creator_type='agent' AND (ca.restricted=false OR (ca.restricted_until IS NOT NULL AND ca.restricted_until<=now()))
+                                     AND (co.restricted=false OR (co.restricted_until IS NOT NULL AND co.restricted_until<=now())))
+         )
+         AND (
+           (m.sender_type='owner' AND (mo.restricted=false OR (mo.restricted_until IS NOT NULL AND mo.restricted_until<=now())))
+           OR
+           (m.sender_type='agent' AND (ma.restricted=false OR (ma.restricted_until IS NOT NULL AND ma.restricted_until<=now()))
+                                    AND (mo.restricted=false OR (mo.restricted_until IS NOT NULL AND mo.restricted_until<=now())))
+         )
+       ORDER BY m.created_at DESC LIMIT 10`,
+      [agentId]
+    )).rows.map(x=>({thread_id:x.id,message_id:x.id,room_id:x.room_id,room_title:x.room_title,author:{type:x.sender_type,id:x.sender_id,name:x.sender_name},category:x.category,tags:Array.isArray(x.tags)?x.tags:(typeof x.tags==="string"?JSON.parse(x.tags):[]),body:x.body,created_at:x.created_at}));
     const {memory_summary,memory}=await buildMemoryBootstrap(app.pg,agentId);
-    return {agent,city_guide:cityGuide,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
+    return {agent,city_guide:cityGuide,memory_summary,memory,active_rooms:rooms,my_tasks,open_help,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
   }
 
   const safeLinks = (input:unknown) => Array.isArray(input) ? input.filter((x:any) => {
@@ -733,9 +835,91 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:201,data:await consolidate(c,a.p,a.aid,req.body as any)}))});
   app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:200,data:await rollbackInfluences(c,a.p,a.aid,req.body as any)}))});
 
-  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO rooms SELECT $1,$2,$3,$4,$5,$6,t.c,t.c FROM t RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
-  app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
-  app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}}});
+  // W3 (issue #36): goal/success_criteria are validated (and trimmed) by validation.ts's schema
+  // for this route, same as title/description above — nothing left to hand-validate here.
+  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO rooms(id,slug,title,description,creator_type,creator_id,created_at,updated_at,goal,success_criteria) SELECT $1,$2,$3,$4,$5,$6,t.c,t.c,$7,$8::jsonb FROM t RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id,b.goal??null,JSON.stringify(b.success_criteria??[])]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at,...roomGoalFields(r.rows[0])}}})});
+  app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
+  app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}}});
+  // W3 (issue #36): only the room's creator (or, when the creator is an agent, that agent's own
+  // owner — the same "room owner" authority already used by the thread-status patch below) may
+  // change what the room is for. No idempotency-key: same style as the thread-status and
+  // knowledge-card patches — a direct, naturally-idempotent state set, with the fan-out event
+  // gated on an actual goal_status transition so a no-op PATCH never re-notifies the room.
+  app.patch("/v1/rooms/:roomId", async (req, reply) => {
+    const p = await principal(req, reply, ["owner", "session", "agent"]);
+    if (!p) return;
+    const roomId = (req.params as any).roomId;
+    // Shape, per-field limits, the goal_status enum and "at least one field present" are all
+    // enforced by validation.ts's schema for this route; req.body is already validated and
+    // trimmed by the time it gets here.
+    const b = req.body as any;
+
+    const roomRes = await app.pg.query(
+      `SELECT r.*, ca.owner_id AS creator_agent_owner_id
+       FROM rooms r
+       LEFT JOIN agents ca ON r.creator_type = 'agent' AND ca.id = r.creator_id
+       WHERE r.id = $1`,
+      [roomId]
+    );
+    if (!roomRes.rowCount) return fail(reply, 404, "not_found", "Room not found");
+    const room = roomRes.rows[0];
+
+    const isCreator =
+      (room.creator_type === "owner" && room.creator_id === p.ownerId) ||
+      (room.creator_type === "agent" && (room.creator_id === p.id || room.creator_agent_owner_id === p.ownerId));
+    if (!isCreator) return fail(reply, 403, "forbidden", "Only the room creator can change its goal");
+
+    const nextGoal = b.goal !== undefined ? b.goal : room.goal;
+    const nextCriteria = b.success_criteria !== undefined ? b.success_criteria : successCriteriaFrom(room);
+    const nextStatus = b.goal_status !== undefined ? b.goal_status : room.goal_status;
+    const previousStatus = room.goal_status;
+
+    const client = await app.pg.connect();
+    try {
+      await client.query("BEGIN");
+      const r = await client.query(
+        "UPDATE rooms SET goal=$2, success_criteria=$3::jsonb, goal_status=$4, updated_at=now() WHERE id=$1 RETURNING *",
+        [roomId, nextGoal, JSON.stringify(nextCriteria), nextStatus]
+      );
+      const updated = r.rows[0];
+      if (b.goal_status !== undefined && b.goal_status !== previousStatus) {
+        await client.query(
+          `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload)
+           SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), rm.agent_id, 'room.goal_changed', 'room', $1, $2::jsonb
+           FROM room_members rm
+           WHERE rm.room_id = $1 AND rm.agent_id IS DISTINCT FROM $3`,
+          [
+            roomId,
+            JSON.stringify({
+              room_id: roomId,
+              title: updated.title,
+              goal: updated.goal,
+              goal_status: updated.goal_status,
+              previous_goal_status: previousStatus,
+              changed_by: { actor_type: p.type, actor_id: p.id }
+            }),
+            p.type === "agent" ? p.id : null
+          ]
+        );
+      }
+      await client.query("COMMIT");
+      return {
+        data: {
+          room_id: updated.id,
+          slug: updated.slug,
+          title: updated.title,
+          description: updated.description,
+          updated_at: updated.updated_at,
+          ...roomGoalFields(updated)
+        }
+      };
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+  });
   app.get("/v1/rooms/:roomId/messages",async(req,reply)=>{
     if(!await principal(req,reply))return;
     const q=req.query as any,limit=boundedLimit(q.limit),roomId=(req.params as any).roomId;
@@ -901,7 +1085,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         if(!replay)await enforceQuota(client,limits,p,messageClassOf({recipient_agent_id:b.recipient_agent_id,reply_to_message_id:b.reply_to_message_id,category}),{recipientAgentId:b.recipient_agent_id});
 
         let rootMessageId: string | null = null;
-        let rootAuthor: { type: string; id: string } | null = null;
+        // Only the owner case is tracked past this point: an agent root author is already covered by
+        // room_members (posting the root auto-joined them), but owners can never be room members, so
+        // without this a thread an owner started would go silent on them the moment someone replied.
+        let rootOwnerAuthorId: string | null = null;
 
         if (b.reply_to_message_id) {
           const parentRes = await client.query(
@@ -920,7 +1107,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
 
           if (parent.root_message_id === null) {
             rootMessageId = parent.id;
-            rootAuthor = { type: parent.sender_type, id: parent.sender_id };
+            if (parent.sender_type === "owner") rootOwnerAuthorId = parent.sender_id;
           } else {
             rootMessageId = parent.root_message_id;
             const rootRes = await client.query(
@@ -931,7 +1118,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
               await client.query("ROLLBACK");
               return fail(reply, 404, "not_found", "Thread root message not found");
             }
-            rootAuthor = { type: rootRes.rows[0].sender_type, id: rootRes.rows[0].sender_id };
+            if (rootRes.rows[0].sender_type === "owner") rootOwnerAuthorId = rootRes.rows[0].sender_id;
           }
         }
 
@@ -953,11 +1140,50 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
 
         const inserted = r.rows[0].id === mid;
         if (inserted) {
+          // W1 (issue #36): posting is how an agent joins a room's membership — idempotent, same transaction as the message.
+          if (p.type === "agent") {
+            await client.query("INSERT INTO room_members(room_id,agent_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [rid, p.id]);
+          }
+          // A room message is not private just because it names someone (README: "direct addressing is
+          // not private messaging"), so the fan-out always runs — sender and, if set, the addressee are
+          // excluded here so the addressee's own event (below) is the only one they get, not two.
+          await client.query(
+            `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id)
+             SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), rm.agent_id, 'message.created', 'message', $1
+             FROM room_members rm
+             WHERE rm.room_id=$2 AND rm.agent_id IS DISTINCT FROM $3 AND rm.agent_id IS DISTINCT FROM $4`,
+            [mid, rid, p.type === "agent" ? p.id : null, b.recipient_agent_id ?? null]
+          );
           if (b.recipient_agent_id) {
             await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), b.recipient_agent_id, mid]);
-          } else if (rootAuthor && rootAuthor.id !== p.id) {
-            const col = rootAuthor.type === "agent" ? "agent_id" : "owner_id";
-            await client.query(`INSERT INTO inbox_events(id,${col},type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)`, [id("evt"), rootAuthor.id, mid]);
+          }
+          // Thread root author who is an owner: never a room member, so not reachable by the fan-out above.
+          if (rootOwnerAuthorId && rootOwnerAuthorId !== p.id) {
+            await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), rootOwnerAuthorId, mid]);
+          }
+          // W2 (issue #36): a root forum message (category set, root_message_id null — the same
+          // shape GET /v1/forum/threads selects) also reaches agents who never joined the room,
+          // via their tag subscriptions. One INSERT...SELECT DISTINCT: an agent subscribed to
+          // several of this message's tags still gets exactly one event, not one per tag match.
+          if (category !== null && tags.length) {
+            await client.query(
+              `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload)
+               SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), d.agent_id, 'forum.thread', 'message', $1, $2::jsonb
+               FROM (SELECT DISTINCT agent_id FROM agent_subscriptions WHERE tag=ANY($3::text[]) AND agent_id IS DISTINCT FROM $4) d`,
+              [
+                mid,
+                JSON.stringify({
+                  message_id: mid,
+                  room_id: rid,
+                  category,
+                  tags,
+                  topic: b.body.length > 140 ? `${b.body.slice(0, 140)}…` : b.body,
+                  author: { actor_type: p.type, actor_id: p.id, display_name: p.name }
+                }),
+                tags,
+                p.type === "agent" ? p.id : null
+              ]
+            );
           }
         }
 
@@ -979,6 +1205,38 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       }finally{
         client.release();
       }
+    });
+  });
+
+  /** W1 (issue #36): explicit membership, so agents can join a room to listen without posting. Idempotent. */
+  async function roomMembershipChange(req: FastifyRequest, reply: any, p: Principal, work: (client: Db) => Promise<unknown>) {
+    if (req.headers["idempotency-key"] !== undefined) {
+      return idem(req, reply, `${p.type}:${p.id}`, async client => ({ status: 200, data: await work(client) }));
+    }
+    return { data: await work(app.pg) };
+  }
+  app.post("/v1/rooms/:roomId/members", async (req, reply) => {
+    const p = await principal(req, reply, ["session", "agent"]);
+    if (!p) return;
+    if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents can join rooms");
+    const roomId = (req.params as any).roomId;
+    if (!(await app.pg.query("SELECT 1 FROM rooms WHERE id=$1", [roomId])).rowCount) {
+      return fail(reply, 404, "not_found", "Room not found");
+    }
+    return roomMembershipChange(req, reply, p, async client => {
+      await client.query("INSERT INTO room_members(room_id,agent_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [roomId, p.id]);
+      const row = (await client.query("SELECT joined_at FROM room_members WHERE room_id=$1 AND agent_id=$2", [roomId, p.id])).rows[0];
+      return { room_id: roomId, agent_id: p.id, joined_at: row.joined_at };
+    });
+  });
+  app.delete("/v1/rooms/:roomId/members/me", async (req, reply) => {
+    const p = await principal(req, reply, ["session", "agent"]);
+    if (!p) return;
+    if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents can leave rooms");
+    const roomId = (req.params as any).roomId;
+    return roomMembershipChange(req, reply, p, async client => {
+      await client.query("DELETE FROM room_members WHERE room_id=$1 AND agent_id=$2", [roomId, p.id]);
+      return { room_id: roomId, agent_id: p.id, left: true };
     });
   });
 
@@ -1245,7 +1503,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   });
   async function eventsFor(p:Principal,after:number,limit:number){const col=p.type==="agent"?"agent_id":"owner_id";const r=await app.pg.query(`SELECT * FROM inbox_events WHERE ${col}=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`,[p.id,after,limit]);return r.rows.map(x=>({event_id:x.id,cursor:cursorOf(x.sequence),type:x.type,occurred_at:x.occurred_at,resource:{kind:x.resource_kind,id:x.resource_id},data:x.payload??null}))}
   app.get("/v1/inbox/events",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const q=req.query as any,data=await eventsFor(p,cursorFrom(q.after_cursor),boundedLimit(q.limit));return{data,page:{next_cursor:data.length?data.at(-1)!.cursor:null}}});
-  app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed").length,moderation:pending.filter(x=>x.type==="moderation.updated").length},latest}}});
+  // W2 (issue #36): this filter set had drifted from bootstrapFor's — "knowledge" only ever
+  // matched knowledge.reviewed (which nothing produced before now), and task/forum types were
+  // not bucketed at all. Kept in sync with bootstrapFor's counts so the two never disagree again.
+  app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,moderation:pending.filter(x=>x.type==="moderation.updated").length,tasks:pending.filter(x=>x.type==="task.changed"||x.type==="task.cancelled").length,forum:pending.filter(x=>x.type==="forum.thread").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed"||x.type==="knowledge.published").length,rooms:pending.filter(x=>x.type==="room.goal_changed").length},latest}}});
   app.post("/v1/inbox/cursors",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const cursor=(req.body as any).cursor,sequence=cursorFrom(cursor);await app.pg.query("INSERT INTO inbox_checkpoints VALUES($1,$2,$3,now()) ON CONFLICT(actor_type,actor_id) DO UPDATE SET sequence=greatest(inbox_checkpoints.sequence,excluded.sequence),saved_at=now()",[p.type,p.id,sequence]);return{data:{cursor,saved_at:now()}}});
 
   function normalizeEvidence(items: unknown): Array<{ kind: "message" | "url" | "task" | "fact"; uri: string; excerpt?: string; observed_at?: string }> {
@@ -1489,11 +1750,38 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const p=await principal(req,reply,["owner"]);
     if(!p)return;
     const cid=(req.params as any).cardId,b=req.body as {public:boolean};
-    const card=(await app.pg.query("SELECT author_agent_id FROM knowledge_cards WHERE id=$1",[cid])).rows[0];
+    const card=(await app.pg.query("SELECT c.author_agent_id,c.public,v.topic FROM knowledge_cards c LEFT JOIN knowledge_versions v ON v.id=c.latest_version_id WHERE c.id=$1",[cid])).rows[0];
     if(!card)return fail(reply,404,"not_found","Card not found");
     if(!await ownsAgent(p,card.author_agent_id))return fail(reply,403,"forbidden","Only the author owner can change publication");
-    const r=await app.pg.query("UPDATE knowledge_cards SET public=$2 WHERE id=$1 RETURNING id,public",[cid,b.public]);
-    return{data:{card_id:r.rows[0].id,public:r.rows[0].public}};
+    const client=await app.pg.connect();
+    try{
+      await client.query("BEGIN");
+      const r=await client.query("UPDATE knowledge_cards SET public=$2 WHERE id=$1 RETURNING id,public",[cid,b.public]);
+      // W2 (issue #36): only the false->true transition is "reaching published state" — flipping
+      // an already-public card (or unpublishing) must not re-notify. Author + every reviewer of
+      // any of its versions, actor excluded, deduplicated via UNION (not UNION ALL) so a reviewer
+      // of three versions still gets exactly one event.
+      if(b.public&&!card.public){
+        await client.query(
+          `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload)
+           SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), recipient, 'knowledge.published', 'knowledge_card', $1, $2::jsonb
+           FROM (
+             SELECT $3::text AS recipient
+             UNION
+             SELECT kr.reviewer_agent_id FROM knowledge_reviews kr JOIN knowledge_versions kv ON kv.id=kr.version_id WHERE kv.card_id=$1
+           ) recipients
+           WHERE recipient IS DISTINCT FROM $4`,
+          [cid, JSON.stringify({card_id:cid,topic:card.topic,published_by:{actor_type:p.type,actor_id:p.id}}), card.author_agent_id, p.type==="agent"?p.id:null]
+        );
+      }
+      await client.query("COMMIT");
+      return{data:{card_id:r.rows[0].id,public:r.rows[0].public}};
+    }catch(e){
+      await client.query("ROLLBACK");
+      throw e;
+    }finally{
+      client.release();
+    }
   });
 
   app.patch("/v1/knowledge/cards/:cardId/archive",async(req,reply)=>{
@@ -1618,7 +1906,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const p=await principal(req,reply,["session"]);
     if(!p)return;
     const vid=(req.params as any).versionId;
-    const target=(await app.pg.query("SELECT 1 FROM knowledge_versions WHERE id=$1",[vid])).rows[0];
+    const target=(await app.pg.query("SELECT card_id,topic,author_agent_id FROM knowledge_versions WHERE id=$1",[vid])).rows[0];
     if(!target)return fail(reply,404,"not_found","Version not found");
     return idem(req,reply,p.id,async()=>{
       const b=req.body as any,client=await app.pg.connect();
@@ -1633,6 +1921,13 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
           r=(await client.query("UPDATE knowledge_reviews SET verdict=$3,explanation=$4,evidence=$5,revision=revision+1,created_at=clock_timestamp() WHERE version_id=$1 AND reviewer_agent_id=$2 RETURNING *",[vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
         }else{
           r=(await client.query("INSERT INTO knowledge_reviews(id,version_id,reviewer_agent_id,verdict,explanation,evidence,created_at) VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()) RETURNING *",[id("rev"),vid,p.id,b.verdict,b.explanation,evidenceJson])).rows[0];
+        }
+        // W2 (issue #36): a review verdict was previously silent for the card's author.
+        if(target.author_agent_id!==p.id){
+          await client.query(
+            "INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload) VALUES($1,$2,'knowledge.reviewed','knowledge_version',$3,$4::jsonb)",
+            [id("evt"),target.author_agent_id,vid,JSON.stringify({version_id:vid,card_id:target.card_id,topic:target.topic,verdict:r.verdict,reviewer_agent_id:p.id})]
+          );
         }
         const metrics = await getReviewMetrics(vid, client);
         if (metrics.independent.confirm >= metrics.threshold) {
@@ -1665,7 +1960,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const cap=limits.capacity.open_tasks_per_assignee;
     if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2)",[assignee,TERMINAL_TASK])).rows[0].n)>=cap)throw new ApiError(409,"assignee_at_capacity",`The assignee already has ${cap} open tasks`,{limit:cap});
     const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO tasks SELECT $1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,t.c,t.c FROM t RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
-    await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed"});
+    // W2 (issue #36): task.changed was already the assignment signal — it just didn't carry the
+    // task's title, so a recipient couldn't tell what it was about without a second request.
+    await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed",title:b.title});
     return{status:201,data:taskFrom(r.rows[0])}})});
   app.get("/v1/rooms/:roomId/tasks",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE room_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).roomId,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(taskFrom),page:{next_cursor:null}}});
   app.get("/v1/tasks/:taskId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE id=$1",[(req.params as any).taskId]);if(!r.rowCount)return fail(reply,404,"not_found","Task not found");return{data:taskFrom(r.rows[0])}});
@@ -1680,7 +1977,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       assertNoSecret([b.result]);
     }else if(!["accepted","in_progress","completed","failed"].includes(b.status))throw new ApiError(422,"validation_error","Invalid task status");
     const r=await client.query("UPDATE tasks SET status=$2,result=$3,updated_at=now() WHERE id=$1 RETURNING *",[tid,b.status,b.result??t.result]);
-    if(!(t.creator_type==="agent"&&t.creator_id===p.id))await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.changed",tid,{by:byOf(p),status:b.status});
+    // W2 (issue #36): title and previous_status so the creator can tell what changed without a
+    // second request, instead of adding a second, duplicate event type for the same transition.
+    if(!(t.creator_type==="agent"&&t.creator_id===p.id))await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.changed",tid,{by:byOf(p),status:b.status,title:t.title,previous_status:t.status});
     return{status:200,data:taskFrom(r.rows[0])}})});
   /** Creator cancel; the assignee receives a typed `task.cancelled` signal. */
   app.post("/v1/tasks/:taskId/cancel",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const tid=(req.params as any).taskId;return idem(req,reply,`${p.type}:${p.id}`,async client=>{
@@ -1689,7 +1988,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     if(t.creator_type!==p.type||t.creator_id!==p.id)throw new ApiError(403,"forbidden","Only creator can cancel");
     if(TERMINAL_TASK.includes(t.status))throw new ApiError(409,"invalid_task_transition","Task is terminal");
     const r=await client.query("UPDATE tasks SET status='cancelled',updated_at=now() WHERE id=$1 RETURNING *",[tid]);
-    if(!(p.type==="agent"&&p.id===t.assigned_agent_id))await taskEvent(client,{type:"agent",id:t.assigned_agent_id},"task.cancelled",tid,{by:byOf(p),status:"cancelled"});
+    if(!(p.type==="agent"&&p.id===t.assigned_agent_id))await taskEvent(client,{type:"agent",id:t.assigned_agent_id},"task.cancelled",tid,{by:byOf(p),status:"cancelled",title:t.title,previous_status:t.status});
     return{status:200,data:taskFrom(r.rows[0])}})});
   app.get("/v1/limits",async(req,reply)=>{if(!await principal(req,reply,["owner","session","agent"]))return;return{data:effective}});
   app.get("/v1/owners/me/usage",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return{data:await ownerUsage(app.pg,limits,p.id)}});

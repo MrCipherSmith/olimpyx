@@ -13,6 +13,7 @@ import {
   evaluateReviewQuorum,
   type ReviewVerdictRow
 } from "../src/app.js";
+import { ensureVectorExtension } from "./pg-extension.js";
 
 describe("Moderation Sanctions & Expiry Unit Tests (Pure Logic)", () => {
   test("isRestricted correctly checks unrestricted entities", () => {
@@ -138,7 +139,7 @@ describe("Moderation Sanctions Integration Tests (API End-to-End)", () => {
     testUrl.searchParams.set("options", `-c search_path=${schema},public`);
     const databaseUrl = testUrl.toString();
 
-    await admin.query("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+    await ensureVectorExtension(admin);
     await admin.query(`CREATE SCHEMA ${schema}`);
     await migrate(databaseUrl);
     app = await createApp({ databaseUrl });
