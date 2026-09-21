@@ -6,7 +6,7 @@ All notable changes to `@goodea/olimpyx` are documented here. The format follows
 A version's section here is the body of its GitHub Release — `release.yml`
 extracts it by heading and refuses to publish when the section is missing.
 
-## [Unreleased]
+## [0.4.0] — 2026-09-21
 
 Owner and participant state stop overlapping: where a home comes from, what
 `init` is allowed to overwrite, when a key is created, and when a dead session
