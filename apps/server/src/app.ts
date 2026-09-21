@@ -86,6 +86,16 @@ export async function migrate(databaseUrl: string) {
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolved_at timestamptz;
     ALTER TABLE incidents ADD COLUMN IF NOT EXISTS appeal_resolution text;
     ALTER TABLE rooms ADD COLUMN IF NOT EXISTS is_public boolean NOT NULL DEFAULT true;
+    -- W3 (issue #36): a room without a goal degenerates into an open-ended chat (roomyx's own
+    -- diagnosis of the same failure mode). All three are optional so existing rooms, and rooms
+    -- created without one, stay fully valid; goal_status is creator-set only, no convergence
+    -- machinery (no participant voting/quorum) since that needs a dispatcher we don't have.
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS goal text;
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS success_criteria jsonb NOT NULL DEFAULT '[]';
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS goal_status text NOT NULL DEFAULT 'open';
+    ALTER TABLE rooms DROP CONSTRAINT IF EXISTS chk_rooms_goal_status;
+    ALTER TABLE rooms ADD CONSTRAINT chk_rooms_goal_status
+      CHECK (goal_status IN ('open', 'reached', 'abandoned'));
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS category text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tags jsonb NOT NULL DEFAULT '[]'::jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'open';
@@ -330,6 +340,18 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   const limits: LimitsConfig = loadLimits(options.env ?? process.env);
   const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
   const app = Fastify({ logger: { redact: ["req.headers.authorization", "req.body.password", "req.body.enrollment_token"] }, bodyLimit: 262144 }) as unknown as OlimpyxApp;
+  // W3 (issue #36): validation.ts's global preValidation hook (installed next) re-parses
+  // POST /v1/rooms's body against a schema that doesn't know about goal/success_criteria and
+  // strips unrecognized keys — that's out of scope here (apps/server/src/validation.ts is not
+  // touched by this change). Registering this hook first means it runs before that one, so it
+  // can stash the original values for the room-creation handler to read and validate itself,
+  // the same way this file already hand-validates message category/tags inline.
+  app.addHook("preValidation", async (req) => {
+    if (req.method === "POST" && req.url.split("?")[0] === "/v1/rooms") {
+      const b = req.body as any;
+      (req as any).roomGoalInput = { goal: b?.goal, success_criteria: b?.success_criteria };
+    }
+  });
   installValidation(app);
   registerCityGuide(app);
   app.decorate("pg", new Pool({ connectionString: databaseUrl }));
@@ -418,6 +440,36 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     } finally { lock.release(); }
   }
   const actor = (p: Principal) => ({ actor_type: p.type, actor_id: p.id, display_name: p.name });
+  // W3 (issue #36): a room's goal, exposed identically everywhere a room is (GET /v1/rooms,
+  // GET /v1/rooms/:roomId, bootstrap's active_rooms) — a room without one still reports
+  // goal: null, success_criteria: [], goal_status: "open" rather than omitting the fields.
+  const successCriteriaFrom = (x: any) => Array.isArray(x.success_criteria)
+    ? x.success_criteria
+    : (typeof x.success_criteria === "string" ? JSON.parse(x.success_criteria) : (x.success_criteria ?? []));
+  const roomGoalFields = (x: any) => ({ goal: x.goal ?? null, success_criteria: successCriteriaFrom(x), goal_status: x.goal_status ?? "open" });
+  // W3 (issue #36): hand-validated the same way this file already validates message category/tags
+  // inline (see POST /v1/rooms/:roomId/messages) rather than through validation.ts. ROOM_TEXT_MAX
+  // matches the limit validation.ts already applies to a room's own `title` — a goal is "one
+  // sentence" too, the same kind of field on the same row.
+  const ROOM_TEXT_MAX = 120;
+  const ROOM_GOAL_STATUSES = ["open", "reached", "abandoned"];
+  function goalError(v: unknown): string | null {
+    if (v === undefined) return null;
+    if (typeof v !== "string" || v.trim().length < 1 || v.trim().length > ROOM_TEXT_MAX) {
+      return `goal must be a string of 1-${ROOM_TEXT_MAX} characters`;
+    }
+    return null;
+  }
+  function criteriaError(v: unknown): string | null {
+    if (v === undefined) return null;
+    if (!Array.isArray(v) || v.length > 30) return "success_criteria must be an array of at most 30 strings";
+    for (const item of v) {
+      if (typeof item !== "string" || item.trim().length < 1 || item.trim().length > ROOM_TEXT_MAX) {
+        return `each success_criteria item must be a non-empty string of at most ${ROOM_TEXT_MAX} characters`;
+      }
+    }
+    return null;
+  }
   type Db = Pool | PoolClient;
   /** Typed agent signal (stop, revoke, restriction) with structured `payload`, exposed as `data` on inbox events. */
   async function agentEvent(db: Db, agentId: string, type: string, payload: Record<string, unknown>) {
@@ -456,10 +508,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     // W2 (issue #36): task (task.changed/task.cancelled), forum.thread and knowledge events were
     // never bucketed here; without this an agent's bootstrap still reports zero for everything
     // but messages and moderation, even with unread task/forum/knowledge events waiting.
-    const counts={messages:0,moderation:0,tasks:0,forum:0,knowledge:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n);if(x.type==="task.changed"||x.type==="task.cancelled")counts.tasks+=Number(x.n);if(x.type==="forum.thread")counts.forum+=Number(x.n);if(x.type==="knowledge.reviewed"||x.type==="knowledge.published")counts.knowledge+=Number(x.n)}
+    const counts={messages:0,moderation:0,tasks:0,forum:0,knowledge:0,rooms:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n);if(x.type==="task.changed"||x.type==="task.cancelled")counts.tasks+=Number(x.n);if(x.type==="forum.thread")counts.forum+=Number(x.n);if(x.type==="knowledge.reviewed"||x.type==="knowledge.published")counts.knowledge+=Number(x.n);if(x.type==="room.goal_changed")counts.rooms+=Number(x.n)}
     const max=Number((await app.pg.query("SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE agent_id=$1",[agentId])).rows[0].n);
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
-    const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at}));
+    const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}));
     const {memory_summary,memory}=await buildMemoryBootstrap(app.pg,agentId);
     return {agent,city_guide:cityGuide,memory_summary,memory,active_rooms:rooms,pending_counts:counts,recent_activity:recent,inbox_cursor:cursorOf(max),embedding:await embeddingStatus(),limits:effective};
   }
@@ -740,9 +792,118 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   app.post("/v1/agents/:agentId/memory/consolidate",async(req,reply)=>{const a=await memoryAccess(req,reply);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:201,data:await consolidate(c,a.p,a.aid,req.body as any)}))});
   app.post("/v1/agents/:agentId/memory/rollback",async(req,reply)=>{const a=await memoryAccess(req,reply,["owner"]);if(!a)return;return memoryIdem(req,reply,a,async c=>({status:200,data:await rollbackInfluences(c,a.p,a.aid,req.body as any)}))});
 
-  app.post("/v1/rooms",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;return idem(req,reply,`${p.type}:${p.id}`,async client=>{const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;await enforceQuota(client,limits,p,"room_create");const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO rooms SELECT $1,$2,$3,$4,$5,$6,t.c,t.c FROM t RETURNING *",[rid,slug,b.title,b.description??"",p.type,p.id]);return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at}}})});
-  app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
-  app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at}}});
+  app.post("/v1/rooms",async(req,reply)=>{
+    const p=await principal(req,reply);if(!p)return;
+    // W3 (issue #36): captured pre-strip by the hook registered ahead of installValidation.
+    const goalInput=(req as any).roomGoalInput ?? {};
+    const gErr=goalError(goalInput.goal);
+    if(gErr) return fail(reply,400,"invalid_goal",gErr);
+    const cErr=criteriaError(goalInput.success_criteria);
+    if(cErr) return fail(reply,400,"invalid_success_criteria",cErr);
+    return idem(req,reply,`${p.type}:${p.id}`,async client=>{
+      const b=req.body as any,rid=id("rom"),slug=`${String(b.title).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")}-${rid.slice(-6)}`;
+      await enforceQuota(client,limits,p,"room_create");
+      const goal=goalInput.goal!==undefined?String(goalInput.goal).trim():null;
+      const successCriteria=Array.isArray(goalInput.success_criteria)?goalInput.success_criteria.map((s:string)=>s.trim()):[];
+      const r=await client.query(
+        "WITH t AS (SELECT clock_timestamp() c) INSERT INTO rooms(id,slug,title,description,creator_type,creator_id,created_at,updated_at,goal,success_criteria) SELECT $1,$2,$3,$4,$5,$6,t.c,t.c,$7,$8::jsonb FROM t RETURNING *",
+        [rid,slug,b.title,b.description??"",p.type,p.id,goal,JSON.stringify(successCriteria)]
+      );
+      return{status:201,data:{room_id:r.rows[0].id,slug,title:r.rows[0].title,description:r.rows[0].description,created_by:actor(p),created_at:r.rows[0].created_at,updated_at:r.rows[0].updated_at,...roomGoalFields(r.rows[0])}}
+    })
+  });
+  app.get("/v1/rooms",async(req,reply)=>{if(!await principal(req,reply))return;const q=req.query as any,limit=boundedLimit(q.limit),before=q.before_cursor?String(q.before_cursor):null;const r=await app.pg.query("SELECT * FROM rooms WHERE $1::text IS NULL OR (updated_at,id)<(SELECT updated_at,id FROM rooms WHERE id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2",[before,limit]);const data=r.rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}));return{data,page:{next_cursor:data.length===limit?data.at(-1)!.room_id:null}}});
+  app.get("/v1/rooms/:roomId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM rooms WHERE id=$1",[(req.params as any).roomId]);if(!r.rowCount)return fail(reply,404,"not_found","Room not found");const x=r.rows[0];return{data:{room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_by:{actor_type:x.creator_type,actor_id:x.creator_id,display_name:""},created_at:x.created_at,updated_at:x.updated_at,...roomGoalFields(x)}}});
+  // W3 (issue #36): only the room's creator (or, when the creator is an agent, that agent's own
+  // owner — the same "room owner" authority already used by the thread-status patch below) may
+  // change what the room is for. No idempotency-key: same style as the thread-status and
+  // knowledge-card patches — a direct, naturally-idempotent state set, with the fan-out event
+  // gated on an actual goal_status transition so a no-op PATCH never re-notifies the room.
+  app.patch("/v1/rooms/:roomId", async (req, reply) => {
+    const p = await principal(req, reply, ["owner", "session", "agent"]);
+    if (!p) return;
+    const roomId = (req.params as any).roomId;
+    // No validation.ts entry for this path (out of this change's scope), so req.body is the raw,
+    // unstripped client payload here — validated by hand, same as goal/success_criteria on
+    // POST /v1/rooms above.
+    const b = req.body as any;
+    if (b.goal === undefined && b.success_criteria === undefined && b.goal_status === undefined) {
+      return fail(reply, 400, "bad_request", "At least one of goal, success_criteria, goal_status is required");
+    }
+    const gErr = goalError(b.goal);
+    if (gErr) return fail(reply, 400, "invalid_goal", gErr);
+    const cErr = criteriaError(b.success_criteria);
+    if (cErr) return fail(reply, 400, "invalid_success_criteria", cErr);
+    if (b.goal_status !== undefined && !ROOM_GOAL_STATUSES.includes(b.goal_status)) {
+      return fail(reply, 400, "invalid_goal_status", `goal_status must be one of ${ROOM_GOAL_STATUSES.join(", ")}`);
+    }
+
+    const roomRes = await app.pg.query(
+      `SELECT r.*, ca.owner_id AS creator_agent_owner_id
+       FROM rooms r
+       LEFT JOIN agents ca ON r.creator_type = 'agent' AND ca.id = r.creator_id
+       WHERE r.id = $1`,
+      [roomId]
+    );
+    if (!roomRes.rowCount) return fail(reply, 404, "not_found", "Room not found");
+    const room = roomRes.rows[0];
+
+    const isCreator =
+      (room.creator_type === "owner" && room.creator_id === p.ownerId) ||
+      (room.creator_type === "agent" && (room.creator_id === p.id || room.creator_agent_owner_id === p.ownerId));
+    if (!isCreator) return fail(reply, 403, "forbidden", "Only the room creator can change its goal");
+
+    const nextGoal = b.goal !== undefined ? String(b.goal).trim() : room.goal;
+    const nextCriteria = b.success_criteria !== undefined ? b.success_criteria.map((s: string) => s.trim()) : successCriteriaFrom(room);
+    const nextStatus = b.goal_status !== undefined ? b.goal_status : room.goal_status;
+    const previousStatus = room.goal_status;
+
+    const client = await app.pg.connect();
+    try {
+      await client.query("BEGIN");
+      const r = await client.query(
+        "UPDATE rooms SET goal=$2, success_criteria=$3::jsonb, goal_status=$4, updated_at=now() WHERE id=$1 RETURNING *",
+        [roomId, nextGoal, JSON.stringify(nextCriteria), nextStatus]
+      );
+      const updated = r.rows[0];
+      if (b.goal_status !== undefined && b.goal_status !== previousStatus) {
+        await client.query(
+          `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload)
+           SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), rm.agent_id, 'room.goal_changed', 'room', $1, $2::jsonb
+           FROM room_members rm
+           WHERE rm.room_id = $1 AND rm.agent_id IS DISTINCT FROM $3`,
+          [
+            roomId,
+            JSON.stringify({
+              room_id: roomId,
+              title: updated.title,
+              goal: updated.goal,
+              goal_status: updated.goal_status,
+              previous_goal_status: previousStatus,
+              changed_by: { actor_type: p.type, actor_id: p.id }
+            }),
+            p.type === "agent" ? p.id : null
+          ]
+        );
+      }
+      await client.query("COMMIT");
+      return {
+        data: {
+          room_id: updated.id,
+          slug: updated.slug,
+          title: updated.title,
+          description: updated.description,
+          updated_at: updated.updated_at,
+          ...roomGoalFields(updated)
+        }
+      };
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+  });
   app.get("/v1/rooms/:roomId/messages",async(req,reply)=>{
     if(!await principal(req,reply))return;
     const q=req.query as any,limit=boundedLimit(q.limit),roomId=(req.params as any).roomId;
@@ -1329,7 +1490,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   // W2 (issue #36): this filter set had drifted from bootstrapFor's — "knowledge" only ever
   // matched knowledge.reviewed (which nothing produced before now), and task/forum types were
   // not bucketed at all. Kept in sync with bootstrapFor's counts so the two never disagree again.
-  app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,moderation:pending.filter(x=>x.type==="moderation.updated").length,tasks:pending.filter(x=>x.type==="task.changed"||x.type==="task.cancelled").length,forum:pending.filter(x=>x.type==="forum.thread").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed"||x.type==="knowledge.published").length},latest}}});
+  app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,moderation:pending.filter(x=>x.type==="moderation.updated").length,tasks:pending.filter(x=>x.type==="task.changed"||x.type==="task.cancelled").length,forum:pending.filter(x=>x.type==="forum.thread").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed"||x.type==="knowledge.published").length,rooms:pending.filter(x=>x.type==="room.goal_changed").length},latest}}});
   app.post("/v1/inbox/cursors",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const cursor=(req.body as any).cursor,sequence=cursorFrom(cursor);await app.pg.query("INSERT INTO inbox_checkpoints VALUES($1,$2,$3,now()) ON CONFLICT(actor_type,actor_id) DO UPDATE SET sequence=greatest(inbox_checkpoints.sequence,excluded.sequence),saved_at=now()",[p.type,p.id,sequence]);return{data:{cursor,saved_at:now()}}});
 
   function normalizeEvidence(items: unknown): Array<{ kind: "message" | "url" | "task" | "fact"; uri: string; excerpt?: string; observed_at?: string }> {
