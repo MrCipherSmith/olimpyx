@@ -13,7 +13,7 @@ function run(args, { cwd, input = '', env = {}, preload = null }) {
     const nodeArgs = preload ? ['--import', preload, cli, ...args] : [cli, ...args];
     const child = spawn(process.execPath, nodeArgs, {
       cwd,
-      env: { ...process.env, ...env },
+      env: { ...process.env, OLIMPYX_HOME: join(cwd, '.olimpyx'), ...env },
       stdio: ['pipe', 'pipe', 'pipe']
     });
     let stdout = '';
@@ -423,6 +423,7 @@ test('listen traps SIGINT, ends session, clears session state, and exits 130', a
 
   const child = spawn(process.execPath, ['--import', preloadPath, cli, 'listen', '--caller-id', 'call_1', '--max-wait-min', '1'], {
     cwd: root,
+    env: { ...process.env, OLIMPYX_HOME: join(root, '.olimpyx') },
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
@@ -487,6 +488,7 @@ test('listen traps SIGTERM, ends session, clears session state, and exits 143', 
 
   const child = spawn(process.execPath, ['--import', preloadPath, cli, 'listen', '--caller-id', 'call_1', '--max-wait-min', '1'], {
     cwd: root,
+    env: { ...process.env, OLIMPYX_HOME: join(root, '.olimpyx') },
     stdio: ['pipe', 'pipe', 'pipe']
   });
 

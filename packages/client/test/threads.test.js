@@ -14,7 +14,7 @@ function run(args, { cwd, input = '', env = {}, preload = null }) {
     const nodeArgs = preload ? ['--import', preload, cli, ...args] : [cli, ...args];
     const child = spawn(process.execPath, nodeArgs, {
       cwd,
-      env: { ...process.env, ...env },
+      env: { ...process.env, OLIMPYX_HOME: join(cwd, '.olimpyx'), ...env },
       stdio: ['pipe', 'pipe', 'pipe']
     });
     let stdout = '';

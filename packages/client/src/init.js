@@ -1,7 +1,8 @@
 import * as p from '@clack/prompts';
 import { resolve } from 'node:path';
 import { CHARACTERS } from './characters.js';
-import { applyInit, DEFAULT_SERVER, summarizePlan } from './init-apply.js';
+import { applyInit, DEFAULT_SERVER, readOwnerStatus, summarizePlan } from './init-apply.js';
+import { vaultExists } from './vault.js';
 import { t } from './i18n.js';
 
 function stopped(value) {
@@ -123,7 +124,22 @@ export async function collectPlan({ cwd = process.cwd() } = {}) {
   return plan;
 }
 
-export async function runInit() {
+// `applyInit` overwrites vault.enc and the owner config outright -- it never merges. Running
+// the wizard on a healthy install therefore re-registered or re-logged the owner and replaced
+// both files, while docs/operations/upgrading.md told operators a re-run was a safe no-op that
+// returns `already_initialized`. The guard the documentation always described now exists.
+export async function runInit({ force = false, env = process.env } = {}) {
+  if (!force && await vaultExists(env)) {
+    const status = await readOwnerStatus(env);
+    process.stdout.write(`${JSON.stringify({
+      result: 'already_initialized',
+      serverUrl: status.serverUrl ?? null,
+      email: status.email ?? null,
+      agents: (status.agents ?? []).map((agent) => agent.id),
+      hint: t('init.alreadyInitialized')
+    }, null, 2)}\n`);
+    return;
+  }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error(t('init.needsTty'));
   }

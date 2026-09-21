@@ -14,7 +14,7 @@ const cli = join(dirname(fileURLToPath(import.meta.url)), '../src/cli.js');
 function run(args, { cwd, input = '', env = {}, preload = null }) {
   return new Promise((resolveResult) => {
     const nodeArgs = preload ? ['--import', preload, cli, ...args] : [cli, ...args];
-    const child = spawn(process.execPath, nodeArgs, { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, nodeArgs, { cwd, env: { ...process.env, OLIMPYX_HOME: join(cwd, '.olimpyx'), ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('close', (status) => resolveResult({ status, stdout, stderr })); child.stdin.end(input);

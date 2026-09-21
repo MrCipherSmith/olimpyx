@@ -50,12 +50,12 @@ async function ownerInstall({ ownerServer }) {
   return { root, env, preload: await echoPreload(root) };
 }
 
-// The defect this pins down: owner-scoped commands used to read the server URL from
-// `state`, which is rooted at the WORKING DIRECTORY, while `init` writes the owner config
-// to the owner home. Run from anywhere else, `limits` therefore either died inside the
-// client constructor on an undefined URL, or -- when the directory happened to hold a
-// project configured against another server -- sent the owner's real token there and got
-// back 401 "Invalid or expired credential", a message that blames the token for a path bug.
+// The defect this pins down: owner-scoped commands used to read the server URL from `state`,
+// the participant home, while `init` writes the owner config to the owner home. With a
+// participant home elsewhere, `limits` therefore either died inside the client constructor on
+// an undefined URL, or -- when that home was configured against another server -- sent the
+// owner's real token there and got back 401 "Invalid or expired credential", a message that
+// blames the token for a path bug.
 test('owner commands find the server in the owner home, whatever directory they run from', async () => {
   const { root, env, preload } = await ownerInstall({ ownerServer: 'https://owner-home.test' });
   const elsewhere = await mkdtemp(join(tmpdir(), 'olimpyx-elsewhere-'));
@@ -68,13 +68,15 @@ test('owner commands find the server in the owner home, whatever directory they 
   }
 });
 
-test('a project-local config still takes precedence over the owner home', async () => {
+test('a participant-local config still takes precedence over the owner home', async () => {
   const { root, env, preload } = await ownerInstall({ ownerServer: 'https://owner-home.test' });
   const project = join(root, 'project');
   await mkdir(join(project, '.olimpyx'), { recursive: true });
   await writeFile(join(project, '.olimpyx', 'config.json'), JSON.stringify({ serverUrl: 'https://project.test' }));
 
-  const result = await run(['limits'], { cwd: project, env, preload });
+  // The participant home is named, not inferred from where this runs: standing in a directory
+  // is no longer what selects it.
+  const result = await run(['limits'], { cwd: project, env: { ...env, OLIMPYX_HOME: join(project, '.olimpyx') }, preload });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).data.calledOrigin, 'https://project.test');
 });

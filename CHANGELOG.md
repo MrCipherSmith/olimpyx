@@ -6,6 +6,59 @@ All notable changes to `@goodea/olimpyx` are documented here. The format follows
 A version's section here is the body of its GitHub Release — `release.yml`
 extracts it by heading and refuses to publish when the section is missing.
 
+## [Unreleased]
+
+Owner and participant state stop overlapping: where a home comes from, what
+`init` is allowed to overwrite, when a key is created, and when a dead session
+directory goes away.
+
+### Fixed
+
+- **The participant home could be the owner home.** The CLI resolved it as
+  `resolve($OLIMPYX_HOME || '.olimpyx')`, rooted at the working directory,
+  while the owner home is `$HOME/.olimpyx`. Running a participant command from
+  `$HOME` made the two the same directory, where an owner `config.json`
+  (`email`, `ownerId`, `skillScope`, `hosts`, `agents[]`) and a participant
+  `config.json` (`agentId`, `installationId`) overwrite each other — and
+  `configure` run from there silently repointed the owner's `serverUrl`.
+- **`init` was not idempotent.** `applyInit` overwrote `vault.enc` and the
+  owner config unconditionally, while `docs/operations/upgrading.md` told
+  operators a re-run was a safe no-op returning `already_initialized`. It now
+  is one; `--force` runs the wizard anyway.
+- **Reading a vault created a key.** `readVault` called `loadOrCreateKey`
+  before reading, so any owner command on an uninitialised machine failed with
+  "no owner credential" and still left a 32-byte `master.key` behind for a
+  vault that would never exist — and a later `init` reused the stale key.
+  Reading and creating are separate: only a write creates a key.
+- **`calls/<caller-id>/` was never collected.** Directories were created on
+  demand and nothing removed them; each held a `session-credential` that died
+  with its server-side session after 90 seconds. A dozen accumulated on one
+  host in an afternoon.
+
+### Added
+
+- **`OLIMPYX_PARTICIPANT=<agent-id>`** resolves the participant home through
+  the owner config, the same way `olimpyx resident --agent <id>` does. Named to
+  stay distinct from `OLIMPYX_AGENT_ID`, which is a *server* agent id.
+- **`olimpyx session prune [--max-age-hours N]`** reports which stale caller
+  directories it removed. `session begin` and `session end` prune too. A
+  directory survives while its caller lease is fresh or while it still holds
+  unacknowledged mutations, whose idempotency keys are the only guard against a
+  duplicate send.
+- **`olimpyx init --force`** runs the wizard on an already-initialised machine.
+- The owner config carries `kind: "olimpyx.owner-config/1"`. `status` refuses
+  to read a participant config as owner state instead of reporting an owner
+  with no email and no agents.
+
+### Removed
+
+- **Deriving the participant home from the working directory.** A home that
+  depends on where a host happened to be launched is the defect, not a
+  convenience: it is what let `$HOME` collide with the owner home. Callers name
+  the home they mean, through `OLIMPYX_PARTICIPANT` or an absolute
+  `OLIMPYX_HOME`; a relative `OLIMPYX_HOME` is refused with the absolute path
+  it would have become.
+
 ## [0.3.0] — 2026-09-21
 
 Archi joins the selectable catalog, with a packaged tool for participation through an existing model host.

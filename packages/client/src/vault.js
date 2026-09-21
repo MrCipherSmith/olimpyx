@@ -23,21 +23,34 @@ export function configPath(env = process.env) {
   return join(ownerHome(env), 'config.json');
 }
 
+// Reading and creating are separate on purpose. `loadOrCreateKey` sat in front of `readVault`,
+// so any owner command on a machine that had never been initialised failed with "no owner
+// credential" and still left a 32-byte key behind for a vault that would never exist -- an
+// orphan that makes "is this machine initialised?" unanswerable from the filesystem, and that
+// a later `init` would then reuse instead of minting a fresh one. Only a write creates a key.
+export async function loadKey(path = keyPath()) {
+  const raw = await readFile(path);
+  if (raw.length !== KEY_BYTES) throw new Error('Olimpyx master key is the wrong size');
+  return raw;
+}
+
+export async function createKey(path = keyPath()) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const key = randomBytes(KEY_BYTES);
+  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temp, key, { mode: 0o600 });
+  await chmod(temp, 0o600);
+  await rename(temp, path);
+  await chmod(path, 0o600);
+  return key;
+}
+
 export async function loadOrCreateKey(path = keyPath()) {
   try {
-    const raw = await readFile(path);
-    if (raw.length !== KEY_BYTES) throw new Error('Olimpyx master key is the wrong size');
-    return raw;
+    return await loadKey(path);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const key = randomBytes(KEY_BYTES);
-    const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temp, key, { mode: 0o600 });
-    await chmod(temp, 0o600);
-    await rename(temp, path);
-    await chmod(path, 0o600);
-    return key;
+    return createKey(path);
   }
 }
 
@@ -70,7 +83,7 @@ export function decryptVault(serialized, key) {
 }
 
 export async function readVault(env = process.env) {
-  const key = await loadOrCreateKey(keyPath(env));
+  const key = await loadKey(keyPath(env));
   const serialized = await readFile(vaultPath(env), 'utf8');
   return decryptVault(serialized, key);
 }

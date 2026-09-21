@@ -11,10 +11,28 @@ import { runInit } from './init.js';
 import { searchCharacters } from './characters.js';
 import { ownerHome, readVault } from './vault.js';
 import { HOST_SKILL_DIRS, installStarterSkill } from './skill-install.js';
+import { resolveParticipantHome } from './participant-home.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
-const state = new LocalState(resolve(process.env.OLIMPYX_HOME || '.olimpyx'));
+
+// The participant home is resolved on first use, not at startup: owner-scoped commands
+// (`init`, `status`, `agent add`, `skill`) never needed one and must keep working from any
+// directory. Only a command that actually reaches for participant state gets the refusal.
+// See participant-home.js.
+let participantState = null;
+function participantHome() {
+  const { home, reason } = resolveParticipantHome();
+  if (!home) throw new Error(reason);
+  return home;
+}
+const state = new Proxy({}, {
+  get(_target, property) {
+    participantState ??= new LocalState(participantHome());
+    const value = Reflect.get(participantState, property);
+    return typeof value === 'function' ? value.bind(participantState) : value;
+  }
+});
 
 function option(name, fallback) {
   const index = args.indexOf(`--${name}`);
@@ -69,21 +87,23 @@ async function tryLoadOwnerToken() {
   return loadVaultOwnerToken();
 }
 async function ownerServerUrl() {
-  const local = await state.loadConfig();
+  // A participant home may be unavailable here -- an owner command run without
+  // OLIMPYX_PARTICIPANT or OLIMPYX_HOME. That is not this function's problem: it only means
+  // there is no participant-local config to prefer, so fall through to the owner home.
+  let local = {};
+  try { local = await state.loadConfig(); } catch { /* no participant home; owner config below */ }
   if (local.serverUrl) return local.serverUrl;
   try { return JSON.parse(await readFile(join(ownerHome(), 'config.json'), 'utf8')).serverUrl; } catch { return null; }
 }
 
-// Every owner-scoped client goes through here. Resolving the server from `state` alone --
-// which is rooted at the WORKING DIRECTORY (`OLIMPYX_HOME` or ./.olimpyx), not at the owner
-// home -- made these commands depend on where they were run from. After a global `init`
-// the owner config lives in ~/.olimpyx, so from any other directory the URL came back
-// undefined and the client constructor died on `undefined.replace`; worse, standing in a
-// project configured against a DIFFERENT server sent the owner's real token there and the
-// server answered 401 "Invalid or expired credential" -- a message that points at the token
-// when the token was never the problem. ownerServerUrl() keeps the project-local config
-// first and falls back to the owner home, which is what `usage` already did and the rest
-// did not.
+// Every owner-scoped client goes through here. Resolving the server from `state` alone made
+// these commands depend on which participant home was selected. After a global `init` the
+// owner config lives in ~/.olimpyx, so with a participant home pointing elsewhere the URL came
+// back undefined and the client constructor died on `undefined.replace`; worse, a participant
+// home configured against a DIFFERENT server sent the owner's real token there and the server
+// answered 401 "Invalid or expired credential" -- a message that points at the token when the
+// token was never the problem. ownerServerUrl() keeps the participant-local config first and
+// falls back to the owner home, which is what `usage` already did and the rest did not.
 async function ownerClientWith(token) {
   const serverUrl = await ownerServerUrl();
   if (!serverUrl) throw new Error('Not configured. Run: olimpyx init (or olimpyx configure --server URL)');
@@ -159,7 +179,8 @@ async function main() {
     return;
   }
   if (command === 'init') {
-    await runInit();
+    const force = option('force', false) === true;
+    await runInit({ force });
     return;
   }
   if (command === 'status') {
@@ -265,7 +286,7 @@ async function main() {
           { limit: beginBudget.limitMinutes }
         );
       }
-      const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return;
+      const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); await state.pruneCallers(); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return;
     }
     if (action === 'heartbeat') { const callerId = option('caller-id'); const { heartbeat } = await activeClient(callerId); output(heartbeat); return; }
     if (action === 'end') {
@@ -275,9 +296,13 @@ async function main() {
       if (!['agent_ended', 'host_ended', 'shutdown'].includes(reason)) throw new Error('Session end reason must be agent_ended, host_ended, or shutdown');
       const result = await (await configuredClient(local.token)).request('POST', `/v1/sessions/${encodeURIComponent(local.session_id)}/end`, { reason });
       await recordSessionEnd(state.root, local.session_id);
-      await state.clearSession(callerId); output(result); return;
+      await state.clearSession(callerId); await state.pruneCallers(); output(result); return;
     }
-    throw new Error('session actions: begin | heartbeat | end');
+    if (action === 'prune') {
+      const maxAgeMs = Number(option('max-age-hours', 24)) * 3_600_000;
+      output({ removed: await state.pruneCallers({ maxAgeMs }) }); return;
+    }
+    throw new Error('session actions: begin | heartbeat | end | prune');
   }
   if (command === 'request') {
     const method = (args.shift() || 'GET').toUpperCase(); const path = args.shift();
