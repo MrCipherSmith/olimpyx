@@ -4,10 +4,13 @@ import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { createApp, migrate } from "../src/app.js";
 
-// W1 (issue #36): a room message without an explicit recipient must fan out to every
-// current room member except the sender, via the new room_members table. Addressed
-// messages and thread-root notifications must keep behaving exactly as before, and
-// membership itself must be joinable/leavable explicitly, and auto-joined on first post.
+// W1 (issue #36): every room message fans out to the room's members via the new
+// room_members table, sender excluded. Addressing someone by recipient_agent_id is not
+// private messaging (README: "direct addressing is not private messaging") — it still
+// reaches the room, the addressee just also gets exactly one event of their own, never
+// two. A thread root authored by an owner (who can never be a room member) still gets
+// notified of replies. Membership itself is joinable/leavable explicitly and auto-joined
+// on first post.
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
 const schema = `test_room_members_${randomUUID().replaceAll("-", "")}`;
@@ -217,29 +220,58 @@ test("only agents can join or leave a room, not owners", async () => {
   assert.equal(leaveAsOwner.json().error.code, "forbidden");
 });
 
-test("addressed message: still notifies only the addressee, even when the addressee is already a member (no duplicate)", async () => {
+test("addressed message: still reaches the room, but the addressee gets exactly one event, not two", async () => {
   await freshOwner();
   const roomId = await createRoom("addressed");
   const holly = await enrollAgent("holly-addr");
   const ian = await enrollAgent("ian-addr");
+  const jack = await enrollAgent("jack-addr");
 
-  // Both post once first so both are current members of the room.
+  // All three post once first so all three are current members of the room.
   await post(roomId, holly.token, "addr-holly-1", { body: "holly says hi" });
   await post(roomId, ian.token, "addr-ian-1", { body: "ian says hi" });
-  assert.ok((await members(roomId)).includes(holly.agentId) && (await members(roomId)).includes(ian.agentId));
+  await post(roomId, jack.token, "addr-jack-1", { body: "jack says hi" });
+  const memberIds = await members(roomId);
+  assert.ok([holly, ian, jack].every(a => memberIds.includes(a.agentId)));
 
   const addressed = await post(roomId, ian.token, "addr-ian-2", { body: "hey holly, direct message", recipient_agent_id: holly.agentId });
   assert.equal(addressed.statusCode, 201);
   const addressedId = addressed.json().data.message_id;
 
+  // The addressee gets exactly one event for it (excluded from the fan-out, added back by the addressee-only insert).
   const hollyEvents = await inboxEventIdsFor(holly.token);
-  const matchesForHolly = hollyEvents.filter(id => id === addressedId);
-  assert.equal(matchesForHolly.length, 1, "the addressee must receive exactly one event for the addressed message, not two");
+  assert.equal(hollyEvents.filter(id => id === addressedId).length, 1, "the addressee must receive exactly one event for the addressed message, not two");
 
-  // ian (a member, but not the addressee) must NOT receive an event for the addressed message,
-  // confirming addressed messages do not also fan out to the rest of the room.
-  const row = await app.pg.query("SELECT 1 FROM inbox_events WHERE agent_id=$1 AND resource_id=$2", [ian.agentId, addressedId]);
-  assert.equal(row.rowCount, 0, "ian is a member but not the addressee and must not receive the addressed message");
+  // jack is a member, neither the sender nor the addressee: naming holly is not private messaging,
+  // so the room still hears it — jack gets the fan-out event.
+  assert.ok((await inboxEventIdsFor(jack.token)).includes(addressedId), "a bystander member must still receive the addressed message via the room fan-out");
+
+  // ian is the sender and must not receive his own event, addressed or not.
+  assert.ok(!(await inboxEventIdsFor(ian.token)).includes(addressedId), "the sender must not receive their own event");
+});
+
+test("thread root authored by an owner still notifies the owner when an agent replies", async () => {
+  await freshOwner();
+  const roomId = await createRoom("owner-root");
+  const lena = await enrollAgent("lena-owner-root");
+
+  const root = await post(roomId, ownerToken, "owner-root-1", { body: "Owner kicks off a thread" });
+  assert.equal(root.statusCode, 201);
+  const rootId = root.json().data.message_id;
+
+  const reply = await post(roomId, lena.token, "owner-root-2", { body: "agent replies to the owner's thread", reply_to_message_id: rootId });
+  assert.equal(reply.statusCode, 201);
+  const replyId = reply.json().data.message_id;
+
+  assert.ok((await inboxEventIdsFor(ownerToken)).includes(replyId), "the owner who started the thread should be notified of the agent's reply");
+});
+
+test("joining a room that does not exist returns 404, not a foreign key error", async () => {
+  await freshOwner();
+  const agent = await enrollAgent("nora-404");
+  const joinRes = await join("rom_does_not_exist", agent.token, "nora-join-404");
+  assert.equal(joinRes.statusCode, 404);
+  assert.equal(joinRes.json().error.code, "not_found");
 });
 
 test("thread reply still notifies the root author (who is a member from posting the root)", async () => {

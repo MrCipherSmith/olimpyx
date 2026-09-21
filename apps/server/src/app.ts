@@ -905,6 +905,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         if(!replay)await enforceQuota(client,limits,p,messageClassOf({recipient_agent_id:b.recipient_agent_id,reply_to_message_id:b.reply_to_message_id,category}),{recipientAgentId:b.recipient_agent_id});
 
         let rootMessageId: string | null = null;
+        // Only the owner case is tracked past this point: an agent root author is already covered by
+        // room_members (posting the root auto-joined them), but owners can never be room members, so
+        // without this a thread an owner started would go silent on them the moment someone replied.
+        let rootOwnerAuthorId: string | null = null;
 
         if (b.reply_to_message_id) {
           const parentRes = await client.query(
@@ -923,6 +927,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
 
           if (parent.root_message_id === null) {
             rootMessageId = parent.id;
+            if (parent.sender_type === "owner") rootOwnerAuthorId = parent.sender_id;
           } else {
             rootMessageId = parent.root_message_id;
             const rootRes = await client.query(
@@ -933,6 +938,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
               await client.query("ROLLBACK");
               return fail(reply, 404, "not_found", "Thread root message not found");
             }
+            if (rootRes.rows[0].sender_type === "owner") rootOwnerAuthorId = rootRes.rows[0].sender_id;
           }
         }
 
@@ -958,20 +964,22 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
           if (p.type === "agent") {
             await client.query("INSERT INTO room_members(room_id,agent_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [rid, p.id]);
           }
+          // A room message is not private just because it names someone (README: "direct addressing is
+          // not private messaging"), so the fan-out always runs — sender and, if set, the addressee are
+          // excluded here so the addressee's own event (below) is the only one they get, not two.
+          await client.query(
+            `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id)
+             SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), rm.agent_id, 'message.created', 'message', $1
+             FROM room_members rm
+             WHERE rm.room_id=$2 AND rm.agent_id IS DISTINCT FROM $3 AND rm.agent_id IS DISTINCT FROM $4`,
+            [mid, rid, p.type === "agent" ? p.id : null, b.recipient_agent_id ?? null]
+          );
           if (b.recipient_agent_id) {
             await client.query("INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), b.recipient_agent_id, mid]);
-          } else {
-            // No explicit addressee: fan out to the room's members (sender excluded), one INSERT ... SELECT so a
-            // hundred-member room is a hundred rows in one statement, not a hundred round trips. This also covers
-            // "reply notifies thread root author" for the common case, since posting the root already made that
-            // author a member; rootAuthor itself is no longer referenced here.
-            await client.query(
-              `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id)
-               SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), rm.agent_id, 'message.created', 'message', $1
-               FROM room_members rm
-               WHERE rm.room_id=$2 AND rm.agent_id IS DISTINCT FROM $3`,
-              [mid, rid, p.type === "agent" ? p.id : null]
-            );
+          }
+          // Thread root author who is an owner: never a room member, so not reachable by the fan-out above.
+          if (rootOwnerAuthorId && rootOwnerAuthorId !== p.id) {
+            await client.query("INSERT INTO inbox_events(id,owner_id,type,resource_kind,resource_id) VALUES($1,$2,'message.created','message',$3)", [id("evt"), rootOwnerAuthorId, mid]);
           }
         }
 
@@ -1008,6 +1016,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     if (!p) return;
     if (p.type !== "agent") return fail(reply, 403, "agent_only", "Only agents can join rooms");
     const roomId = (req.params as any).roomId;
+    if (!(await app.pg.query("SELECT 1 FROM rooms WHERE id=$1", [roomId])).rowCount) {
+      return fail(reply, 404, "not_found", "Room not found");
+    }
     return roomMembershipChange(req, reply, p, async client => {
       await client.query("INSERT INTO room_members(room_id,agent_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [roomId, p.id]);
       const row = (await client.query("SELECT joined_at FROM room_members WHERE room_id=$1 AND agent_id=$2", [roomId, p.id])).rows[0];
