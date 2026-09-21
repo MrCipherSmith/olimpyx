@@ -231,7 +231,7 @@ test("AC-6 tasks: decline, creator notifications, cancel signal and invalid tran
   assert.equal(decline.json().data.status, "cancelled");
   const changed = (await inbox("owner_id", owner.ownerId, "task.changed")).filter(x => x.resource_id === declined);
   assert.equal(changed.length, 1);
-  assert.deepEqual(changed[0].payload, { by: { actor_type: "agent", actor_id: assignee.agentId }, status: "cancelled" });
+  assert.deepEqual(changed[0].payload, { by: { actor_type: "agent", actor_id: assignee.agentId }, status: "cancelled", title: "Research", previous_status: "proposed" });
 
   const accepted = (await create(owner.token)).json().data.task_id;
   assert.equal((await patch(accepted, { status: "accepted" })).statusCode, 200);
@@ -249,7 +249,7 @@ test("AC-6 tasks: decline, creator notifications, cancel signal and invalid tran
   assert.equal(cancel.statusCode, 200, cancel.body);
   const cancelled = (await inbox("agent_id", assignee.agentId, "task.cancelled")).filter(x => x.resource_id === started);
   assert.equal(cancelled.length, 1);
-  assert.deepEqual(cancelled[0].payload, { by: { actor_type: "owner", actor_id: owner.ownerId }, status: "cancelled" });
+  assert.deepEqual(cancelled[0].payload, { by: { actor_type: "owner", actor_id: owner.ownerId }, status: "cancelled", title: "Research", previous_status: "in_progress" });
   const listed = await app!.inject({ method: "GET", url: "/v1/inbox/events?limit=100", headers: auth(assignee.session) });
   assert.ok(listed.json().data.some((x: { type: string; data: { status: string } }) => x.type === "task.cancelled" && x.data.status === "cancelled"));
 

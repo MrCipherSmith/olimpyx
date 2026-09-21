@@ -453,9 +453,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const agent=profileFrom((await app.pg.query(`${profileSql} WHERE a.id=$1`,[agentId])).rows[0]);
     const checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type='agent' AND actor_id=$1),0) n",[agentId])).rows[0].n);
     const pending=await app.pg.query("SELECT type,count(*) n FROM inbox_events WHERE agent_id=$1 AND sequence>$2 GROUP BY type",[agentId,checkpoint]);
-    // W2 (issue #36): task/forum/knowledge events are new inbox types; without a bucket here
-    // an agent's bootstrap still reports zero for everything but messages and moderation.
-    const counts={messages:0,moderation:0,tasks:0,forum:0,knowledge:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n);if(x.type==="task.assigned"||x.type==="task.updated")counts.tasks+=Number(x.n);if(x.type==="forum.question")counts.forum+=Number(x.n);if(x.type==="knowledge.reviewed"||x.type==="knowledge.published")counts.knowledge+=Number(x.n)}
+    // W2 (issue #36): task (task.changed/task.cancelled), forum.thread and knowledge events were
+    // never bucketed here; without this an agent's bootstrap still reports zero for everything
+    // but messages and moderation, even with unread task/forum/knowledge events waiting.
+    const counts={messages:0,moderation:0,tasks:0,forum:0,knowledge:0}; for(const x of pending.rows){if(x.type==="message.created")counts.messages+=Number(x.n);if(x.type==="moderation.updated")counts.moderation+=Number(x.n);if(x.type==="task.changed"||x.type==="task.cancelled")counts.tasks+=Number(x.n);if(x.type==="forum.thread")counts.forum+=Number(x.n);if(x.type==="knowledge.reviewed"||x.type==="knowledge.published")counts.knowledge+=Number(x.n)}
     const max=Number((await app.pg.query("SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE agent_id=$1",[agentId])).rows[0].n);
     const recent=await eventsFor({type:"agent",id:agentId,ownerId:"",name:agent.name,tokenType:"session"},Math.max(0,max-10),10);
     const rooms=(await app.pg.query("SELECT * FROM rooms ORDER BY updated_at DESC LIMIT 10")).rows.map(x=>({room_id:x.id,slug:x.slug,title:x.title,description:x.description,created_at:x.created_at,updated_at:x.updated_at}));
@@ -990,7 +991,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
           if (category !== null && tags.length) {
             await client.query(
               `INSERT INTO inbox_events(id,agent_id,type,resource_kind,resource_id,payload)
-               SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), d.agent_id, 'forum.question', 'message', $1, $2::jsonb
+               SELECT 'evt_'||replace(gen_random_uuid()::text,'-',''), d.agent_id, 'forum.thread', 'message', $1, $2::jsonb
                FROM (SELECT DISTINCT agent_id FROM agent_subscriptions WHERE tag=ANY($3::text[]) AND agent_id IS DISTINCT FROM $4) d`,
               [
                 mid,
@@ -1325,7 +1326,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
   });
   async function eventsFor(p:Principal,after:number,limit:number){const col=p.type==="agent"?"agent_id":"owner_id";const r=await app.pg.query(`SELECT * FROM inbox_events WHERE ${col}=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`,[p.id,after,limit]);return r.rows.map(x=>({event_id:x.id,cursor:cursorOf(x.sequence),type:x.type,occurred_at:x.occurred_at,resource:{kind:x.resource_kind,id:x.resource_id},data:x.payload??null}))}
   app.get("/v1/inbox/events",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const q=req.query as any,data=await eventsFor(p,cursorFrom(q.after_cursor),boundedLimit(q.limit));return{data,page:{next_cursor:data.length?data.at(-1)!.cursor:null}}});
-  app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed").length,moderation:pending.filter(x=>x.type==="moderation.updated").length},latest}}});
+  // W2 (issue #36): this filter set had drifted from bootstrapFor's — "knowledge" only ever
+  // matched knowledge.reviewed (which nothing produced before now), and task/forum types were
+  // not bucketed at all. Kept in sync with bootstrapFor's counts so the two never disagree again.
+  app.get("/v1/inbox/overview",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const col=p.type==="agent"?"agent_id":"owner_id",checkpoint=Number((await app.pg.query("SELECT coalesce((SELECT sequence FROM inbox_checkpoints WHERE actor_type=$1 AND actor_id=$2),0) n",[p.type,p.id])).rows[0].n),max=Number((await app.pg.query(`SELECT coalesce(max(sequence),0) n FROM inbox_events WHERE ${col}=$1`,[p.id])).rows[0].n),latest=await eventsFor(p,Math.max(0,max-10),10),pending=await eventsFor(p,checkpoint,100);return{data:{cursor:cursorOf(max),pending_counts:{messages:pending.filter(x=>x.type==="message.created").length,moderation:pending.filter(x=>x.type==="moderation.updated").length,tasks:pending.filter(x=>x.type==="task.changed"||x.type==="task.cancelled").length,forum:pending.filter(x=>x.type==="forum.thread").length,knowledge:pending.filter(x=>x.type==="knowledge.reviewed"||x.type==="knowledge.published").length},latest}}});
   app.post("/v1/inbox/cursors",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const cursor=(req.body as any).cursor,sequence=cursorFrom(cursor);await app.pg.query("INSERT INTO inbox_checkpoints VALUES($1,$2,$3,now()) ON CONFLICT(actor_type,actor_id) DO UPDATE SET sequence=greatest(inbox_checkpoints.sequence,excluded.sequence),saved_at=now()",[p.type,p.id,sequence]);return{data:{cursor,saved_at:now()}}});
 
   function normalizeEvidence(items: unknown): Array<{ kind: "message" | "url" | "task" | "fact"; uri: string; excerpt?: string; observed_at?: string }> {
@@ -1779,10 +1783,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const cap=limits.capacity.open_tasks_per_assignee;
     if(cap>0&&Number((await client.query("SELECT count(*)::int n FROM tasks WHERE assigned_agent_id=$1 AND status<>ALL($2)",[assignee,TERMINAL_TASK])).rows[0].n)>=cap)throw new ApiError(409,"assignee_at_capacity",`The assignee already has ${cap} open tasks`,{limit:cap});
     const r=await client.query("WITH t AS (SELECT clock_timestamp() c) INSERT INTO tasks SELECT $1,$2,$3,$4,$5,$6,$7,$8,'proposed',NULL,t.c,t.c FROM t RETURNING *",[tid,(req.params as any).roomId,p.type,p.id,p.name,assignee,b.title,b.description]);
-    await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed"});
-    // W2 (issue #36): assigning a task is otherwise silent for the assignee beyond the generic
-    // task.changed signal above; skip only when the creator assigned it to themselves.
-    if(!(p.type==="agent"&&p.id===assignee))await taskEvent(client,{type:"agent",id:assignee},"task.assigned",tid,{task_id:tid,room_id:(req.params as any).roomId,title:b.title,status:"proposed",assigned_by:byOf(p)});
+    // W2 (issue #36): task.changed was already the assignment signal — it just didn't carry the
+    // task's title, so a recipient couldn't tell what it was about without a second request.
+    await taskEvent(client,{type:"agent",id:assignee},"task.changed",tid,{by:byOf(p),status:"proposed",title:b.title});
     return{status:201,data:taskFrom(r.rows[0])}})});
   app.get("/v1/rooms/:roomId/tasks",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE room_id=$1 ORDER BY created_at DESC LIMIT $2",[(req.params as any).roomId,boundedLimit((req.query as any).limit)]);return{data:r.rows.map(taskFrom),page:{next_cursor:null}}});
   app.get("/v1/tasks/:taskId",async(req,reply)=>{if(!await principal(req,reply))return;const r=await app.pg.query("SELECT * FROM tasks WHERE id=$1",[(req.params as any).taskId]);if(!r.rowCount)return fail(reply,404,"not_found","Task not found");return{data:taskFrom(r.rows[0])}});
@@ -1797,12 +1800,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       assertNoSecret([b.result]);
     }else if(!["accepted","in_progress","completed","failed"].includes(b.status))throw new ApiError(422,"validation_error","Invalid task status");
     const r=await client.query("UPDATE tasks SET status=$2,result=$3,updated_at=now() WHERE id=$1 RETURNING *",[tid,b.status,b.result??t.result]);
-    if(!(t.creator_type==="agent"&&t.creator_id===p.id)){
-      await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.changed",tid,{by:byOf(p),status:b.status});
-      // W2 (issue #36): a typed signal for "the status actually moved", distinct from the
-      // generic task.changed above (which also fires for cancel/no-op payload shapes elsewhere).
-      if(b.status!==t.status)await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.updated",tid,{task_id:tid,title:t.title,status:b.status,previous_status:t.status,updated_by:byOf(p)});
-    }
+    // W2 (issue #36): title and previous_status so the creator can tell what changed without a
+    // second request, instead of adding a second, duplicate event type for the same transition.
+    if(!(t.creator_type==="agent"&&t.creator_id===p.id))await taskEvent(client,{type:t.creator_type,id:t.creator_id},"task.changed",tid,{by:byOf(p),status:b.status,title:t.title,previous_status:t.status});
     return{status:200,data:taskFrom(r.rows[0])}})});
   /** Creator cancel; the assignee receives a typed `task.cancelled` signal. */
   app.post("/v1/tasks/:taskId/cancel",async(req,reply)=>{const p=await principal(req,reply);if(!p)return;const tid=(req.params as any).taskId;return idem(req,reply,`${p.type}:${p.id}`,async client=>{
@@ -1811,7 +1811,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     if(t.creator_type!==p.type||t.creator_id!==p.id)throw new ApiError(403,"forbidden","Only creator can cancel");
     if(TERMINAL_TASK.includes(t.status))throw new ApiError(409,"invalid_task_transition","Task is terminal");
     const r=await client.query("UPDATE tasks SET status='cancelled',updated_at=now() WHERE id=$1 RETURNING *",[tid]);
-    if(!(p.type==="agent"&&p.id===t.assigned_agent_id))await taskEvent(client,{type:"agent",id:t.assigned_agent_id},"task.cancelled",tid,{by:byOf(p),status:"cancelled"});
+    if(!(p.type==="agent"&&p.id===t.assigned_agent_id))await taskEvent(client,{type:"agent",id:t.assigned_agent_id},"task.cancelled",tid,{by:byOf(p),status:"cancelled",title:t.title,previous_status:t.status});
     return{status:200,data:taskFrom(r.rows[0])}})});
   app.get("/v1/limits",async(req,reply)=>{if(!await principal(req,reply,["owner","session","agent"]))return;return{data:effective}});
   app.get("/v1/owners/me/usage",async(req,reply)=>{const p=await principal(req,reply,["owner"]);if(!p)return;return{data:await ownerUsage(app.pg,limits,p.id)}});

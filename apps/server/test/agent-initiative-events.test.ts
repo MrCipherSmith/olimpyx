@@ -4,12 +4,14 @@ import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { createApp, migrate } from "../src/app.js";
 
-// W2 (issue #36): the inbox previously produced exactly three event types (agent.revoked,
-// message.created, moderation.updated), two of them administrative. An agent that checked its
-// inbox after being assigned a task, having its knowledge card reviewed or published, or being
-// relevant to a forum question saw nothing worth acting on. This file covers the five new event
-// types added to close that gap: task.assigned, task.updated, forum.question, knowledge.reviewed,
-// knowledge.published — including that none of them duplicate events for a single recipient.
+// W2 (issue #36): task.changed and task.cancelled already existed and already reached the right
+// recipients (taskEvent + its three call sites) — they just carried too little payload for a
+// recipient to know what the task even was without a second request. This file covers: enriching
+// that payload (title, and previous_status on a real transition) instead of adding duplicate
+// task.assigned/task.updated event types; the new forum.thread event (root forum message ->
+// tag subscribers, any category, not just "question" — the ticket's own event name undersold
+// that); and the new knowledge.reviewed / knowledge.published events. All five checks include
+// that no recipient is ever notified twice for one action.
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://olimpyx:olimpyx-local-only@127.0.0.1:55432/olimpyx";
 const schema = `test_initiative_events_${randomUUID().replaceAll("-", "")}`;
@@ -124,87 +126,73 @@ after(async () => {
   await admin.end();
 });
 
-test("task.assigned: reaches a different assignee with a self-sufficient payload, never a self-assigning creator", async () => {
+test("task.changed: creation and every status-changing patch carry the task's title, patches also carry previous_status", async () => {
   await freshOwner();
-  const roomId = await createRoom("task-assigned");
-  const assignee = await enrollAgent("assignee-ta");
+  const roomId = await createRoom("task-changed-payload");
+  const assignee = await enrollAgent("assignee-tc");
 
   const created = await createTask(roomId, ownerToken, { assigned_agent_id: assignee.agentId, title: "Investigate drift", description: "Look into it" });
   assert.equal(created.statusCode, 201, created.body);
   const taskId = created.json().data.task_id;
 
-  const events = await inboxEvents(assignee.token, "task.assigned");
-  const forThisTask = events.filter(e => e.resource.id === taskId);
-  assert.equal(forThisTask.length, 1, "assignee must get exactly one task.assigned event");
-  assert.deepEqual(forThisTask[0].data, {
-    task_id: taskId,
-    room_id: roomId,
-    title: "Investigate drift",
-    status: "proposed",
-    assigned_by: { actor_type: "owner", actor_id: ownerId }
-  });
-
-  // An agent that assigns a task to itself is not notified of its own action.
-  const selfAssignee = await enrollAgent("self-ta");
-  const before = (await inboxEvents(selfAssignee.token, "task.assigned")).length;
-  const selfTask = await createTask(roomId, selfAssignee.token, { assigned_agent_id: selfAssignee.agentId, title: "Self task", description: "d" });
-  assert.equal(selfTask.statusCode, 201, selfTask.body);
-  assert.equal((await inboxEvents(selfAssignee.token, "task.assigned")).length, before, "no self-notification when creator is the assignee");
-});
-
-test("task.updated: reaches the creator only when status actually moves, never the assignee itself", async () => {
-  await freshOwner();
-  const roomId = await createRoom("task-updated");
-  const assignee = await enrollAgent("assignee-tu");
-
-  const created = await createTask(roomId, ownerToken, { assigned_agent_id: assignee.agentId, title: "Ship it", description: "d" });
-  const taskId = created.json().data.task_id;
+  const onCreate = (await inboxEvents(assignee.token, "task.changed")).filter(e => e.resource.id === taskId);
+  assert.equal(onCreate.length, 1, "assignment still fires exactly one event, not a duplicate typed one alongside it");
+  assert.deepEqual(onCreate[0].data, { by: { actor_type: "owner", actor_id: ownerId }, status: "proposed", title: "Investigate drift" });
 
   const accepted = await patchTask(taskId, assignee.token, { status: "accepted" });
   assert.equal(accepted.statusCode, 200, accepted.body);
-  let updates = (await inboxEvents(ownerToken, "task.updated")).filter(e => e.resource.id === taskId);
-  assert.equal(updates.length, 1, "creator gets one task.updated for the accept transition");
-  assert.deepEqual(updates[0].data, {
-    task_id: taskId,
-    title: "Ship it",
+  let onOwner = (await inboxEvents(ownerToken, "task.changed")).filter(e => e.resource.id === taskId);
+  assert.equal(onOwner.length, 1, "creator gets one task.changed for the accept transition");
+  assert.deepEqual(onOwner[0].data, {
+    by: { actor_type: "agent", actor_id: assignee.agentId },
     status: "accepted",
-    previous_status: "proposed",
-    updated_by: { actor_type: "agent", actor_id: assignee.agentId }
+    title: "Investigate drift",
+    previous_status: "proposed"
   });
 
-  // Re-patching with the same status is not a status change and must not fire another event.
-  const noop = await patchTask(taskId, assignee.token, { status: "accepted" });
-  assert.equal(noop.statusCode, 200, noop.body);
-  updates = (await inboxEvents(ownerToken, "task.updated")).filter(e => e.resource.id === taskId);
-  assert.equal(updates.length, 1, "no duplicate event when status is patched to its current value");
-
+  // A second, genuine transition fires a second event with its own previous_status.
   const started = await patchTask(taskId, assignee.token, { status: "in_progress" });
   assert.equal(started.statusCode, 200, started.body);
-  updates = (await inboxEvents(ownerToken, "task.updated")).filter(e => e.resource.id === taskId);
-  assert.equal(updates.length, 2, "a genuine second transition fires a second event");
-  assert.equal(updates[1].data.previous_status, "accepted");
-  assert.equal(updates[1].data.status, "in_progress");
+  onOwner = (await inboxEvents(ownerToken, "task.changed")).filter(e => e.resource.id === taskId);
+  assert.equal(onOwner.length, 2);
+  assert.equal(onOwner[1].data.previous_status, "accepted");
+  assert.equal(onOwner[1].data.status, "in_progress");
 
-  // An agent that both created and is assigned the task never gets notified of its own update.
-  const selfAgent = await enrollAgent("self-tu");
+  // Creator cancel: task.cancelled to the assignee also carries title and the status it had before cancelling.
+  const other = await enrollAgent("assignee-tc-2");
+  const cancelTarget = (await createTask(roomId, ownerToken, { assigned_agent_id: other.agentId, title: "Will be cancelled", description: "d" })).json().data.task_id;
+  assert.equal((await patchTask(cancelTarget, other.token, { status: "accepted" })).statusCode, 200);
+  const cancelled = await app.inject({ method: "POST", url: `/v1/tasks/${cancelTarget}/cancel`, headers: mutate(ownerToken, nextKey("cancel")), payload: {} });
+  assert.equal(cancelled.statusCode, 200, cancelled.body);
+  const cancelEvents = (await inboxEvents(other.token, "task.cancelled")).filter(e => e.resource.id === cancelTarget);
+  assert.equal(cancelEvents.length, 1);
+  assert.deepEqual(cancelEvents[0].data, {
+    by: { actor_type: "owner", actor_id: ownerId },
+    status: "cancelled",
+    title: "Will be cancelled",
+    previous_status: "accepted"
+  });
+
+  // Self-created, self-assigned tasks still never self-notify (pre-existing behaviour, unaffected by the payload change).
+  const selfAgent = await enrollAgent("self-tc");
   const selfTask = (await createTask(roomId, selfAgent.token, { assigned_agent_id: selfAgent.agentId, title: "Solo", description: "d" })).json().data.task_id;
-  const beforeSelf = (await inboxEvents(selfAgent.token, "task.updated")).length;
+  const beforeSelf = (await inboxEvents(selfAgent.token, "task.changed")).length;
   await patchTask(selfTask, selfAgent.token, { status: "accepted" });
-  assert.equal((await inboxEvents(selfAgent.token, "task.updated")).length, beforeSelf, "no self-notification when creator is the assignee");
+  assert.equal((await inboxEvents(selfAgent.token, "task.changed")).length, beforeSelf, "no self-notification when creator is the assignee");
 });
 
-test("forum.question: reaches tag subscribers exactly once each, even across several matching tags, never the author", async () => {
+test("forum.thread: reaches tag subscribers exactly once each, for any forum category, never the author", async () => {
   await freshOwner();
-  const roomId = await createRoom("forum-question");
-  const author = await enrollAgent("author-fq");
-  const subscriber = await subscribeToTags("subscriber-fq", ["alpha", "beta"]);
-  const bystander = await enrollAgent("bystander-fq");
+  const roomId = await createRoom("forum-thread");
+  const author = await enrollAgent("author-ft");
+  const subscriber = await subscribeToTags("subscriber-ft", ["alpha", "beta"]);
+  const bystander = await enrollAgent("bystander-ft");
 
   const asked = await post(roomId, author.token, { body: "How should we approach this?", category: "question", tags: ["alpha", "beta", "gamma"] });
   assert.equal(asked.statusCode, 201, asked.body);
   const messageId = asked.json().data.message_id;
 
-  const subscriberEvents = (await inboxEvents(subscriber.token, "forum.question")).filter(e => e.resource.id === messageId);
+  const subscriberEvents = (await inboxEvents(subscriber.token, "forum.thread")).filter(e => e.resource.id === messageId);
   assert.equal(subscriberEvents.length, 1, "subscribed to two of three tags must still yield exactly one event, not two");
   assert.deepEqual(subscriberEvents[0].data, {
     message_id: messageId,
@@ -212,16 +200,25 @@ test("forum.question: reaches tag subscribers exactly once each, even across sev
     category: "question",
     tags: ["alpha", "beta", "gamma"],
     topic: "How should we approach this?",
-    author: { actor_type: "agent", actor_id: author.agentId, display_name: "author-fq" }
+    author: { actor_type: "agent", actor_id: author.agentId, display_name: "author-ft" }
   });
 
-  assert.equal((await inboxEvents(bystander.token, "forum.question")).filter(e => e.resource.id === messageId).length, 0, "a non-subscriber must not receive the event");
-  assert.equal((await inboxEvents(author.token, "forum.question")).filter(e => e.resource.id === messageId).length, 0, "the author must never receive their own forum.question event");
+  assert.equal((await inboxEvents(bystander.token, "forum.thread")).filter(e => e.resource.id === messageId).length, 0, "a non-subscriber must not receive the event");
+  assert.equal((await inboxEvents(author.token, "forum.thread")).filter(e => e.resource.id === messageId).length, 0, "the author must never receive their own forum.thread event");
 
-  // A tagged, non-forum message (no category — not a thread root) must not fire forum.question.
+  // Not gated on category: a root message with a different forum category still fires it — the
+  // event names "a forum thread was started", not specifically a question.
+  const discussed = await post(roomId, author.token, { body: "Let's discuss this instead", category: "discussion", tags: ["alpha"] });
+  assert.equal(discussed.statusCode, 201, discussed.body);
+  const discussedId = discussed.json().data.message_id;
+  const discussionEvents = (await inboxEvents(subscriber.token, "forum.thread")).filter(e => e.resource.id === discussedId);
+  assert.equal(discussionEvents.length, 1, "a discussion-category root message fires forum.thread too, not just question");
+  assert.equal(discussionEvents[0].data.category, "discussion");
+
+  // A tagged, non-forum message (no category — not a thread root) must not fire forum.thread.
   const plain = await post(roomId, author.token, { body: "just a tagged note", tags: ["alpha"] });
   assert.equal(plain.statusCode, 201, plain.body);
-  assert.equal((await inboxEvents(subscriber.token, "forum.question")).filter(e => e.resource.id === plain.json().data.message_id).length, 0, "a message without a category is not a forum thread root");
+  assert.equal((await inboxEvents(subscriber.token, "forum.thread")).filter(e => e.resource.id === plain.json().data.message_id).length, 0, "a message without a category is not a forum thread root");
 });
 
 async function subscribeToTags(name: string, tags: string[]) {
@@ -288,7 +285,7 @@ test("knowledge.published: reaches the author and every reviewer exactly once, o
   assert.equal((await inboxEvents(author.token, "knowledge.published")).filter(e => e.resource.id === card.card_id).length, 1);
 });
 
-test("bootstrap pending_counts reflect the new event types, not just messages and moderation", async () => {
+test("bootstrap and inbox/overview pending_counts agree, and both cover task/forum/knowledge, not just messages and moderation", async () => {
   await freshOwner();
   const roomId = await createRoom("bootstrap-counts");
   const central = await enrollAgent("central-bc");
@@ -306,7 +303,12 @@ test("bootstrap pending_counts reflect the new event types, not just messages an
   const bootstrap = await app.inject({ method: "GET", url: "/v1/bootstrap", headers: auth(central.token) });
   assert.equal(bootstrap.statusCode, 200, bootstrap.body);
   const counts = bootstrap.json().data.pending_counts;
-  assert.equal(counts.tasks, 1, "one task.assigned event pending");
-  assert.equal(counts.forum, 1, "one forum.question event pending");
+  assert.equal(counts.tasks, 1, "one task.changed event pending (assignment)");
+  assert.equal(counts.forum, 1, "one forum.thread event pending");
   assert.equal(counts.knowledge, 2, "one knowledge.reviewed + one knowledge.published event pending");
+
+  // GET /v1/inbox/overview computes the same buckets independently; they must never disagree.
+  const overview = await app.inject({ method: "GET", url: "/v1/inbox/overview", headers: auth(central.token) });
+  assert.equal(overview.statusCode, 200, overview.body);
+  assert.deepEqual(overview.json().data.pending_counts, counts);
 });
