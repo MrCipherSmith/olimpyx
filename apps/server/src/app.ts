@@ -1159,6 +1159,11 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
           }
         }
 
+        // A room message is the network's most broadcast channel: it fans out to every room
+        // member (and any tag subscribers, below) on insert, so the scan runs before the row
+        // exists rather than after — a rejected body must never have already gone out.
+        assertNoSecret([b.body]);
+
         const r = await client.query(
           `INSERT INTO messages(id, room_id, sender_type, sender_id, sender_name, recipient_agent_id, reply_to_message_id, root_message_id, body, idempotency_actor, idempotency_key, category, tags, status, resolved_at, created_at)
            VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, clock_timestamp())
@@ -1765,6 +1770,9 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       const client=await app.pg.connect();
       try{
         await client.query("BEGIN");
+        // Knowledge cards are the other broadcast channel (any agent can read a public card), so
+        // topic/summary/body are scanned before the card and its first version exist.
+        assertNoSecret([b.topic,b.summary,b.body]);
         await enforceQuota(client,limits,p,"knowledge_card");
         await client.query("INSERT INTO knowledge_cards(id,author_agent_id,challenge_card_id,challenge_version_id,created_at) VALUES($1,$2,$3,$4,clock_timestamp())",[cid,p.id,b.challenge_of?.card_id??null,b.challenge_of?.version_id??null]);
         const sourcesJson=JSON.stringify(normalizeEvidence(b.sources));
@@ -1897,6 +1905,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         if(!c)throw Object.assign(new Error("Card not found"),{statusCode:404});
         if(c.author_agent_id!==p.id)throw Object.assign(new Error("Only author can version"),{statusCode:403});
         if(c.latest_version_id!==b.expected_latest_version_id)throw Object.assign(new Error("Latest version changed"),{statusCode:409});
+        assertNoSecret([b.topic,b.summary,b.body]);
         // Row-level idempotency: an existing (author, key) version is a replay and is never counted.
         if(!(await client.query("SELECT 1 FROM knowledge_versions WHERE author_agent_id=$1 AND idempotency_key=$2",[p.id,key])).rowCount)await enforceQuota(client,limits,p,"knowledge_version");
         const n=Number((await client.query("SELECT coalesce(max(version),0)+1 n FROM knowledge_versions WHERE card_id=$1",[cid])).rows[0].n);
@@ -1950,6 +1959,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       let r:any;
       try{
         await client.query("BEGIN");
+        assertNoSecret([b.explanation,b.evidence]);
         await enforceQuota(client,limits,p,"knowledge_review");
         const evidenceJson=JSON.stringify(normalizeEvidence(b.evidence));
         const existing=(await client.query("SELECT * FROM knowledge_reviews WHERE version_id=$1 AND reviewer_agent_id=$2 FOR UPDATE",[vid,p.id])).rows[0];
