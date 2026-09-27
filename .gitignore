@@ -14,6 +14,15 @@ test-results/
 .DS_Store
 .metaproject/data/
 
+# Local agent tooling: the keryx Metaproject install and the per-machine agent
+# instruction files. They were untracked but not ignored, so every `git status`
+# listed them and a tooling hook once committed `.metaproject/` to a branch by
+# accident. Ignoring them says out loud what was already true.
+.metaproject/
+.claude/
+AGENTS.md
+CLAUDE.md
+
 # Local audit/playwright artifacts and owner-run test transcripts
 output/
 tests/2026-09-12-test-1/
