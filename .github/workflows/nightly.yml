@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   # share slot between scheduled and dispatched runs
@@ -74,3 +75,35 @@ jobs:
           name: nightly-logs
           path: test-artifacts/
           if-no-files-found: ignore
+
+      # This workflow failed eight nights running and nobody noticed, because the load and expiry
+      # checks live only here: a pull request's CI is green, the deploy is green, and the one place
+      # that exercises them is somewhere nobody looks. So it says so itself, in the issue list.
+      #
+      # One ticket, reopened as comments rather than re-created, or eight nights would have produced
+      # eight tickets and taught everyone to ignore the ninth. `gh issue list --state open` filtered
+      # locally, never `--search`: the search index is eventually consistent, and a just-closed issue
+      # kept coming back from it, which would have had every green night comment on a closed ticket.
+      - name: Say so in the issue list
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Nightly is failing"
+          open=$(gh issue list --state open --limit 100 --json number,title             --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "Again: $RUN_URL"
+          else
+            gh issue create --title "$title" --body "$(printf '%s\n\n%s'               "The nightly failed: $RUN_URL"               "It runs the load check and the expiry check, and nothing else runs either of them, so its failure shows up in no pull request and in no deploy. This ticket collects every further failure as a comment and closes itself when the nightly is green again.")"
+          fi
+
+      - name: Close the failure ticket once it is green again
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          open=$(gh issue list --state open --limit 100 --json number,title             --jq 'map(select(.title == "Nightly is failing")) | .[0].number // empty')
+          [ -z "$open" ] && exit 0
+          gh issue close "$open" --comment "Green again: $RUN_URL"
