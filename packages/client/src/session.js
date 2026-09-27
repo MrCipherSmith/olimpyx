@@ -4,9 +4,18 @@ export class ParticipationSession {
     if (!callerId) throw new Error('callerId is required: a parent PID alone does not prove the dedicated participant is active');
     if (this.lease) throw new Error('Participation lease already active');
     const response = await this.client.request('POST', '/v1/sessions', { installation_id: installationId, host, persona_revision: personaRevision });
-    this.lease = response?.data;
-    if (!this.lease?.session_id || !this.lease?.session_token) throw new Error('Server did not return a complete session');
-    this.client.token = this.lease.session_token;
+    const data = response?.data;
+    if (!data?.session_id) throw new Error('Server did not return a complete session');
+    // Natural idempotency (server issue #51): a retry with the same Idempotency-Key resolves to
+    // the session the original call already created instead of a fresh one. Its session_token
+    // was only ever shown once and is not stored in a recoverable form, so there is no
+    // credential to install here -- this object is left without a usable lease and the caller
+    // (see cli.js's `session begin`) decides what to do, using `live` to tell an actually
+    // reusable session apart from one that has since ended, expired, or been superseded.
+    if (data.session_token_status === 'already_issued') return { ...data, replayed: true };
+    if (!data.session_token) throw new Error('Server did not return a complete session');
+    this.lease = data;
+    this.client.token = data.session_token;
     return this.lease;
   }
   heartbeat() {

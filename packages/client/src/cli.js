@@ -282,6 +282,15 @@ async function main() {
     const enrollment = await owner.request('POST', '/v1/owners/me/enrollment-tokens', { label: option('label', 'local CLI') }, { headers: { 'idempotency-key': crypto.randomUUID() } });
     const installationId = config.installationId ?? crypto.randomUUID();
     const result = await owner.request('POST', '/v1/agents/enroll', { enrollment_token: enrollment.data.enrollment_token, installation_id: installationId, profile }, { token: null, headers: { 'idempotency-key': crypto.randomUUID() } });
+    if (result.data.agent_token_status === 'already_issued') {
+      // Natural idempotency (server issue #51): this installation was already enrolled by an
+      // earlier, successful enroll call. The server never reissues a one-time agent_token for
+      // an installation that already has one, so there is nothing to save here -- and nothing
+      // already on disk from that earlier call (e.g. an existing credential) is touched.
+      await state.saveConfig({ ...config, installationId, agentId: result.data.agent.agent_id, profileRevision: result.data.agent.profile_revision, ...(ownerId ? { ownerId } : {}) });
+      output({ agent: result.data.agent, created_at: result.data.created_at, already_enrolled: true, message: result.data.message ?? 'This installation is already enrolled; no new agent_token was issued. If the local credential was lost, revoke this agent and enroll again under a new installation_id.' });
+      return;
+    }
     await state.saveCredential(result.data.agent_token);
     await state.saveConfig({ ...config, installationId, agentId: result.data.agent.agent_id, profileRevision: result.data.agent.profile_revision, ...(ownerId ? { ownerId } : {}) });
     await state.savePersona(profile, 'enrollment');
@@ -303,7 +312,17 @@ async function main() {
           { limit: beginBudget.limitMinutes }
         );
       }
-      const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) }); await state.saveSession(started, callerId); await state.pruneCallers(); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return;
+      const config = await state.loadConfig(); const client = await configuredClient(undefined, 'agent'); const session = new ParticipationSession(client); const started = await session.begin({ callerId, installationId: config.installationId, host: { kind: option('host', 'other') }, personaRevision: Number(config.profileRevision ?? 1) });
+      if (started.session_token_status === 'already_issued') {
+        // Natural idempotency (server issue #51): this call landed on a session already
+        // created by an earlier one with the same Idempotency-Key. There is no session_token
+        // to install, so nothing is saved locally -- any session already on disk from that
+        // earlier call is left exactly as it is. `live` tells the caller whether that session
+        // can still be used at all, or whether it needs to begin a fresh one instead.
+        output({ session_id: started.session_id, already_started: true, live: started.live, message: started.message ?? (started.live ? 'A session already exists for this request and is still active.' : 'A session already existed for this request but is no longer active; begin a new one.') });
+        return;
+      }
+      await state.saveSession(started, callerId); await state.pruneCallers(); output({ session_id: started.session_id, bootstrap: started.bootstrap, inbox_cursor: started.inbox_cursor }); return;
     }
     if (action === 'heartbeat') { const callerId = option('caller-id'); const { heartbeat } = await activeClient(callerId); output(heartbeat); return; }
     if (action === 'end') {

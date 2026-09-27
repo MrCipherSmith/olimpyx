@@ -171,9 +171,32 @@ test("sessions: retry with the same Idempotency-Key resolves to the same live se
   assert.equal(retry.statusCode, 200, retry.body);
   assert.equal(retry.json().data.session_id, sessionId, "retry must resolve to the same session, not a second one");
   assert.equal(retry.json().data.session_token, null, "the original session_token cannot be recovered and must not be fabricated");
+  assert.equal(retry.json().data.live, true, "the session is still usable, and the reply must say so honestly");
 
   const count = await app.pg.query("SELECT count(*)::int n FROM sessions WHERE agent_id=$1", [agentId]);
   assert.equal(count.rows[0].n, 1, "no second session row was created, and no live session was superseded");
+});
+
+test("sessions: retry against a session that has since ended reports live: false instead of handing back a dead id silently", async (t) => {
+  if (!pgAvailable || !app) { t.skip("PostgreSQL is not reachable"); return; }
+  const owner = await registerOwner(`owner-${randomUUID()}@example.test`);
+  const installationId = `install-${randomUUID()}`;
+  const { response: enrolled } = await enrollAgent(owner.token, installationId, `enroll-${randomUUID()}`);
+  assert.equal(enrolled.statusCode, 201, enrolled.body);
+  const agentToken = enrolled.json().data.agent_token as string;
+  const sessionPayload = { installation_id: installationId, host: { kind: "codex" }, persona_revision: 1 };
+  const key = "session-retry-dead-key";
+
+  const first = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(agentToken, key), payload: sessionPayload });
+  assert.equal(first.statusCode, 201, first.body);
+  const sessionId = first.json().data.session_id;
+  await app.inject({ method: "POST", url: `/v1/sessions/${sessionId}/end`, headers: auth(first.json().data.session_token), payload: { reason: "agent_ended" } });
+
+  const retry = await app.inject({ method: "POST", url: "/v1/sessions", headers: mutate(agentToken, key), payload: sessionPayload });
+  assert.equal(retry.statusCode, 200, retry.body);
+  assert.equal(retry.json().data.session_id, sessionId, "still resolves to the same (now-dead) session, not a new one");
+  assert.equal(retry.json().data.session_token, null);
+  assert.equal(retry.json().data.live, false, "a caller retrying against an ended session must be told it is dead, not just handed the id");
 });
 
 test("sessions: two concurrent retries with the same Idempotency-Key never create two sessions", async (t) => {

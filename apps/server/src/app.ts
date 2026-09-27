@@ -855,9 +855,14 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       // (agent_id, Idempotency-Key). The response carries session_token, so the generic
       // idempotency cache in idem() never stores it and a retry would otherwise create a second,
       // possibly capacity-evicting session -- superseding one the caller may still hold.
-      const existing=(await client.query("SELECT id,expires_at FROM sessions WHERE agent_id=$1 AND idempotency_key=$2",[p.id,idemKey])).rows[0];
+      // `live` uses the same rule as the supersede query below and the sessions:<agent> cap
+      // check elsewhere in this file (ended_at IS NULL AND expires_at>now() AND a heartbeat in
+      // the last 90s): a caller that lost the original response must be able to tell "here is
+      // your session" apart from "your session existed but is gone", not just get back an id
+      // that may already be dead.
+      const existing=(await client.query("SELECT id,expires_at,(ended_at IS NULL AND expires_at>now() AND last_heartbeat_at>now()-interval '90 seconds') AS live FROM sessions WHERE agent_id=$1 AND idempotency_key=$2",[p.id,idemKey])).rows[0];
       if(existing){
-        result={sessionId:existing.id,sessionToken:null,expiresAt:existing.expires_at};
+        result={sessionId:existing.id,sessionToken:null,expiresAt:existing.expires_at,live:existing.live};
       }else{
         const sid=id("ses"),raw=token(),exp=new Date(Date.now()+86400000).toISOString();
         const active=(await client.query("SELECT id FROM sessions WHERE agent_id=$1 AND ended_at IS NULL AND expires_at>now() AND last_heartbeat_at>now()-interval '90 seconds' ORDER BY created_at ASC,id ASC",[p.id])).rows.map(x=>x.id);
@@ -869,7 +874,7 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       await client.query("COMMIT");
     }catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}
     const bootstrap=await bootstrapFor(p.id);
-    if(result.sessionToken===null)return{status:200,data:{session_id:result.sessionId,session_token:null,session_token_status:"already_issued",message:"A session was already created by this Idempotency-Key. The session_token was only ever shown once and is not stored in a recoverable form; if it was lost, ask the owner to stop this agent (which ends the session) and start a new one with a fresh Idempotency-Key.",expires_at:result.expiresAt,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}};
+    if(result.sessionToken===null)return{status:200,data:{session_id:result.sessionId,session_token:null,session_token_status:"already_issued",live:result.live,message:result.live?"A session was already created by this Idempotency-Key and is still active. The session_token was only ever shown once and is not stored in a recoverable form; if it was lost, ask the owner to stop this agent (which ends the session) and start a new one with a fresh Idempotency-Key.":"A session was already created by this Idempotency-Key but is no longer active (ended, expired, or superseded). Retrying with this same key will not create a new one; start a new session with a fresh Idempotency-Key instead.",expires_at:result.expiresAt,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}};
     return{status:201,data:{session_id:result.sessionId,session_token:result.sessionToken,expires_at:result.expiresAt,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}}});});
   app.post("/v1/sessions/:sessionId/heartbeat",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET last_heartbeat_at=now() WHERE id=$1",[p.sessionId]);return{data:{session_id:p.sessionId,server_time:now(),next_heartbeat_at:new Date(Date.now()+30000).toISOString()}}});
   app.post("/v1/sessions/:sessionId/end",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET ended_at=now(),end_reason=$2 WHERE id=$1",[p.sessionId,(req.body as any)?.reason??"agent_ended"]);return{data:{session_id:p.sessionId,ended_at:now()}}});
