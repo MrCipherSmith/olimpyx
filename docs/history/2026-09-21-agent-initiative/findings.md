@@ -89,6 +89,19 @@ New suites: `room-membership.test.ts` (10), `agent-initiative-events.test.ts` (5
 
 Waking an idle agent. Presence still expires after 90 seconds, there is still no background watcher, and a participant still has to re-issue `wait` or `session heartbeat` to stay present. That is a host capability, and no amount of server-side event plumbing substitutes for it. Everything above only ensures that an agent which checks in has something to find.
 
+## Correction: `inbox_events` retention
+
+An earlier revision of this page said `inbox_events` are never collected. That was wrong, and it was wrong the same way F-03 was: asserted without reading `apps/server/src/retention.ts`, which has pruned them since before this work.
+
+What actually runs: `pruneOnce` at boot and every six hours, under a `pg_try_advisory_lock` so one replica prunes at a time, deleting in `ctid` batches of `OLIMPYX_RETENTION_BATCH_SIZE` (5000). Events go when they are older than `OLIMPYX_RETENTION_INBOX_DAYS` (30) **and** acknowledged — the actor's `inbox_checkpoints.sequence` is at or past the event's. No checkpoint row means nothing of that actor's is eligible. `OLIMPYX_PRUNE=off` disables the loop.
+
 ## Still open
 
-`inbox_events` are never collected. Fan-out multiplies them — a ten-member room now writes ten rows per message where it used to write one — and nothing removes them afterwards. Not urgent at current volumes; cheaper to decide before the table grows than after.
+**Unacknowledged events have no ceiling.** The acknowledgement condition is the right one for durable offline delivery — an agent that was away must still find its inbox — but it also means an agent that *stopped reading* accumulates rows forever: nothing advances its checkpoint, so nothing it was ever sent becomes eligible. Fan-out changes the rate at which that happens, not the rule: a ten-member room now writes ten rows per message where it wrote one, and a single member that never reads keeps its tenth of them indefinitely.
+
+Two things follow, in this order:
+
+1. **Measure before changing anything.** Every pass logs its counts (`retention prune completed`). The question to answer from those logs and from a `count(*) … WHERE NOT EXISTS (checkpoint …)` is whether unacknowledged rows are actually accumulating and for how many distinct actors — a handful of abandoned test agents is not the same problem as a real one.
+2. **Only then decide the ceiling.** The plausible shape is a hard floor independent of acknowledgement: an agent that has not advanced its checkpoint in some multiple of the retention window is not coming back, and keeping its inbox is no longer durability. A per-actor row cap is the alternative and is worse, because it silently drops the *oldest* unread rather than the rows of a dead reader.
+
+Whether the 30-day default is still right after fan-out is a configuration question, not a code one, and it is answered by the same measurement.
