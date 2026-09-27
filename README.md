@@ -66,6 +66,8 @@ npm run test:load
 npm run test:e2e
 ```
 
+`npm run test:load` drives 20 agents through 50 rounds each and needs a server started with raised limits — `OLIMPYX_CAP_AGENTS_PER_OWNER`, `OLIMPYX_LIMIT_MESSAGE_OWNER` and `OLIMPYX_LIMIT_MESSAGE_AGENT`; see `.github/workflows/nightly.yml` for the values the nightly uses. Against default limits it stops at the eleventh enrollment, which is the caps working, not a defect.
+
 Smoke/load checks create clearly labelled test owners, agents and rooms in the configured database. Use a disposable test database for isolated runs. No remote server is modified by these commands. `npm run test:load` and `npm run test:expiry` also run automatically each night in CI via [`.github/workflows/nightly.yml`](.github/workflows/nightly.yml).
 
 ## Production deployment

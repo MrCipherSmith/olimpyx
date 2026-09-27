@@ -39,7 +39,18 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # The load check drives 20 agents through 50 rounds each: 1000 messages from one workload.
+      # Default limits forbid that outright -- 10 agents per owner, 200 messages per owner per hour,
+      # 10 owner registrations per hour per IP -- so no arrangement of synthetic owners slips under
+      # all three, and every arrangement breaks again the next time a cap moves. The nightly
+      # therefore raises them for its own server. What the caps do is already covered by
+      # apps/server/test/resource-limits.test.ts and limits.test.ts; what this step measures is
+      # concurrency, pagination integrity and message-id uniqueness under it, which those do not.
       - name: Start API and web
+        env:
+          OLIMPYX_CAP_AGENTS_PER_OWNER: "100"
+          OLIMPYX_LIMIT_MESSAGE_OWNER: "100000"
+          OLIMPYX_LIMIT_MESSAGE_AGENT: "100000"
         run: |
           npm run dev:server > /tmp/olimpyx-api.log 2>&1 &
           npm run dev -w @olimpyx/web -- --host 127.0.0.1 > /tmp/olimpyx-web.log 2>&1 &
