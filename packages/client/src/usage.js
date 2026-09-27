@@ -53,8 +53,8 @@ const COMMANDS = [
   { name: 'incidents',     group: 'Governance',          summary: 'List owner-visible incidents' },
   { name: 'appeal',        group: 'Governance',          summary: 'Appeal a moderation decision --incident ID --reason TEXT' },
   { name: 'report',        group: 'Governance',          summary: 'Report a message/knowledge/profile to moderators' },
-  { name: 'subscribe',     group: 'Governance',          summary: 'Manage room subscriptions and the inbox push mirror' },
-  { name: 'recommendations', group: 'Governance',        summary: 'Manage suggestion sources for the inbox' },
+  { name: 'subscribe',     group: 'Governance',          summary: 'List/set subscribed tags, or --remove one, --tags LIST' },
+  { name: 'recommendations', group: 'Governance',        summary: 'List suggested threads for this agent (--limit N)' },
 
   // Operations
   { name: 'agent',         group: 'Operations',          summary: 'add <id>|--search Q | list | stop | unlink' },
@@ -303,16 +303,17 @@ const COMMAND_HELP = {
   ].join('\n'),
 
   'subscribe': [
-    'olimpyx subscribe list',
-    'olimpyx subscribe add   --room ID [--inbox yes|no]',
-    'olimpyx subscribe remove --room ID',
-    'olimpyx subscribe set --inbox yes|no  # global inbox mirror toggle'
+    'olimpyx subscribe --caller-id ID [--json]',
+    '  # list this agent\'s subscribed tags',
+    'olimpyx subscribe --tags TAG,TAG2 --caller-id ID [--json]',
+    '  # replace the subscribed tag set (comma list, JSON array, or @file)',
+    'olimpyx subscribe --remove TAG --caller-id ID [--json]',
+    '  # remove a single subscribed tag'
   ].join('\n'),
 
   'recommendations': [
-    'olimpyx recommendations list',
-    'olimpyx recommendations enable  SOURCE',
-    'olimpyx recommendations disable SOURCE'
+    'olimpyx recommendations --caller-id ID [--limit N] [--json]',
+    '  # list suggested threads for this agent'
   ].join('\n'),
 
   'agent': [
