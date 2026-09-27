@@ -1,3 +1,4 @@
+import { useT } from '../../i18n';
 import { PHONE_QUERY, useMediaQuery } from '../shell/useMediaQuery';
 import type { CityCameraController } from './CityCanvas';
 import { ROOM_CATEGORIES, type ArchetypeCategory } from './roomArchetypes';
@@ -5,9 +6,10 @@ import { ROOM_CATEGORIES, type ArchetypeCategory } from './roomArchetypes';
 export type CityFilter = ArchetypeCategory | 'all';
 
 export function CityFilters({ filter, counts, onChange }: { filter: CityFilter; counts: Record<CityFilter, number>; onChange: (filter: CityFilter) => void }) {
-  const options: Array<{ id: CityFilter; label: string; icon: string }> = [{ id: 'all', label: 'All', icon: '✦' }, ...ROOM_CATEGORIES.map(category => ({ id: category.id, label: category.labelEn, icon: category.icon }))];
+  const { t } = useT();
+  const options: Array<{ id: CityFilter; label: string; icon: string }> = [{ id: 'all', label: t('city.filters.all'), icon: '✦' }, ...ROOM_CATEGORIES.map(category => ({ id: category.id, label: t(`city.categories.${category.id}`), icon: category.icon }))];
   return (
-    <div className="city-filters" role="group" aria-label="Filter buildings by category">
+    <div className="city-filters" role="group" aria-label={t('city.filters.ariaLabel')}>
       {options.map(option => (
         <button key={option.id} type="button" className={`city-chip${filter === option.id ? ' active' : ''}`} aria-pressed={filter === option.id} onClick={() => onChange(option.id)}>
           <span aria-hidden="true">{option.icon}</span>{option.label}<span className="city-chip-count">{counts[option.id]}</span>
@@ -22,11 +24,12 @@ export function CityFilters({ filter, counts, onChange }: { filter: CityFilter; 
  * entry appears only when the scene has one (signed-in owner), never for a guest.
  */
 export function CityLegend({ onOpen, praetorium = false }: { onOpen: (buildingId: string) => void; praetorium?: boolean }) {
+  const { t } = useT();
   return (
-    <div className="hud hud-legend" role="group" aria-label="Key buildings">
-      <button type="button" className="hud-legend-item legend-library" onClick={() => onOpen('library')}><span aria-hidden="true">◈</span>Library</button>
-      <button type="button" className="hud-legend-item legend-pantheon" onClick={() => onOpen('pantheon')}><span aria-hidden="true">⦾</span>Pantheon</button>
-      {praetorium && <button type="button" className="hud-legend-item legend-praetorium" onClick={() => onOpen('praetorium')}><span aria-hidden="true">⛨</span>Praetorium</button>}
+    <div className="hud hud-legend" role="group" aria-label={t('city.legend.ariaLabel')}>
+      <button type="button" className="hud-legend-item legend-library" onClick={() => onOpen('library')}><span aria-hidden="true">◈</span>{t('city.legend.library')}</button>
+      <button type="button" className="hud-legend-item legend-pantheon" onClick={() => onOpen('pantheon')}><span aria-hidden="true">⦾</span>{t('city.legend.pantheon')}</button>
+      {praetorium && <button type="button" className="hud-legend-item legend-praetorium" onClick={() => onOpen('praetorium')}><span aria-hidden="true">⛨</span>{t('city.legend.praetorium')}</button>}
     </div>
   );
 }

@@ -34,13 +34,17 @@ export interface RoomArchetype {
   summary: string;
 }
 
-export interface ArchetypeCategoryInfo { id: ArchetypeCategory; label: string; labelEn: string; icon: string; }
+// The Russian display name for a category is looked up via i18n (`city.categories.<id>`), the same
+// dictionary the city panel reads — not duplicated here. `labelEn` stays a plain field: it is the
+// deliberately-English archetype flavour text shown alongside the Russian building names (CreateRoom,
+// RoomHeader), not a locale-switched UI string.
+export interface ArchetypeCategoryInfo { id: ArchetypeCategory; labelEn: string; icon: string; }
 
 export const ROOM_CATEGORIES: readonly ArchetypeCategoryInfo[] = [
-  { id: 'science', label: 'Наука', labelEn: 'Science', icon: '⚗' },
-  { id: 'agora', label: 'Агора', labelEn: 'Agora', icon: '🏛' },
-  { id: 'tech', label: 'Технологии', labelEn: 'Tech', icon: '⚙' },
-  { id: 'tactical', label: 'Тактика', labelEn: 'Tactical', icon: '⛊' },
+  { id: 'science', labelEn: 'Science', icon: '⚗' },
+  { id: 'agora', labelEn: 'Agora', icon: '🏛' },
+  { id: 'tech', labelEn: 'Tech', icon: '⚙' },
+  { id: 'tactical', labelEn: 'Tactical', icon: '⛊' },
 ];
 
 export const ROOM_ARCHETYPES: readonly RoomArchetype[] = [

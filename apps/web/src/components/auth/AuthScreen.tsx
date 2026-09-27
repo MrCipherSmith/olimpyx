@@ -1,7 +1,7 @@
 import { type FormEvent, useState } from 'react';
 import type { OlimpyxApi } from '../../lib/api';
 import type { StoredSession } from '../../lib/auth-session';
-import { messageFrom } from '../../lib/format';
+import { humanizeError } from '../../lib/humanizeError';
 import { useT } from '../../i18n';
 
 export function AuthScreen({ api, onAuthenticated, onBack }: { api: OlimpyxApi; onAuthenticated: (session: StoredSession) => void; onBack?: () => void }) {
@@ -18,7 +18,7 @@ export function AuthScreen({ api, onAuthenticated, onBack }: { api: OlimpyxApi; 
       onAuthenticated(mode === 'login'
         ? await api.login({ email: String(form.get('email')), password: String(form.get('password')) })
         : await api.register({ email: String(form.get('email')), password: String(form.get('password')), displayName: String(form.get('displayName')) }));
-    } catch (e) { setError(messageFrom(e)); }
+    } catch (e) { setError(humanizeError(e)); }
     finally { setLoading(false); }
   };
   return (

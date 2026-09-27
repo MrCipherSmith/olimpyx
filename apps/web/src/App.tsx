@@ -23,7 +23,7 @@ import { useCityRoute } from './components/shell/useCityRoute';
 import { PublicShowcase } from './components/showcase/PublicShowcase';
 import { OlimpyxApi, type KnowledgeCard, type Message, type Profile, type Room } from './lib/api';
 import { ApiError, AuthSession, type StoredSession } from './lib/auth-session';
-import { messageFrom } from './lib/format';
+import { humanizeError } from './lib/humanizeError';
 import { empty, type LoadState } from './lib/loadState';
 import { hrefFor, screenFor } from './lib/navigation';
 import { initialNetworkStatus, nextNetworkStatus, nextPollNetworkStatus } from './lib/networkStatus';
@@ -69,10 +69,12 @@ interface ParticipantAppProps {
 
 /** The signed-in shell: the route and the participant's private data. */
 function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost }: ParticipantAppProps) {
-  const { t } = useT();
+  const { t, i18n } = useT();
   const [rooms, setRooms] = useState(empty<Room[]>([]));
   // The participant's city (with the owner-only Praetorium): drawn by CityView and the dive targets.
-  const scene = useMemo(() => buildCityScene(rooms.data, { includePraetorium: true }), [rooms.data]);
+  // Landmark labels come from the active locale (cityScene.ts), so a language switch must rebuild the
+  // scene too, not just the surrounding chrome.
+  const scene = useMemo(() => buildCityScene(rooms.data, { includePraetorium: true }), [rooms.data, i18n.language]);
   const camera = useRef<CityCameraController | null>(null);
   const { route, navigate, close: closeScreen, dive } = useCityRoute({ buildings: scene.buildings, camera });
   const [agents, setAgents] = useState(empty<Profile[]>([]));
@@ -108,7 +110,7 @@ function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost
     const settle = async <T,>(getter: () => Promise<T>, update: Dispatch<SetStateAction<LoadState<T>>>) => {
       if (current()) update(value => ({ ...value, loading: true, error: null }));
       try { const data = await getter(); if (current()) update({ data, loading: false, error: null }); return true; }
-      catch (error) { if (current()) update(value => ({ ...value, loading: false, error: messageFrom(error) })); return false; }
+      catch (error) { if (current()) update(value => ({ ...value, loading: false, error: humanizeError(error) })); return false; }
     };
     const allCards = () => api.cards().then(data => { if (current()) setCardTotal(data.length); return data; }, error => { if (current()) setCardTotal(null); throw error; });
     const outcomes = await Promise.all([settle(() => api.rooms(), setRooms), settle(() => api.agents(), setAgents), settle(allCards, setCards)]);
@@ -124,7 +126,7 @@ function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost
     setMessagesRoomId(selectedRoomId); setMessageCursor(null); setMessages({ data: [], loading: true, error: null });
     void api.messagePage(selectedRoomId).then(
       page => { if (requestId !== roomRequestId.current) return; setMessageCursor(page.nextCursor); setMessages({ data: page.data.reverse(), loading: false, error: null }); },
-      error => { if (requestId === roomRequestId.current) setMessages(current => ({ ...current, loading: false, error: messageFrom(error) })); },
+      error => { if (requestId === roomRequestId.current) setMessages(current => ({ ...current, loading: false, error: humanizeError(error) })); },
     );
   }, [api, selectedRoomId]);
 
@@ -148,7 +150,7 @@ function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost
       }
       catch (error) {
         if (active) {
-          setMessages(current => ({ ...current, error: messageFrom(error) }));
+          setMessages(current => ({ ...current, error: humanizeError(error) }));
           setNetwork(previous => nextPollNetworkStatus({ ok: false, status: error instanceof ApiError ? error.status : 0 }, previous));
         }
       }
@@ -171,8 +173,8 @@ function ParticipantApp({ api, sessionStore, session, onSignedOut, onSessionLost
       if (!isCurrent()) return;
       // Semantic search depends on an embedding backend that can be temporarily unavailable (503
       // embedding_unavailable). That is not "no results" — offer Lexical instead of a bare error (PROMPT §5.4).
-      if (mode === 'semantic' && error instanceof ApiError && error.status === 503) { setCards(current => ({ ...current, loading: false, error: null })); setKnowledgeSearchNotice({ q, message: messageFrom(error) }); }
-      else setCards(current => ({ ...current, loading: false, error: messageFrom(error) }));
+      if (mode === 'semantic' && error instanceof ApiError && error.status === 503) { setCards(current => ({ ...current, loading: false, error: null })); setKnowledgeSearchNotice({ q, message: humanizeError(error) }); }
+      else setCards(current => ({ ...current, loading: false, error: humanizeError(error) }));
     }
   };
   const createRoom = async (input: { title: string; description?: string }) => { const isCurrent = capturePrivateOperation(); const room = await api.createRoom(input); if (!isCurrent()) return; setRooms(current => ({ ...current, data: [room, ...current.data] })); setCreateRoomOpen(false); openRoom(room); };

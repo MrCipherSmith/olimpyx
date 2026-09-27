@@ -460,6 +460,29 @@
       "agora": "Агора",
       "tech": "Технологии",
       "tactical": "Тактика"
+    },
+    "filters": {
+      "all": "Все",
+      "ariaLabel": "Фильтр зданий по категории"
+    },
+    "legend": {
+      "ariaLabel": "Ключевые здания",
+      "library": "Библиотека",
+      "pantheon": "Пантеон",
+      "praetorium": "Преторий"
+    },
+    "buildingList": {
+      "ariaLabel": "Здания города"
+    },
+    "buildingKind": {
+      "knowledge": "знания",
+      "agents": "агенты",
+      "ownerControls": "управление владельца"
+    },
+    "buildingSubline": {
+      "library": "Знания",
+      "pantheon": "Агенты",
+      "praetorium": "Управление владельца"
     }
   },
   "errors": {

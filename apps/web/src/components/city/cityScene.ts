@@ -1,3 +1,4 @@
+import { i18n } from '../../i18n';
 import { layoutRings, painterSort, ringCountFor, ringSpec } from './isometricMath';
 import { resolveRoomArchetype, type ArchetypeCategory, type ArchetypeColor, type ArchetypeId, type RoomArchetype } from './roomArchetypes';
 
@@ -77,11 +78,17 @@ export const FORUM_RADIUS = 240;
 /** Half side of the square Forum platform; its corners (arches) sit on the screen axes. */
 export const PLAZA_HALF = 200;
 
-export const LANDMARK_NAMES: Record<CityLandmarkKind, string> = {
-  library: 'Central Library',
-  pantheon: 'Pantheon of Agents',
-  praetorium: 'Praetorium',
+/** i18n key for each landmark's name; the single source both the map and its accessible list read. */
+const LANDMARK_NAME_KEYS: Record<CityLandmarkKind, string> = {
+  library: 'city.buildings.central_library',
+  pantheon: 'city.buildings.pantheon',
+  praetorium: 'city.buildings.praetorium',
 };
+
+/** The localized name of a landmark, from the same dictionary entry the map label is built from. */
+export function landmarkName(kind: CityLandmarkKind): string {
+  return i18n.t(LANDMARK_NAME_KEYS[kind]);
+}
 
 export const ROOM_HEIGHT: Record<ArchetypeId, number> = {
   lab_observatory: 96, archive_data_vault: 70, crypto_proving_grounds: 62,
@@ -93,11 +100,11 @@ export const ROOM_HEIGHT: Record<ArchetypeId, number> = {
 export function buildCityScene(rooms: readonly CityRoomInput[], options: CitySceneOptions = {}): CityScene {
   const slots = layoutRings(rooms.length);
   const buildings: CityBuilding[] = [
-    { id: 'library', kind: 'library', shape: 'library', label: 'Центральная Библиотека', color: 'indigo', ...LIBRARY_POSITION, size: 56, height: 150, ring: null, angle: null },
-    { id: 'pantheon', kind: 'pantheon', shape: 'pantheon', label: 'Пантеон Агентов', color: 'gold', ...PANTHEON_POSITION, size: 58, height: 118, ring: null, angle: null },
+    { id: 'library', kind: 'library', shape: 'library', label: landmarkName('library'), color: 'indigo', ...LIBRARY_POSITION, size: 56, height: 150, ring: null, angle: null },
+    { id: 'pantheon', kind: 'pantheon', shape: 'pantheon', label: landmarkName('pantheon'), color: 'gold', ...PANTHEON_POSITION, size: 58, height: 118, ring: null, angle: null },
   ];
   if (options.includePraetorium === true) {
-    buildings.push({ id: 'praetorium', kind: 'praetorium', shape: 'praetorium', label: 'Преторий', color: 'amber', ...PRAETORIUM_POSITION, size: 44, height: 100, ring: null, angle: null });
+    buildings.push({ id: 'praetorium', kind: 'praetorium', shape: 'praetorium', label: landmarkName('praetorium'), color: 'amber', ...PRAETORIUM_POSITION, size: 44, height: 100, ring: null, angle: null });
   }
   rooms.forEach((room, index) => {
     const slot = slots[index];

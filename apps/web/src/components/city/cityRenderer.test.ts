@@ -396,7 +396,7 @@ describe('Praetorium rendering', () => {
       const view = { width: 1200, height: 800 };
       renderCity(ctx, { scene, camera: { focalX: 0, focalY: -20, zoom: 0.9 }, view, palette: { ground: '#000' } as CityPalette, time: 1234, animate: true, hoveredId: 'praetorium', selectedId: null, filter: 'all', particles: 4, dpr: 1, cache, occluders: [{ left: 0, top: 0, right: 1200, bottom: 60 }] });
       expect(assigned.has('shadowBlur')).toBe(false);
-      expect(texts).toContain('Преторий');
+      expect(texts).toContain('Praetorium');
       expect(texts).toContain('Owner controls');
       for (let index = 0; index < cache.placedCount; index++) {
         const label = cache.placed[index];

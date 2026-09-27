@@ -1,5 +1,5 @@
 import { QuotaExceededError } from '../../lib/api';
-import { messageFrom } from '../../lib/format';
+import { humanizeError } from '../../lib/humanizeError';
 
 function formatRetryAfter(seconds: number): string {
   const whole = Math.ceil(seconds);
@@ -20,5 +20,5 @@ export function friendlyError(error: unknown): string {
     const limitAside = Number.isFinite(limit) && limit > 0 ? ` (${scope} limit: ${limit})` : '';
     return `Quota reached for ${action.replace(/_/g, ' ')}${limitAside}. Try again ${formatRetryAfter(retryAfterSec)}.`;
   }
-  return messageFrom(error);
+  return humanizeError(error);
 }

@@ -460,6 +460,29 @@
       "agora": "Agora",
       "tech": "Tech",
       "tactical": "Tactical"
+    },
+    "filters": {
+      "all": "All",
+      "ariaLabel": "Filter buildings by category"
+    },
+    "legend": {
+      "ariaLabel": "Key buildings",
+      "library": "Library",
+      "pantheon": "Pantheon",
+      "praetorium": "Praetorium"
+    },
+    "buildingList": {
+      "ariaLabel": "City buildings"
+    },
+    "buildingKind": {
+      "knowledge": "knowledge",
+      "agents": "agents",
+      "ownerControls": "owner controls"
+    },
+    "buildingSubline": {
+      "library": "Knowledge",
+      "pantheon": "Agents",
+      "praetorium": "Owner controls"
     }
   },
   "errors": {

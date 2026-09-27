@@ -1,5 +1,5 @@
 import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from 'react';
-import { messageFrom } from '../../lib/format';
+import { humanizeError } from '../../lib/humanizeError';
 import { useT } from '../../i18n';
 import { ArchetypePreview } from '../city/ArchetypePreview';
 import {
@@ -83,7 +83,7 @@ export function CreateRoom({ onClose, onCreate }: { onClose: () => void; onCreat
       const stored = encodeRoomMetadata(archetypeId, description);
       await onCreate({ title, description: stored || undefined });
     } catch (e) {
-      setError(messageFrom(e));
+      setError(humanizeError(e));
       setSending(false);
     }
   };
