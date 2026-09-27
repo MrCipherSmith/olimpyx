@@ -60,7 +60,7 @@ test('client SDK getRoomMessages formats query parameters correctly', async () =
   assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?limit=20&before_cursor=msg_50');
 });
 
-test('client SDK getThreadMessages formats query parameters correctly and accepts after_cursor', async () => {
+test('client SDK getThreadMessages formats query parameters correctly and keeps after_cursor as after_cursor', async () => {
   let requestedUrl = '';
   const client = new OlimpyxClient({
     serverUrl: 'https://mock.test',
@@ -72,9 +72,44 @@ test('client SDK getThreadMessages formats query parameters correctly and accept
     }
   });
 
+  // Regression for #52: after_cursor must reach the server as after_cursor, not get collapsed
+  // into before_cursor (which silently reverses the requested direction).
   const res = await client.getThreadMessages('rom_123', 'msg_root_1', { limit: 25, after_cursor: 'msg_reply_1' });
   assert.deepEqual(res.data, []);
-  assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?thread_id=msg_root_1&limit=25&before_cursor=msg_reply_1');
+  assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?thread_id=msg_root_1&limit=25&after_cursor=msg_reply_1');
+});
+
+test('client SDK getThreadMessages keeps before_cursor and after_cursor as distinct query params when both are somehow supplied', async () => {
+  let requestedUrl = '';
+  const client = new OlimpyxClient({
+    serverUrl: 'https://mock.test',
+    fetchImpl: async (url) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+  });
+
+  await client.getThreadMessages('rom_123', 'msg_root_1', { limit: 5, before_cursor: 'msg_before', after_cursor: 'msg_after' });
+  assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?thread_id=msg_root_1&limit=5&before_cursor=msg_before&after_cursor=msg_after');
+});
+
+test('client SDK getRoomMessages keeps after_cursor as after_cursor', async () => {
+  let requestedUrl = '';
+  const client = new OlimpyxClient({
+    serverUrl: 'https://mock.test',
+    fetchImpl: async (url) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify({ data: [], page: { next_cursor: null } }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+  });
+
+  const res = await client.getRoomMessages('rom_123', { limit: 20, after_cursor: 'msg_50' });
+  assert.deepEqual(res.data, []);
+  assert.equal(requestedUrl, 'https://mock.test/v1/rooms/rom_123/messages?limit=20&after_cursor=msg_50');
 });
 
 test('CLI threads command requires --room and queries root messages', async () => {
@@ -185,6 +220,49 @@ test('CLI read command supports --room and --thread options', async () => {
   // Also verify --after flag works as cursor alias
   const afterRes = await run(['read', '--room', 'rom_1', '--thread', 'msg_root_1', '--after', 'msg_root_1', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
   assert.equal(afterRes.status, 0, afterRes.stderr);
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('CLI read command sends --after as after_cursor and --before as before_cursor, never collapsed into each other', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-read-direction-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_1'), { recursive: true });
+  await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session-credential'), 'secret\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_1', 'session.json'), JSON.stringify({
+    session_id: 'ses_1',
+    caller_id: 'call_1',
+    caller_deadline: new Date(Date.now() + 60000).toISOString()
+  }));
+
+  // The mock server distinguishes direction purely by which query parameter arrived, so a
+  // regression that collapses --after into before_cursor (or vice versa) makes this fail.
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/heartbeat')) {
+        return new Response(JSON.stringify({ data: { session_id: 'ses_1' } }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('after_cursor=cursor_after') && !u.includes('before_cursor=')) {
+        return new Response(JSON.stringify({ data: [{ message_id: 'msg_from_after' }], page: { next_cursor: null } }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('before_cursor=cursor_before') && !u.includes('after_cursor=')) {
+        return new Response(JSON.stringify({ data: [{ message_id: 'msg_from_before' }], page: { next_cursor: null } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ error: { message: 'unexpected query: ' + u } }), { status: 500, headers: { 'content-type': 'application/json' } });
+    };
+  `);
+
+  const afterRes = await run(['read', '--room', 'rom_1', '--after', 'cursor_after', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
+  assert.equal(afterRes.status, 0, afterRes.stderr);
+  assert.equal(JSON.parse(afterRes.stdout).data[0].message_id, 'msg_from_after');
+
+  const beforeRes = await run(['read', '--room', 'rom_1', '--before', 'cursor_before', '--caller-id', 'call_1'], { cwd: root, preload: preloadPath });
+  assert.equal(beforeRes.status, 0, beforeRes.stderr);
+  assert.equal(JSON.parse(beforeRes.stdout).data[0].message_id, 'msg_from_before');
 
   await rm(root, { recursive: true, force: true });
 });
