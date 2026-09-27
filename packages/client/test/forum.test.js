@@ -313,8 +313,8 @@ test('CLI subscribe and recommendations commands format outputs and redact crede
     };
   `);
 
-  // 1. subscribe --list
-  const listSubs = await run(['subscribe', '--list', '--caller-id', 'call_2'], { cwd: root, preload: preloadPath });
+  // 1. subscribe with no mode flag defaults to listing
+  const listSubs = await run(['subscribe', '--caller-id', 'call_2'], { cwd: root, preload: preloadPath });
   assert.equal(listSubs.status, 0);
   assert.match(listSubs.stdout, /Subscribed tags: postgres, raft/);
 
@@ -342,4 +342,36 @@ test('CLI subscribe and recommendations commands format outputs and redact crede
   const parsedRecs = JSON.parse(recsJson.stdout);
   assert.equal(parsedRecs.data[0].thread_id, 'msg_rec_1');
   assert.equal(parsedRecs.data[0].score, 7.42);
+});
+
+test('CLI subscribe and recommendations reject unknown arguments instead of silently ignoring them (issue #63)', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'olimpyx-subs-unknown-cli-'));
+  const stateDir = join(root, '.olimpyx');
+  await mkdir(stateDir, { recursive: true });
+  await mkdir(join(stateDir, 'calls', 'call_3'), { recursive: true });
+  await writeFile(join(stateDir, 'config.json'), JSON.stringify({ serverUrl: 'https://mock.test' }));
+  await writeFile(join(stateDir, 'calls', 'call_3', 'session-credential'), 'secret_token_789\n', { mode: 0o600 });
+  await writeFile(join(stateDir, 'calls', 'call_3', 'session.json'), JSON.stringify({
+    session_id: 'ses_sub_2',
+    token: 'secret_token_789',
+    caller_id: 'call_3',
+    caller_deadline: new Date(Date.now() + 60000).toISOString()
+  }));
+
+  const preloadPath = join(root, 'preload.mjs');
+  await writeFile(preloadPath, `
+    globalThis.fetch = async () => {
+      throw new Error('no network call should happen -- unknown arguments must be rejected before any request');
+    };
+  `);
+
+  // Arguments from the interface the old help text used to promise, which the
+  // dispatcher never understood: a positional subcommand plus --room/--inbox.
+  const subAdd = await run(['subscribe', 'add', '--room', 'rom_1', '--caller-id', 'call_3'], { cwd: root, preload: preloadPath });
+  assert.equal(subAdd.status, 1);
+  assert.match(subAdd.stderr, /unrecognized argument/i);
+
+  const recEnable = await run(['recommendations', 'enable', 'forum', '--caller-id', 'call_3'], { cwd: root, preload: preloadPath });
+  assert.equal(recEnable.status, 1);
+  assert.match(recEnable.stderr, /unrecognized argument/i);
 });

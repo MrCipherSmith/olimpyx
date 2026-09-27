@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { COMMAND_HELP } from '../src/usage.js';
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), '../src/cli.js');
 
@@ -100,7 +102,7 @@ test('column width adapts to the longest command name', async () => {
   assert.ok(recLine, 'recommendations summary line missing');
   // First summary word positions must agree across commands.
   const forumCol = forumLine.indexOf('list', forumLine.indexOf('forum'));
-  const recCol = recLine.indexOf('Manage', recLine.indexOf('recommendations'));
+  const recCol = recLine.indexOf('List', recLine.indexOf('recommendations'));
   assert.equal(forumCol, recCol, 'summary column mismatch -- padding is not aligned');
 });
 
@@ -153,3 +155,101 @@ test('usage is not dumped on the wire; errors stay on stderr', async () => {
   assert.equal(h.stdout, '');
   assert.match(h.stderr, /No help/);
 });
+
+// ---------------------------------------------------------------------------
+// Issue #63: the printed help for `subscribe` and `recommendations` once
+// documented an interface (`add`/`remove`/`set`/`enable`/`disable`
+// subcommands, `--room`/`--inbox`/positional SOURCE) that cli.js's dispatcher
+// never implemented. These two tests derive "what the help promises" from
+// COMMAND_HELP (usage.js) and "what the code actually accepts" from the
+// dispatcher's own source text for that command, then compare the two --
+// mechanically, from the source of truth on each side, rather than by
+// re-typing an expected string that would just encode this fix and drift
+// again the next time either file changes.
+// ---------------------------------------------------------------------------
+
+const cliSource = readFileSync(cli, 'utf8');
+
+// Slices out the `if (command === '<name>') { ... }` dispatch block for one
+// command, by brace-counting from the opening brace. Throws if the marker
+// isn't found, so a future rename of the dispatch shape fails loudly instead
+// of silently comparing against an empty block.
+function dispatchBlock(name) {
+  const marker = `if (command === '${name}') {`;
+  const start = cliSource.indexOf(marker);
+  assert.notEqual(start, -1, `could not find dispatch block for '${name}' in cli.js`);
+  let i = start + marker.length;
+  let depth = 1;
+  while (depth > 0 && i < cliSource.length) {
+    if (cliSource[i] === '{') depth++;
+    else if (cliSource[i] === '}') depth--;
+    i++;
+  }
+  return cliSource.slice(start, i);
+}
+
+// Every `--flag` the implementation actually reads for a command, found by
+// scanning its dispatch block for `option('flag-name')` calls -- the only
+// mechanism cli.js uses to read a named flag.
+function implementedFlags(block) {
+  const flags = new Set();
+  const re = /option\(\s*'([a-z][a-z0-9-]*)'/g;
+  let m;
+  while ((m = re.exec(block))) flags.add(m[1]);
+  return flags;
+}
+
+// Every `--flag` the printed help for a command mentions.
+function documentedFlags(helpText) {
+  const flags = new Set();
+  const re = /--([a-z][a-z0-9-]*)/g;
+  let m;
+  while ((m = re.exec(helpText))) flags.add(m[1]);
+  return flags;
+}
+
+// A bare lowercase word immediately after `olimpyx <command>` in a help line
+// (not a `--flag` and not an ALL-CAPS placeholder like ID/TAG/SOURCE) reads
+// as a positional subcommand keyword -- e.g. `subscribe add --room ID`.
+function claimedSubcommands(helpText, name) {
+  const claimed = new Set();
+  const lineRe = new RegExp(`^olimpyx ${name}\\b(.*)$`, 'gm');
+  let m;
+  while ((m = lineRe.exec(helpText))) {
+    const firstTok = m[1].trim().split(/\s+/)[0] || '';
+    if (/^[a-z][a-z-]*$/.test(firstTok)) claimed.add(firstTok);
+  }
+  return claimed;
+}
+
+for (const name of ['subscribe', 'recommendations']) {
+  test(`help for '${name}' documents exactly the flags the dispatcher reads`, () => {
+    const block = dispatchBlock(name);
+    const implemented = implementedFlags(block);
+    const documented = documentedFlags(COMMAND_HELP[name]);
+    assert.deepEqual(
+      [...documented].sort(),
+      [...implemented].sort(),
+      `'${name}': help flags [${[...documented]}] vs implemented flags [${[...implemented]}] -- ` +
+      `the printed help must list exactly the --flags the code reads via option(...)`
+    );
+  });
+
+  test(`help for '${name}' does not claim a positional subcommand the dispatcher doesn't parse`, () => {
+    const block = dispatchBlock(name);
+    const claimed = claimedSubcommands(COMMAND_HELP[name], name);
+    const dispatcherShiftsPositional = /args\.shift\(\)/.test(block);
+    if (claimed.size > 0) {
+      assert.ok(
+        dispatcherShiftsPositional,
+        `'${name}': help implies subcommand(s) [${[...claimed]}] (e.g. "olimpyx ${name} ${[...claimed][0]} ...") ` +
+        `but the dispatch block never consumes a positional subcommand via args.shift() -- ` +
+        `those arguments would be silently ignored at runtime`
+      );
+    } else {
+      assert.equal(dispatcherShiftsPositional, false,
+        `'${name}': dispatcher consumes a positional subcommand via args.shift() but the help ` +
+        `never documents one -- update COMMAND_HELP to show it`);
+    }
+  });
+}

@@ -225,7 +225,9 @@ async function main() {
     // Explicit activity declaration (F-02). The interactive `init` wizard
     // does its own enrollment and never needs this; this command is for
     // the non-interactive / scripted path or for re-declaring a location
-    // mid-session.
+    // mid-session. Use it when the agent is doing something the server
+    // can't infer (e.g. reading a knowledge card without posting a
+    // card/review, or simply hanging out in a room).
     const sub = args.shift();
     const callerId = option('caller-id');
     if (sub !== 'set') throw new Error('activity actions: set --kind <room|knowledge|lobby|inbox|offline> [--room-id ID] [--knowledge-card-id ID] [--note TEXT]');
@@ -334,21 +336,6 @@ async function main() {
   if (command === 'bootstrap') { const { client } = await activeClient(option('caller-id')); output(await client.bootstrap()); return; }
   if (command === 'rooms') { const q = option('q'); const { client } = await activeClient(option('caller-id')); output(await client.rooms(q ? new URLSearchParams({ q }).toString() : '')); return; }
   if (command === 'inbox') { const callerId = option('caller-id'); const { client } = await activeClient(callerId); const result = await client.inbox(); await broadcastActivity(callerId, { kind: 'inbox', note: '' }); output(result); return; }
-  if (command === 'activity') {
-    // Explicit activity declaration (F-02). Use this when the agent is doing
-    // something the server can't infer (e.g. reading a knowledge card without
-    // posting a card/review, or simply hanging out in a room).
-    const sub = args.shift();
-    const callerId = option('caller-id');
-    if (sub !== 'set') throw new Error('activity actions: set --kind <room|knowledge|lobby|inbox|offline> [--room-id ID] [--knowledge-card-id ID] [--note TEXT]');
-    const kind = option('kind'); const roomId = option('room-id'); const knowledgeCardId = option('knowledge-card-id'); const note = option('note') ?? '';
-    if (!kind) throw new Error('--kind is required');
-    const payload = { kind, note };
-    if (kind === 'room') { if (!roomId) throw new Error('--room-id is required when --kind=room'); payload.room_id = roomId; }
-    if (kind === 'knowledge') { if (!knowledgeCardId) throw new Error('--knowledge-card-id is required when --kind=knowledge'); payload.knowledge_card_id = knowledgeCardId; }
-    const { client } = await activeClient(callerId);
-    output(await client.request('POST', '/v1/sessions/me/activity', payload)); return;
-  }
   if (command === 'knowledge') {
     const sub = args[0] && !args[0].startsWith('--') ? args.shift() : null;
     if (sub === 'card') {
@@ -1101,11 +1088,15 @@ async function main() {
   }
   if (command === 'subscribe') {
     const callerId = option('caller-id');
-    const { client } = await activeClient(callerId);
     const isJson = Boolean(option('json'));
-    const isList = Boolean(option('list'));
     const removeTag = option('remove');
     const tagsRaw = option('tags');
+    // `subscribe`'s help lists exactly these flags; anything left over here
+    // is either a typo or a flag from a stale/wrong mental model of the
+    // command (e.g. `--room`, `add`/`remove` subcommands) -- say so instead
+    // of quietly doing a plain `list`.
+    if (args.length > 0) throw new Error(`subscribe: unrecognized argument(s): ${args.join(' ')}`);
+    const { client } = await activeClient(callerId);
 
     if (removeTag) {
       const result = await client.deleteAgentSubscription(removeTag);
@@ -1140,9 +1131,12 @@ async function main() {
   }
   if (command === 'recommendations') {
     const callerId = option('caller-id');
-    const { client } = await activeClient(callerId);
     const limit = option('limit');
     const isJson = Boolean(option('json'));
+    // Same rationale as `subscribe` above: don't silently ignore a
+    // `enable`/`disable SOURCE` style call that no longer matches reality.
+    if (args.length > 0) throw new Error(`recommendations: unrecognized argument(s): ${args.join(' ')}`);
+    const { client } = await activeClient(callerId);
 
     const result = await client.getRecommendations({ limit, kind: 'threads' });
     if (isJson) {
@@ -1196,7 +1190,6 @@ async function main() {
       // get a redirect hint to `status` so we never accidentally serve stale data.
       const limit = option('limit');
       const wantJson = option('json') === true;
-      const { listOwnerAgents } = await import('./client.js');
       const client = await requireOwnerClient();
       const result = await client.listOwnerAgents({ limit });
       if (wantJson) { output(result); return; }
