@@ -43,6 +43,11 @@ export async function migrate(databaseUrl: string) {
     CREATE TABLE IF NOT EXISTS enrollment_tokens (token_hash text PRIMARY KEY, owner_id text NOT NULL REFERENCES owners(id), expires_at timestamptz NOT NULL, used_at timestamptz);
     CREATE TABLE IF NOT EXISTS agents (id text PRIMARY KEY, owner_id text NOT NULL REFERENCES owners(id), installation_id text NOT NULL, name text NOT NULL, role text NOT NULL, bio text NOT NULL DEFAULT '', interests jsonb NOT NULL DEFAULT '[]', capabilities jsonb NOT NULL DEFAULT '[]', profile_revision integer NOT NULL DEFAULT 1, restricted boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(owner_id, installation_id));
     CREATE TABLE IF NOT EXISTS sessions (id text PRIMARY KEY, agent_id text NOT NULL REFERENCES agents(id), token_hash text UNIQUE NOT NULL, host jsonb NOT NULL, persona_revision integer NOT NULL, expires_at timestamptz NOT NULL, last_heartbeat_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
+    -- issue #51: unlike messages (deduped by client-chosen id) a session has no natural business
+    -- key, so a retry of POST /v1/sessions is recognized only by (agent_id, Idempotency-Key). The
+    -- key is never credential-bearing, so it is safe to persist on the row itself.
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS idempotency_key text;
+    CREATE UNIQUE INDEX IF NOT EXISTS sessions_idempotency_unique ON sessions(agent_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
     CREATE TABLE IF NOT EXISTS rooms (id text PRIMARY KEY, slug text UNIQUE NOT NULL, title text NOT NULL, description text NOT NULL DEFAULT '', creator_type text NOT NULL, creator_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS messages (id text PRIMARY KEY, room_id text NOT NULL REFERENCES rooms(id), sender_type text NOT NULL, sender_id text NOT NULL, sender_name text NOT NULL, recipient_agent_id text REFERENCES agents(id), reply_to_message_id text REFERENCES messages(id), body text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS root_message_id text REFERENCES messages(id);
@@ -620,11 +625,27 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const b = req.body as any;
     if(enforceAuthLimit(reply,authRateLimiter.registration(req.ip)))return;
     if (!b?.email || typeof b.password !== "string" || b.password.length < 12 || !b.display_name) return fail(reply, 422, "validation_error", "Invalid registration");
-    return idem(req, reply, `register:${String(b.email).trim().toLowerCase()}`, async () => {
+    const email = String(b.email).trim().toLowerCase();
+    return idem(req, reply, `register:${email}`, async () => {
+      // issue #51: natural idempotency. The response carries access_token, so the generic
+      // idempotency cache never stores it (credentialBearing, below) and a retry would otherwise
+      // hit the email UNIQUE constraint and come back as a bare 409. Since owners can always mint
+      // a fresh token via /v1/owners/login, the honest fix here is cheaper than for enroll/sessions:
+      // re-verify the password and issue a NEW access_token, exactly like a login would. This must
+      // check the password before returning anything -- otherwise the endpoint becomes a way to
+      // learn whether an email is registered, or to obtain a token for someone else's account by
+      // guessing their email with an empty/arbitrary password.
+      const existing = (await app.pg.query("SELECT id, password_hash, display_name, created_at FROM owners WHERE email=$1", [email])).rows[0];
+      if (existing) {
+        if (!await verifyPassword(b.password, existing.password_hash)) throw Object.assign(new Error("duplicate"), { statusCode: 409 });
+        const raw = token(), expiresAt = new Date(Date.now()+86400000).toISOString();
+        await app.pg.query("INSERT INTO auth_tokens VALUES($1,'owner',$2,'owner',$3,NULL)", [hashToken(raw), existing.id, expiresAt]);
+        return { status: 200, data: { owner: { owner_id: existing.id, email, display_name: existing.display_name, created_at: existing.created_at }, access_token: raw, expires_at: expiresAt } };
+      }
       const ownerId = id("own"); const raw = token(); const expiresAt = new Date(Date.now()+86400000).toISOString(); const client=await app.pg.connect();
-      try { await client.query("BEGIN"); await client.query("INSERT INTO owners(id,email,password_hash,display_name) VALUES($1,$2,$3,$4)", [ownerId,String(b.email).trim().toLowerCase(),await hashPassword(b.password),b.display_name]); await client.query("INSERT INTO auth_tokens VALUES($1,$2,$3,$4,$5,NULL)",[hashToken(raw),"owner",ownerId,"owner",expiresAt]); await client.query("COMMIT"); }
+      try { await client.query("BEGIN"); await client.query("INSERT INTO owners(id,email,password_hash,display_name) VALUES($1,$2,$3,$4)", [ownerId,email,await hashPassword(b.password),b.display_name]); await client.query("INSERT INTO auth_tokens VALUES($1,$2,$3,$4,$5,NULL)",[hashToken(raw),"owner",ownerId,"owner",expiresAt]); await client.query("COMMIT"); }
       catch (e: any) { await client.query("ROLLBACK"); if(e.code==="23505") throw Object.assign(new Error("duplicate"),{statusCode:409}); throw e; } finally { client.release(); }
-      return { status: 201, data: { owner: { owner_id: ownerId,email:String(b.email).trim().toLowerCase(),display_name:b.display_name,created_at:now() },access_token:raw,expires_at:expiresAt } };
+      return { status: 201, data: { owner: { owner_id: ownerId,email,display_name:b.display_name,created_at:now() },access_token:raw,expires_at:expiresAt } };
     });
   });
   app.post("/v1/owners/login", async (req, reply) => { const b=req.body as any;if(enforceAuthLimit(reply,authRateLimiter.login(req.ip,String(b?.email??""))))return; const r=await app.pg.query("SELECT * FROM owners WHERE email=$1",[String(b?.email??"").trim().toLowerCase()]); if(!r.rowCount||!await verifyPassword(String(b?.password??""),r.rows[0].password_hash)) return fail(reply,401,"invalid_credentials","Invalid credentials"); const raw=token(), exp=new Date(Date.now()+86400000).toISOString(); await app.pg.query("INSERT INTO auth_tokens VALUES($1,'owner',$2,'owner',$3,NULL)",[hashToken(raw),r.rows[0].id,exp]); return {data:{owner:{owner_id:r.rows[0].id,email:r.rows[0].email,display_name:r.rows[0].display_name},access_token:raw,expires_at:exp}}; });
@@ -777,30 +798,84 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     }
   });
 
-  app.post("/v1/agents/enroll",async(req,reply)=>{const b=req.body as any;const e=await app.pg.query("SELECT * FROM enrollment_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now()",[hashToken(String(b?.enrollment_token??""))]);if(!e.rowCount)return fail(reply,401,"invalid_enrollment_token","Invalid enrollment token");const ownerId=e.rows[0].owner_id;return idem(req,reply,`enroll:${ownerId}`,async client=>{
+  app.post("/v1/agents/enroll",async(req,reply)=>{const b=req.body as any;
+    // issue #51: look up the token by hash+expiry only (not used_at) so a retry that presents an
+    // already-spent one-time code can still be recognized as belonging to an owner, instead of
+    // failing 401 before idem() ever gets a chance to detect the replay below.
+    const e=await app.pg.query("SELECT owner_id, used_at FROM enrollment_tokens WHERE token_hash=$1 AND expires_at>now()",[hashToken(String(b?.enrollment_token??""))]);
+    if(!e.rowCount)return fail(reply,401,"invalid_enrollment_token","Invalid enrollment token");
+    const ownerId=e.rows[0].owner_id, alreadyUsed=e.rows[0].used_at!==null;
+    return idem(req,reply,`enroll:${ownerId}`,async client=>{
     const aid=id("agt"),raw=token();
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`quota:${ownerId}`]);
+    const replay=async()=>{
+      // The code is already spent -- either by this very call being retried (the response
+      // carries agent_token, so the generic idempotency cache in idem() never stores it and a
+      // retry re-runs work() from scratch), or by a concurrent duplicate holding the same lock a
+      // moment ago. The only way to tell that apart from "someone replaying a stale/foreign code"
+      // is whether this owner already has an agent for this exact installation_id: if so, hand
+      // back that agent instead of creating a second one; otherwise this really is an already-used
+      // (or someone else's) code, same 401 as before.
+      const existing=(await client.query("SELECT id, profile_revision FROM agents WHERE owner_id=$1 AND installation_id=$2",[ownerId,b.installation_id])).rows[0];
+      if(existing)return{status:200,data:{agent:{agent_id:existing.id,profile_revision:existing.profile_revision},agent_token:null,agent_token_status:"already_issued",message:"This installation is already enrolled from an earlier call with this enrollment code. The agent_token was only ever shown once and is not stored in a recoverable form, so it cannot be reissued here; revoke this agent and enroll again under a new installation_id to obtain a fresh credential.",created_at:now()}};
+      throw Object.assign(new Error("Enrollment token already used"),{statusCode:401});
+    };
+    // Natural idempotency (issue #51): a code already spent before we even got here can only be a
+    // replay (see `replay` above) -- checked before assertAgentCapacity so a replay at full
+    // capacity still succeeds instead of failing agent_limit_reached for an agent that already
+    // exists and consumes no extra slot.
+    if(alreadyUsed)return replay();
     await assertAgentCapacity(client,ownerId);
-    const consumed=await client.query("UPDATE enrollment_tokens SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() RETURNING owner_id",[hashToken(b.enrollment_token)]);if(!consumed.rowCount)throw Object.assign(new Error("Enrollment token already used"),{statusCode:401});
-    // Re-enroll from the same installation under the same owner is a no-op
-    // (F-01): surface a structured 409 so the CLI can adopt the existing agent
+    // Still gated on used_at IS NULL so a rejected (capacity-limited) enrollment never consumes
+    // the code (AC-7). A 0-row result here means another request consumed it concurrently between
+    // our lookup above and this UPDATE -- the same replay/foreign-code split applies.
+    const consumed=await client.query("UPDATE enrollment_tokens SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() RETURNING owner_id",[hashToken(b.enrollment_token)]);
+    if(!consumed.rowCount)return replay();
+    // A *different*, still-valid code targeting an installation that already has an agent is not
+    // a replay of anything -- it is a distinct enroll attempt colliding with an existing one
+    // (F-01): keep surfacing the structured 409 so the caller can adopt the existing agent
     // instead of bubbling a UNIQUE-violation as HTTP 500.
     const ins=await client.query("INSERT INTO agents(id,owner_id,installation_id,name,role,bio,interests,capabilities) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (owner_id, installation_id) DO NOTHING RETURNING id",[aid,ownerId,b.installation_id,b.profile.name,b.profile.role,b.profile.bio??"",JSON.stringify(b.profile.interests??[]),JSON.stringify(b.profile.capabilities??[])]);
     if(!ins.rowCount){const existing=(await client.query("SELECT id, profile_revision FROM agents WHERE owner_id=$1 AND installation_id=$2",[ownerId,b.installation_id])).rows[0];return fail(reply,409,"agent_already_enrolled","This installation already has an enrolled agent; adopt the existing one via `olimpyx bootstrap` or rotate the installation id",{details:{agent_id:existing.id,profile_revision:existing.profile_revision}})}
     await client.query("INSERT INTO auth_tokens VALUES($1,'agent',$2,'agent',$3,NULL)",[hashToken(raw),aid,new Date(Date.now()+31536000000).toISOString()]);
     return{status:201,data:{agent:{agent_id:aid,profile_revision:1},agent_token:raw,created_at:now()}}});});
   /** A new session supersedes the oldest active ones beyond the per-agent cap; it never fails for capacity (PRD §3.3). */
-  app.post("/v1/sessions",async(req,reply)=>{const p=await principal(req,reply,["agent"]);if(!p)return;const b=req.body as any;return idem(req,reply,p.id,async()=>{const sid=id("ses"),raw=token(),exp=new Date(Date.now()+86400000).toISOString(),client=await app.pg.connect();
+  app.post("/v1/sessions",async(req,reply)=>{const p=await principal(req,reply,["agent"]);if(!p)return;const b=req.body as any;
+    // idem() has already rejected the request if this header is missing, so by the time work()
+    // below runs it is guaranteed present.
+    const idemKey=req.headers["idempotency-key"] as string;
+    return idem(req,reply,p.id,async()=>{
+    const client=await app.pg.connect();
+    let result:any;
     try{
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`sessions:${p.id}`]);
-      const active=(await client.query("SELECT id FROM sessions WHERE agent_id=$1 AND ended_at IS NULL AND expires_at>now() AND last_heartbeat_at>now()-interval '90 seconds' ORDER BY created_at ASC,id ASC",[p.id])).rows.map(x=>x.id);
-      const excess=active.length-(limits.capacity.sessions_per_agent-1);
-      if(excess>0)await client.query("UPDATE sessions SET ended_at=now(),end_reason='superseded' WHERE id=ANY($1)",[active.slice(0,excess)]);
-      await client.query("INSERT INTO sessions(id,agent_id,token_hash,host,persona_revision,expires_at) VALUES($1,$2,$3,$4,$5,$6)",[sid,p.id,hashToken(raw),JSON.stringify(b.host),b.persona_revision,exp]);
+      // Natural idempotency (issue #51): a session has no business key of its own the way an
+      // agent has installation_id or an owner has email, so a retry is recognized only by
+      // (agent_id, Idempotency-Key). The response carries session_token, so the generic
+      // idempotency cache in idem() never stores it and a retry would otherwise create a second,
+      // possibly capacity-evicting session -- superseding one the caller may still hold.
+      // `live` uses the same rule as the supersede query below and the sessions:<agent> cap
+      // check elsewhere in this file (ended_at IS NULL AND expires_at>now() AND a heartbeat in
+      // the last 90s): a caller that lost the original response must be able to tell "here is
+      // your session" apart from "your session existed but is gone", not just get back an id
+      // that may already be dead.
+      const existing=(await client.query("SELECT id,expires_at,(ended_at IS NULL AND expires_at>now() AND last_heartbeat_at>now()-interval '90 seconds') AS live FROM sessions WHERE agent_id=$1 AND idempotency_key=$2",[p.id,idemKey])).rows[0];
+      if(existing){
+        result={sessionId:existing.id,sessionToken:null,expiresAt:existing.expires_at,live:existing.live};
+      }else{
+        const sid=id("ses"),raw=token(),exp=new Date(Date.now()+86400000).toISOString();
+        const active=(await client.query("SELECT id FROM sessions WHERE agent_id=$1 AND ended_at IS NULL AND expires_at>now() AND last_heartbeat_at>now()-interval '90 seconds' ORDER BY created_at ASC,id ASC",[p.id])).rows.map(x=>x.id);
+        const excess=active.length-(limits.capacity.sessions_per_agent-1);
+        if(excess>0)await client.query("UPDATE sessions SET ended_at=now(),end_reason='superseded' WHERE id=ANY($1)",[active.slice(0,excess)]);
+        await client.query("INSERT INTO sessions(id,agent_id,token_hash,host,persona_revision,expires_at,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7)",[sid,p.id,hashToken(raw),JSON.stringify(b.host),b.persona_revision,exp,idemKey]);
+        result={sessionId:sid,sessionToken:raw,expiresAt:exp};
+      }
       await client.query("COMMIT");
     }catch(e){await client.query("ROLLBACK");throw e}finally{client.release()}
-    const bootstrap=await bootstrapFor(p.id);return{status:201,data:{session_id:sid,session_token:raw,expires_at:exp,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}}});});
+    const bootstrap=await bootstrapFor(p.id);
+    if(result.sessionToken===null)return{status:200,data:{session_id:result.sessionId,session_token:null,session_token_status:"already_issued",live:result.live,message:result.live?"A session was already created by this Idempotency-Key and is still active. The session_token was only ever shown once and is not stored in a recoverable form; if it was lost, ask the owner to stop this agent (which ends the session) and start a new one with a fresh Idempotency-Key.":"A session was already created by this Idempotency-Key but is no longer active (ended, expired, or superseded). Retrying with this same key will not create a new one; start a new session with a fresh Idempotency-Key instead.",expires_at:result.expiresAt,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}};
+    return{status:201,data:{session_id:result.sessionId,session_token:result.sessionToken,expires_at:result.expiresAt,heartbeat_interval_seconds:30,presence_timeout_seconds:90,inbox_cursor:bootstrap.inbox_cursor,bootstrap}}});});
   app.post("/v1/sessions/:sessionId/heartbeat",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET last_heartbeat_at=now() WHERE id=$1",[p.sessionId]);return{data:{session_id:p.sessionId,server_time:now(),next_heartbeat_at:new Date(Date.now()+30000).toISOString()}}});
   app.post("/v1/sessions/:sessionId/end",async(req,reply)=>{const p=await principal(req,reply,["session"]);if(!p)return;if(p.sessionId!==(req.params as any).sessionId)return fail(reply,403,"forbidden","Wrong session");await app.pg.query("UPDATE sessions SET ended_at=now(),end_reason=$2 WHERE id=$1",[p.sessionId,(req.body as any)?.reason??"agent_ended"]);return{data:{session_id:p.sessionId,ended_at:now()}}});
   // Where-am-I indicator (F-02). One row per agent; the city UI shows this when
