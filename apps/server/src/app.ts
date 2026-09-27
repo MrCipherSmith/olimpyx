@@ -962,13 +962,35 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
     const q=req.query as any,limit=boundedLimit(q.limit),roomId=(req.params as any).roomId;
     const isRootOnly = q.root_only === "true" || q.root_only === true;
     const threadId = q.thread_id ? String(q.thread_id) : null;
-    const before = q.before_cursor || q.before || q.after_cursor || q.after ? String(q.before_cursor ?? q.before ?? q.after_cursor ?? q.after) : null;
+    // `before_cursor`/`before` and `after_cursor`/`after` are distinct, published parameters:
+    // one paginates backward (older, exclusive), the other forward (newer, exclusive). Neither
+    // collapses into the other -- doing so is what silently reversed direction before (#52).
+    const beforeCursor = q.before_cursor || q.before ? String(q.before_cursor ?? q.before) : null;
+    const afterCursor = q.after_cursor || q.after ? String(q.after_cursor ?? q.after) : null;
+    if (beforeCursor && afterCursor) {
+      return fail(reply, 400, "bad_request", "Cannot specify both before_cursor and after_cursor");
+    }
+    const cursor = beforeCursor ?? afterCursor;
+    // Direction picks the comparison branch AND the sort order -- not the route branch. Forward
+    // (`after`) must sort ascending so the LIMIT grabs the *next* page adjacent to the cursor,
+    // not the newest rows overall; `next_cursor` then points at the most recent row returned,
+    // so a follow-up `after_cursor=next_cursor` call keeps walking forward.
+    // `null` here means "no cursor was given at all" -- each branch below falls back to its own
+    // pre-existing default order (chronological for a thread, newest-first for a flat/root list)
+    // so a bare, cursor-less call keeps behaving exactly as it did before this fix.
+    const cursorForward = afterCursor !== null ? true : beforeCursor !== null ? false : null;
 
     if (isRootOnly && threadId) {
       return fail(reply, 400, "bad_request", "Cannot specify both root_only and thread_id");
     }
 
     if (threadId) {
+      // A thread's natural reading order is chronological (oldest first); that stays the
+      // default when no cursor is given, exactly as before this fix.
+      const forward = cursorForward ?? true;
+      const comparator = forward ? ">" : "<";
+      const order = forward ? "ASC" : "DESC";
+
       let resolvedThreadId = threadId;
       const targetCheck = await app.pg.query(
         "SELECT id, root_message_id FROM messages WHERE id = $1 AND room_id = $2",
@@ -979,10 +1001,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
         resolvedThreadId = targetCheck.rows[0].root_message_id;
       }
 
-      if (before) {
+      if (cursor) {
         const cursorCheck = await app.pg.query(
           "SELECT id FROM messages WHERE id = $1 AND room_id = $2 AND (id = $3 OR root_message_id = $3)",
-          [before, roomId, resolvedThreadId]
+          [cursor, roomId, resolvedThreadId]
         );
         if (!cursorCheck.rowCount) return fail(reply, 400, "bad_request", "Cursor does not belong to the specified thread");
       }
@@ -990,14 +1012,20 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
       const r = await app.pg.query(
         `SELECT m.* FROM messages m
          WHERE m.room_id = $1 AND (m.id = $2 OR m.root_message_id = $2)
-           AND ($3::text IS NULL OR (m.created_at, m.id) > (SELECT created_at, id FROM messages WHERE id = $3))
-         ORDER BY m.created_at ASC, m.id ASC
+           AND ($3::text IS NULL OR (m.created_at, m.id) ${comparator} (SELECT created_at, id FROM messages WHERE id = $3))
+         ORDER BY m.created_at ${order}, m.id ${order}
          LIMIT $4`,
-        [roomId, resolvedThreadId, before, limit]
+        [roomId, resolvedThreadId, cursor, limit]
       );
       const data = r.rows.map(messageFrom);
       return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };
     }
+
+    // Flat room list and root-only thread list default to newest-first when no cursor is
+    // given, exactly as before this fix.
+    const forward = cursorForward ?? false;
+    const comparator = forward ? ">" : "<";
+    const order = forward ? "ASC" : "DESC";
 
     if (isRootOnly) {
       const r = await app.pg.query(
@@ -1008,10 +1036,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
            FROM messages r WHERE r.root_message_id = m.id
          ) rep ON true
          WHERE m.room_id = $1 AND m.root_message_id IS NULL
-           AND ($2::text IS NULL OR (m.created_at, m.id) < (SELECT created_at, id FROM messages WHERE id = $2))
-         ORDER BY m.created_at DESC, m.id DESC
+           AND ($2::text IS NULL OR (m.created_at, m.id) ${comparator} (SELECT created_at, id FROM messages WHERE id = $2))
+         ORDER BY m.created_at ${order}, m.id ${order}
          LIMIT $3`,
-        [roomId, before, limit]
+        [roomId, cursor, limit]
       );
       const data = r.rows.map(messageFrom);
       return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };
@@ -1019,10 +1047,10 @@ export async function createApp(options: { databaseUrl?: string; env?: Record<st
 
     const r = await app.pg.query(
       `SELECT m.* FROM messages m
-       WHERE m.room_id = $1 AND ($2::text IS NULL OR (m.created_at, m.id) < (SELECT created_at, id FROM messages WHERE id = $2))
-       ORDER BY m.created_at DESC, m.id DESC
+       WHERE m.room_id = $1 AND ($2::text IS NULL OR (m.created_at, m.id) ${comparator} (SELECT created_at, id FROM messages WHERE id = $2))
+       ORDER BY m.created_at ${order}, m.id ${order}
        LIMIT $3`,
-      [roomId, before, limit]
+      [roomId, cursor, limit]
     );
     const data = r.rows.map(messageFrom);
     return { data, page: { next_cursor: data.length === limit ? data.at(-1)!.message_id : null } };

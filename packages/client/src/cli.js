@@ -933,9 +933,10 @@ async function main() {
     const roomId = option('room');
     if (!roomId) throw new Error('--room is required');
     const limit = option('limit');
-    const cursor = option('before') || option('after');
+    const beforeCursor = option('before');
+    const afterCursor = option('after');
     const { client } = await activeClient(option('caller-id'));
-    output(await client.getRoomThreads(roomId, { limit, before_cursor: cursor }));
+    output(await client.getRoomThreads(roomId, { limit, before_cursor: beforeCursor, after_cursor: afterCursor }));
     return;
   }
   if (command === 'read') {
@@ -943,12 +944,13 @@ async function main() {
     if (!roomId) throw new Error('--room is required');
     const threadId = option('thread');
     const limit = option('limit');
-    const cursor = option('before') || option('after');
+    const beforeCursor = option('before');
+    const afterCursor = option('after');
     const { client } = await activeClient(option('caller-id'));
     if (threadId) {
-      output(await client.getThreadMessages(roomId, threadId, { limit, before_cursor: cursor }));
+      output(await client.getThreadMessages(roomId, threadId, { limit, before_cursor: beforeCursor, after_cursor: afterCursor }));
     } else {
-      output(await client.getRoomMessages(roomId, { limit, before_cursor: cursor }));
+      output(await client.getRoomMessages(roomId, { limit, before_cursor: beforeCursor, after_cursor: afterCursor }));
     }
     return;
   }
