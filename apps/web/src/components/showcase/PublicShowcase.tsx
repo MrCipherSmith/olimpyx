@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OlimpyxApi, PublicAgent, PublicKnowledgeCard, PublicMessage, PublicRoom, ShowcaseSnapshot } from '../../lib/api';
-import { messageFrom } from '../../lib/format';
+import { humanizeError } from '../../lib/humanizeError';
 import { empty, type LoadState } from '../../lib/loadState';
 import { screenFor, type Route } from '../../lib/navigation';
 import { initialNetworkStatus, nextNetworkStatus } from '../../lib/networkStatus';
@@ -30,11 +30,12 @@ const guestRoute = (route: Route): Route => (route.view === 'owner' ? { view: 'o
 const NO_AGENTS: readonly PublicAgent[] = [];
 
 export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: () => void }) {
-  const { t } = useT();
+  const { t, i18n } = useT();
   const [snapshot, setSnapshot] = useState<LoadState<ShowcaseSnapshot | null>>(empty(null));
   // The guest city: published rooms only, no Praetorium.
   const rooms = useMemo(() => snapshot.data?.rooms ?? [], [snapshot.data]);
-  const scene = useMemo(() => buildCityScene(rooms), [rooms]);
+  // Landmark labels come from the active locale (cityScene.ts): rebuild on a language switch too.
+  const scene = useMemo(() => buildCityScene(rooms), [rooms, i18n.language]);
   const camera = useRef<CityCameraController | null>(null);
   const { route, navigate, close: closeScreen, dive } = useCityRoute({ buildings: scene.buildings, camera, normalize: guestRoute });
   const [roomMessages, setRoomMessages] = useState<LoadState<PublicMessage[]>>(empty([]));
@@ -47,17 +48,17 @@ export function PublicShowcase({ api, onSignIn }: { api: OlimpyxApi; onSignIn: (
   const load = useCallback(async () => {
     setSnapshot(current => ({ ...current, loading: true, error: null }));
     try { setSnapshot(empty(await api.showcase())); setNetwork(previous => nextNetworkStatus([true], previous)); }
-    catch (error) { setSnapshot(current => ({ ...current, loading: false, error: messageFrom(error) })); setNetwork(previous => nextNetworkStatus([false], previous)); }
+    catch (error) { setSnapshot(current => ({ ...current, loading: false, error: humanizeError(error) })); setNetwork(previous => nextNetworkStatus([false], previous)); }
   }, [api]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { if (!route.roomId || snapshot.data?.rooms.some(room => room.room_id === route.roomId)) { setRoomDetail(empty(null)); return; } let active = true; setRoomDetail({ data: null, loading: true, error: null }); void api.showcaseRoom(route.roomId).then(room => { if (active) setRoomDetail(empty(room)); }).catch(error => { if (active) setRoomDetail({ data: null, loading: false, error: messageFrom(error) }); }); return () => { active = false; }; }, [api, route.roomId, snapshot.data]);
-  useEffect(() => { if (!route.cardId || snapshot.data?.knowledge_cards.some(card => card.card_id === route.cardId)) { setCardDetail(empty(null)); return; } let active = true; setCardDetail({ data: null, loading: true, error: null }); void api.showcaseCard(route.cardId).then(card => { if (active) setCardDetail(empty(card)); }).catch(error => { if (active) setCardDetail({ data: null, loading: false, error: messageFrom(error) }); }); return () => { active = false; }; }, [api, route.cardId, snapshot.data]);
-  useEffect(() => { if (!route.agentId || snapshot.data?.agents.some(agent => agent.agent_id === route.agentId)) { setAgentDetail(empty(null)); return; } let active = true; setAgentDetail({ data: null, loading: true, error: null }); void api.showcaseAgent(route.agentId).then(agent => { if (active) setAgentDetail(empty(agent)); }).catch(error => { if (active) setAgentDetail({ data: null, loading: false, error: messageFrom(error) }); }); return () => { active = false; }; }, [api, route.agentId, snapshot.data]);
+  useEffect(() => { if (!route.roomId || snapshot.data?.rooms.some(room => room.room_id === route.roomId)) { setRoomDetail(empty(null)); return; } let active = true; setRoomDetail({ data: null, loading: true, error: null }); void api.showcaseRoom(route.roomId).then(room => { if (active) setRoomDetail(empty(room)); }).catch(error => { if (active) setRoomDetail({ data: null, loading: false, error: humanizeError(error) }); }); return () => { active = false; }; }, [api, route.roomId, snapshot.data]);
+  useEffect(() => { if (!route.cardId || snapshot.data?.knowledge_cards.some(card => card.card_id === route.cardId)) { setCardDetail(empty(null)); return; } let active = true; setCardDetail({ data: null, loading: true, error: null }); void api.showcaseCard(route.cardId).then(card => { if (active) setCardDetail(empty(card)); }).catch(error => { if (active) setCardDetail({ data: null, loading: false, error: humanizeError(error) }); }); return () => { active = false; }; }, [api, route.cardId, snapshot.data]);
+  useEffect(() => { if (!route.agentId || snapshot.data?.agents.some(agent => agent.agent_id === route.agentId)) { setAgentDetail(empty(null)); return; } let active = true; setAgentDetail({ data: null, loading: true, error: null }); void api.showcaseAgent(route.agentId).then(agent => { if (active) setAgentDetail(empty(agent)); }).catch(error => { if (active) setAgentDetail({ data: null, loading: false, error: humanizeError(error) }); }); return () => { active = false; }; }, [api, route.agentId, snapshot.data]);
   useEffect(() => {
     if (!route.roomId) { setRoomMessages(empty([])); return; }
     let active = true;
     setRoomMessages(current => ({ ...current, loading: true, error: null }));
-    void api.showcaseMessages(route.roomId).then(page => { if (active) setRoomMessages(empty(page.data.slice().reverse())); }).catch(error => { if (active) setRoomMessages({ data: [], loading: false, error: messageFrom(error) }); });
+    void api.showcaseMessages(route.roomId).then(page => { if (active) setRoomMessages(empty(page.data.slice().reverse())); }).catch(error => { if (active) setRoomMessages({ data: [], loading: false, error: humanizeError(error) }); });
     return () => { active = false; };
     // Refetch on the room change or an explicit Refresh only. Refetching when the first snapshot arrives
     // swapped the history for a spinner right after a #message-… anchor had been applied, losing it.

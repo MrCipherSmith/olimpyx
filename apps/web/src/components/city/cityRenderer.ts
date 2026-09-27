@@ -7,6 +7,7 @@
  * Hot-path rules: no shadowBlur (glows are pre-rendered sprites), no per-frame sorting (scene.drawOrder),
  * scratch points instead of fresh objects, and off-screen buildings and labels are culled.
  */
+import { i18n } from '../../i18n';
 import { COS30, SIN30, boxInViewport, footprintScreenBox, worldToScreen, type Camera, type Point, type ScreenBox, type Viewport } from './isometricMath';
 import { matchesFilter, sceneFromBuildings, type CityBuilding, type CityScene } from './cityScene';
 import type { CityPalette } from './cityTokens';
@@ -1116,10 +1117,10 @@ const LABEL_LIFT = 26;
 /** A screen-space rectangle in CSS pixels of the canvas (same edges as a DOMRect). */
 export interface Rect { left: number; top: number; right: number; bottom: number; }
 
-const LANDMARK_SUBLINES: Record<Exclude<CityBuilding['kind'], 'room'>, string> = {
-  library: 'Knowledge',
-  pantheon: 'Agents',
-  praetorium: 'Owner controls',
+const LANDMARK_SUBLINE_KEYS: Record<Exclude<CityBuilding['kind'], 'room'>, string> = {
+  library: 'city.buildingSubline.library',
+  pantheon: 'city.buildingSubline.pantheon',
+  praetorium: 'city.buildingSubline.praetorium',
 };
 
 /**
@@ -1127,7 +1128,7 @@ const LANDMARK_SUBLINES: Record<Exclude<CityBuilding['kind'], 'room'>, string> =
  * returned one for the room; landmarks name the screen they open. Never an invented metric.
  */
 export function cardSubline(building: CityBuilding): string {
-  if (building.kind !== 'room') return LANDMARK_SUBLINES[building.kind];
+  if (building.kind !== 'room') return i18n.t(LANDMARK_SUBLINE_KEYS[building.kind]);
   const name = building.archetype?.nameEn ?? '';
   const count = building.room?.messageCount;
   if (typeof count !== 'number' || !Number.isFinite(count)) return name;

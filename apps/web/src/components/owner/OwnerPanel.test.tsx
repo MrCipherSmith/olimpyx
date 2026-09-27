@@ -112,7 +112,9 @@ describe('OwnerPanel (Praetorium)', () => {
     renderPanel();
     fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Agent not found');
+    // A known error code (`not_found`) is now localized via humanizeError, not shown as the raw server
+    // message: "Not found." is the en dictionary's `errors.not_found` entry.
+    expect(await screen.findByRole('alert')).toHaveTextContent('Not found.');
   });
 
   it('renders per-agent and owner-aggregate usage against limits, with 7/30-day contribution counters and no ranking', async () => {

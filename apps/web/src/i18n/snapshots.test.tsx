@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CityHud, type HudNavItem } from '../components/shell/CityHud';
 import { AuthScreen } from '../components/auth/AuthScreen';
+import { ApiError } from '../lib/auth-session';
 import { initialNetworkStatus } from '../lib/networkStatus';
 import { i18n } from './index';
 
@@ -53,5 +54,18 @@ describe('i18n snapshots — HUD, AuthScreen', () => {
     const onBack = () => {};
     render(<AuthScreen api={{} as never} onAuthenticated={onAuthenticated} onBack={onBack} />);
     expect(screen.getByRole('heading', { name: /Войти в Olimpyx/i })).toBeInTheDocument();
+  });
+
+  it('shows the localized message for an unreachable server, not the raw error text (humanizeError wiring)', async () => {
+    await setLocale('ru');
+    const api = { login: vi.fn().mockRejectedValue(new ApiError('Unable to reach Olimpyx. Check that the server is running.', 0)) };
+    render(<AuthScreen api={api as never} onAuthenticated={() => {}} onBack={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText('Электронная почта'), { target: { value: 'owner@example.test' } });
+    fireEvent.change(screen.getByLabelText('Пароль'), { target: { value: 'long-enough-password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Войти' }));
+
+    expect(await screen.findByText('Нет соединения с сервером.')).toBeInTheDocument();
+    expect(screen.queryByText(/Unable to reach Olimpyx/)).not.toBeInTheDocument();
   });
 });

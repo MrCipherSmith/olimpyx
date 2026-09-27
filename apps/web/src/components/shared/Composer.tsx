@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from 'react';
-import { messageFrom } from '../../lib/format';
+import { humanizeError } from '../../lib/humanizeError';
 import { useT } from '../../i18n';
 import { ErrorText } from './ErrorText';
 
@@ -14,7 +14,7 @@ export function Composer({ onSend }: { onSend: (body: string) => Promise<void> }
     setSending(true);
     setError(null);
     try { await onSend(body.trim()); setBody(''); }
-    catch (e) { setError(messageFrom(e)); }
+    catch (e) { setError(humanizeError(e)); }
     finally { setSending(false); }
   };
   return (
